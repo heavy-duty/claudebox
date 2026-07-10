@@ -1,0 +1,56 @@
+#cloud-config
+users:
+  - name: claude
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+write_files:
+  - path: /home/claude/.claude/CLAUDE.md
+    owner: "claude:claude"
+    permissions: '0644'
+    defer: true
+    content: |
+      # You are running inside a claudebox
+
+      A claudebox is a trust-less, network-isolated, ephemeral VM created by the
+      `claudebox` CLI. Keep this context in mind:
+
+      - **Creds-free by default.** The box starts with no Claude and no git
+        credentials. If you need to authenticate Claude, the operator runs `/login`
+        interactively. For git, the operator adds their own credentials (a PAT or
+        `gh auth login`). Never assume credentials are present; never ask for or
+        store secrets on disk beyond what the operator sets up.
+      - **Isolated.** The box reaches the public internet but nothing on the host or
+        local network. There is no inbound path.
+      - **Disposable.** Nothing here is backed up. State is discarded when the box is
+        removed; the operator persists work via git push and via `claudebox snapshot`.
+      - **Bootstrap runbook.** If the repository you are working in contains a
+        `.claudebox/` folder, read it as your setup runbook — how to install
+        dependencies, start services, template environment files, seed data, and
+        smoke-test — and follow it. It is documentation for you, not a script the
+        host runs.
+package_update: true
+packages:
+  - git
+  - curl
+  - ca-certificates
+  - gnupg
+  - ripgrep
+  - jq
+  - tmux
+  - age
+  - unzip
+  - build-essential
+  - zsh
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker claude
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+  - sudo -u claude bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
+  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.bashrc
+  - chsh -s /usr/bin/zsh claude
+  - sudo -u claude bash -lc 'RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
+  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.zshrc
+  - echo 'set -g mouse on' > /home/claude/.tmux.conf
+  - chown claude:claude /home/claude/.tmux.conf
