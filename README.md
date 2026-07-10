@@ -19,7 +19,7 @@ design rationale.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/claude-hdb/claudebox/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/heavy-duty/claudebox/main/install.sh | bash
 ```
 
 Installs the tree to `~/.local/share/claudebox` and links `claudebox` onto your

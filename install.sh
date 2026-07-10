@@ -6,7 +6,7 @@ set -euo pipefail
 # Downloads the claudebox repo tarball, installs the whole tree under
 # $DEST, and puts a `claudebox` symlink on PATH via $BINDIR.
 
-REPO="${CLAUDEBOX_REPO:-claude-hdb/claudebox}"
+REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
 REF="${CLAUDEBOX_REF:-main}"
 DEST="${CLAUDEBOX_HOME:-$HOME/.local/share/claudebox}"
 BINDIR="${CLAUDEBOX_BIN:-$HOME/.local/bin}"
