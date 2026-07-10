@@ -50,7 +50,6 @@ runcmd:
   - sudo -u claude bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
   - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.bashrc
   - chsh -s /usr/bin/zsh claude
-  - sudo -u claude bash -lc 'RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
   - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.zshrc
   - echo 'set -g mouse on' > /home/claude/.tmux.conf
-  - chown claude:claude /home/claude/.tmux.conf
+  - chown claude:claude /home/claude/.bashrc /home/claude/.zshrc /home/claude/.tmux.conf
