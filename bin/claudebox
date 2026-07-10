@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# claudebox — trust-less, isolated Incus VMs with Claude Code, creds-free.
+#   claudebox new --name <box> [--from <src>[/<snap>]] [--remote r] [--vm|--container]
+#   claudebox shell|down|start|status|rm <box>
+#   claudebox exec <box> -- <cmd...>
+#   claudebox snapshot <box> [label]
+#   claudebox restore <box> <snapshot>
+# Boxes carry NO secrets: log into Claude interactively inside ('claude' then
+# /login). Reuse an authenticated box via 'snapshot' + 'new --from'.
+set -euo pipefail
+
+root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+remote=""; mode="auto"; name=""; from=""; force=0
+cmd="${1:-help}"; shift || true
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --name) name="$2"; shift 2 ;;
+    --from) from="$2"; shift 2 ;;
+    --remote) remote="$2:"; shift 2 ;;
+    --vm) mode=vm; shift ;;
+    --container) mode=container; shift ;;
+    --force) force=1; shift ;;
+    --) shift; args+=("$@"); break ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+die() { echo "claudebox: $*" >&2; exit 1; }
+iname_of() { echo "$remote"claude-"$1"; }
+need_name() {
+  [ "${#args[@]}" -ge 1 ] && [ -n "${args[0]}" ] || die "usage: claudebox $cmd <box>"
+}
+
+pick_mode() {
+  if [ "$mode" != auto ]; then echo "$mode"; return; fi
+  if [ -n "$remote" ] || [ -e /dev/kvm ]; then echo vm; else
+    echo "claudebox: no /dev/kvm — using container mode (weaker isolation, dev/test only)" >&2
+    echo container
+  fi
+}
+
+wait_agent() {
+  local n="$1" i
+  echo "claudebox: waiting for instance agent..."
+  for i in $(seq 1 90); do
+    if incus exec "$n" -- true >/dev/null 2>&1; then return; fi
+    [ "$i" -eq 90 ] && die "instance agent never came up (incus console $n to inspect)"
+    sleep 2
+  done
+}
+
+new() {
+  [ -n "$name" ] || die "usage: claudebox new --name <box> [--from <src>[/<snap>]]"
+  local instance; instance="$(iname_of "$name")"
+  if [ -n "$from" ]; then
+    local src="${from%%/*}" snap="" srcref
+    case "$from" in */*) snap="${from#*/}" ;; esac
+    srcref="$(iname_of "$src")"; [ -n "$snap" ] && srcref="$srcref/$snap"
+    incus copy "$srcref" "$instance"
+    incus start "$instance"
+    wait_agent "$instance"
+    echo "claudebox: cloned $srcref — isolation and Claude auth carry over from the source."
+  else
+    local m extra=(); m="$(pick_mode)"
+    # shellcheck disable=SC2054 # "root,size=60GiB" is a single incus argument
+    if [ "$m" = vm ]; then extra+=(--vm --device root,size=60GiB); else extra+=(--config security.nesting=true); fi
+    incus launch images:debian/13/cloud "$instance" --profile claude-dev \
+      --config cloud-init.user-data="$(cat "$root/cloud-init/user-data.yaml")" \
+      "${extra[@]}"
+    wait_agent "$instance"
+    echo "claudebox: waiting for phase-1 (cloud-init)..."
+    incus exec "$instance" -- cloud-init status --wait
+  fi
+  echo "claudebox: ready — 'claudebox shell $name'. Log into Claude inside: run 'claude' then /login."
+}
+
+case "$cmd" in
+  new)      new ;;
+  snapshot) need_name; label="${args[1]:-manual-$(date +%s)}"; incus snapshot create "$(iname_of "${args[0]}")" "$label"; echo "$label" ;;
+  restore)  need_name; [ -n "${args[1]:-}" ] || die "usage: claudebox restore <box> <snapshot>"; incus restore "$(iname_of "${args[0]}")" "${args[1]}" ;;
+  shell)    need_name; incus exec "$(iname_of "${args[0]}")" -- sudo -u claude -i ;;
+  exec)     need_name; incus exec "$(iname_of "${args[0]}")" -- sudo -u claude -i "${args[@]:1}" ;;
+  down)     need_name; incus stop "$(iname_of "${args[0]}")" ;;
+  start)    need_name; incus start "$(iname_of "${args[0]}")" ;;
+  rm)       need_name; incus delete -f "$(iname_of "${args[0]}")"; echo "claudebox: removed $(iname_of "${args[0]}")" ;;
+  status)   incus list "${remote}claude-" ;;
+  help|*)   sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

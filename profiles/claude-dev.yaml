@@ -1,0 +1,14 @@
+name: claude-dev
+description: Trust-less claudebox (resources + isolated NIC)
+config:
+  limits.cpu: "4"
+  limits.memory: 8GiB
+devices:
+  eth0:
+    type: nic
+    network: claudenet
+    name: eth0
+  root:
+    type: disk
+    pool: default
+    path: /
