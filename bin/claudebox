@@ -27,7 +27,7 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "claudebox: $*" >&2; exit 1; }
-iname_of() { echo "$remote"claude-"$1"; }
+iname_of() { echo "$remote$1"; }   # instance name = box name; claudebox tags them with user.claudebox=1
 need_name() {
   [ "${#args[@]}" -ge 1 ] && [ -n "${args[0]}" ] || die "usage: claudebox $cmd <box>"
 }
@@ -66,6 +66,7 @@ new() {
     # shellcheck disable=SC2054 # "root,size=60GiB" is a single incus argument
     if [ "$m" = vm ]; then extra+=(--vm --device root,size=60GiB); else extra+=(--config security.nesting=true); fi
     incus launch images:debian/13/cloud "$instance" --profile claude-dev \
+      --config user.claudebox=1 \
       --config cloud-init.user-data="$(cat "$root/cloud-init/user-data.yaml")" \
       "${extra[@]}"
     wait_agent "$instance"
@@ -84,6 +85,6 @@ case "$cmd" in
   down)     need_name; incus stop "$(iname_of "${args[0]}")" ;;
   start)    need_name; incus start "$(iname_of "${args[0]}")" ;;
   rm)       need_name; incus delete -f "$(iname_of "${args[0]}")"; echo "claudebox: removed $(iname_of "${args[0]}")" ;;
-  status)   incus list "${remote}claude-" ;;
+  status)   incus list ${remote:+"$remote"} "user.claudebox=1" ;;
   help|*)   sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reverse everything host/setup-host.sh created: all claude-* instances, the
+# Reverse everything host/setup-host.sh created: all claudebox instances, the
 # claudenet network + ACL, the claude-dev profile, and the firewall rules.
 # Usage: ./host/teardown-host.sh [--purge-incus]
 #   --purge-incus  also apt-purge Incus itself (skipped if non-claudebox
@@ -9,14 +9,14 @@ set -euo pipefail
 purge=false
 [ "${1:-}" = "--purge-incus" ] && purge=true
 
-echo "This removes ALL claude-* instances (uncommitted work in them is lost),"
+echo "This removes ALL claudebox instances (uncommitted work in them is lost),"
 echo "the claudenet network/ACL/profile, and the claudebox firewall rules."
 $purge && echo "Incus itself will also be uninstalled (--purge-incus)."
 read -rp "Continue? [y/N] " a
 case "$a" in y|Y) ;; *) echo "aborted"; exit 1 ;; esac
 
 # Instances
-for i in $(incus list -f csv -c n | grep '^claude-' || true); do
+for i in $(incus list "user.claudebox=1" -f csv -c n || true); do
   echo "deleting instance $i"
   incus delete -f "$i"
 done
