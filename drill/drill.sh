@@ -67,12 +67,16 @@ wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
 }
 
 eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
-               # docker reports several addresses across quoted CSV lines.
+               # docker reports several addresses, so never just "the first IP".
+               # Read it from INSIDE the box: 'incus list' name filters are not
+               # regexes (the anchored "^b$" form matched nothing, which is how
+               # A3 went unprobed for three runs), and its CSV quotes multi-
+               # address boxes across lines. 'ip -o' is unambiguous.
                # Retries: the agent answers before DHCP hands out the address.
   local b="$1" ip _i
   for _i in $(seq 1 15); do
-    ip="$(incus list "^$b\$" --format csv --columns 4 | tr -d '"' | tr ',' '\n' \
-          | awk '/\(eth0\)$/ { print $1; exit }')"
+    ip="$(timeout 20 claudebox exec "$b" -- ip -4 -o addr show dev eth0 2>/dev/null \
+          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet") { split($(i+1), a, "/"); print a[1]; exit } }')"
     [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
     sleep 2
   done
@@ -413,15 +417,35 @@ phase "D. Hardening rehearsal — #16's changes, applied live (#15 section B)"
 # The host is disposable, so rehearse the exact changes #16 proposes and watch
 # what breaks. A FAIL here vetoes a piece of #16's design before it is written.
 
-# D1 — dns.mode=none (#15 B3): must kill sibling resolution, must NOT kill egress
+# D1 — dns.mode=none (#15 B3): must kill sibling resolution, must NOT kill egress.
+# Runs 2 and 3 DISAGREED on the egress half (broken, then intact) — a verdict
+# that flips is a verdict you cannot design on. Setting dns.mode restarts the
+# network's dnsmasq, so a probe fired immediately can catch it mid-restart.
+# Distinguish TRANSIENT (recovers) from BROKEN (still dead after 30s), and say so.
 if incus network set claudenet dns.mode=none 2>/dev/null; then
   sleep 2
   claudebox exec archive -- getent hosts peer.incus >/dev/null 2>&1 \
     && { no "dns.mode=none did not stop sibling resolution"; aud "B3 dns.mode=none: does NOT close the leak"; } \
     || { ok "dns.mode=none: sibling names no longer resolve"; aud "B3 dns.mode=none: closes the enumeration leak"; }
-  claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
-    && { ok "dns.mode=none: public egress still works"; aud "B3 egress under dns.mode=none: intact — safe to ship"; } \
-    || { no "dns.mode=none BROKE public DNS — #16 cannot ship it as-is"; aud "B3 egress under dns.mode=none: BROKEN — design veto"; }
+
+  if claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null; then
+    ok "dns.mode=none: public egress still works, immediately"
+    aud "B3 egress under dns.mode=none: intact, no outage window"
+  else
+    settled=0
+    for _i in $(seq 1 6); do
+      sleep 5
+      claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
+        && { settled=1; break; }
+    done
+    if [ "$settled" = 1 ]; then
+      note "dns.mode=none caused a TRANSIENT DNS outage (dnsmasq restart), recovered within 30s"
+      aud "B3 egress under dns.mode=none: recovers after a brief outage — shippable, but #16 must not probe DNS mid-restart (this is what made runs 2/3 disagree)"
+    else
+      no "dns.mode=none BROKE public DNS and it did not recover in 30s — #16 cannot ship it as-is"
+      aud "B3 egress under dns.mode=none: BROKEN, no recovery — design veto"
+    fi
+  fi
 else
   no "incus rejected dns.mode=none on claudenet"
   aud "B3 dns.mode=none: REJECTED by incus — #16 needs another mechanism"
@@ -435,13 +459,17 @@ if incus profile device set claude-dev eth0 security.mac_filtering=true security
   claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
     && { ok "mac+ipv4 filtering on: the box still reaches the internet"; aud "B5 L2 filtering: box networking intact — safe for the claude workload"; } \
     || { no "mac+ipv4 filtering BROKE the box's networking"; aud "B5 L2 filtering: BREAKS the box — design veto"; }
-  if claudebox exec archive -- docker info >/dev/null 2>&1; then
-    ok "…and in-box Docker still works under ipv4_filtering"
-    aud "B5 in-box docker under filtering: fine (NAT hides behind eth0, as #12 argued)"
+  # 'docker info' as the claude user needs the docker group, which a fresh exec
+  # session may not have picked up; sudo is the honest probe of the DAEMON.
+  if claudebox exec archive -- sudo docker run --rm alpine:latest true >/dev/null 2>&1; then
+    ok "…and in-box Docker still pulls and runs a container under ipv4_filtering"
+    aud "B5 in-box docker under filtering: WORKS — pulls + runs (NAT hides behind eth0, as #12 argued)"
+  elif claudebox exec archive -- sudo docker info >/dev/null 2>&1; then
+    note "dockerd is up under filtering but could not pull/run a container — check egress from docker0"
+    aud "B5 in-box docker under filtering: daemon up, container run FAILED — #16 must check docker0 egress"
   else
-    note "in-box docker not confirmed under filtering ('docker info' failed)"
-    aud "B5 in-box docker under filtering: UNVERIFIED here"
-    inf "dockerd: $(timeout 30 claudebox incus archive -- exec {} -- systemctl is-active docker 2>&1 | grep -v '^claudebox:' | tail -1 | cut -c1-80)"
+    note "in-box Docker daemon is not running at all (so filtering is not what broke it)"
+    aud "B5 in-box docker under filtering: UNVERIFIED — dockerd not running ($(timeout 30 claudebox incus archive -- exec {} -- systemctl is-active docker 2>&1 | grep -v '^claudebox:' | tail -1))"
   fi
 else
   no "incus rejected security filtering on the profile NIC"
