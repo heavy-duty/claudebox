@@ -25,6 +25,12 @@ and profile mutations stay applied with them).
 
 Exit 0 means every check passed. Roughly 20 minutes, most of it the cold box.
 
+**Iterating on the drill?** Read [RUNS.md](RUNS.md) first — it is the run log:
+what the audit has answered so far, the bugs the drill has found in claudebox,
+the traps this script has already fallen into (every one cost a run), how to
+diagnose a stall, and how to run a single probe by hand instead of paying for a
+whole run.
+
 ## Why it exists
 
 The repo has no tests and no CI, and the CLI is a shell script that shells out to
