@@ -69,6 +69,12 @@ Read this before adding a probe. Every one of these cost a run.
 7. **`claudebox exec` is `sudo -u claude -i`** — a *login zsh* with oh-my-zsh.
    Fine for a human, needless machinery for a probe, and one more thing that
    can hold an fd. Probes use `incus exec` directly.
+8. **Clean before you set up, not after.** `setup-host.sh` reconfigures the
+   network's ACLs, and a previous run's boxes are still *attached* to that
+   network — `incus network set` then has to push the change onto every live
+   NIC. An aborted run also leaves the D-phase mutations (`dns.mode=none`, NIC
+   filtering) in place, so setup converges against a moving target. Delete the
+   boxes and revert the mutations **first**.
 
 ## Diagnosing a stall
 
@@ -112,6 +118,7 @@ No listener is needed, and none should be started: see trap 3.
 | 3 | 48/49 | trap 4 — `eth0_ip` never matched, so A3 again unprobed. B3 now read *intact*, contradicting run 2 |
 | 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
 | 5 | stalled in host setup | trap 6 — silence through apt/sudo |
+| 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup, so setup reconfigured claudenet's ACLs while run 4's boxes were still attached to it |
 
 **The instrument has been less reliable than the thing it measures.** Four of
 five runs died on drill plumbing, not on claudebox. That is worth stating

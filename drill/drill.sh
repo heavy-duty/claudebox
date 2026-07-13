@@ -191,19 +191,43 @@ fi
 
 export PATH="$HOME/.local/bin:$PATH"
 KEEP="${KEEP:-0}"
-inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
-~/.local/share/claudebox/host/setup-host.sh || { echo "setup-host failed inside the group"; exit 1; }
-inf "host setup complete"
 
-# Re-runnable: clear anything a previous drill left behind. One name at a
-# time — 'incus delete -f a b c' aborts at the first MISSING name, which is
-# how run 2 inherited run 1's boxes and cascaded five false FAILs.
+# CLEAN BEFORE SETUP, not after. setup-host.sh reconfigures the network's ACLs,
+# and a previous run's boxes are still ATTACHED to that network — 'incus network
+# set' then has to push the change onto every live NIC, which is how run 6
+# stalled. An aborted run also leaves the D-phase mutations (dns.mode=none, NIC
+# filtering) in place, so setup would be converging against a moving target.
+# Take the boxes down and revert the mutations FIRST; then the host is a
+# clean-ish slate and setup-host is the no-op it should be.
+inf "clearing anything a previous run left behind…"
+# One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
+# which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
 for n in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
-  incus delete -f "$n" >/dev/null 2>&1
+  timeout -k 5 60 incus delete -f "$n" >/dev/null 2>&1
 done
-incus network unset claudenet dns.mode 2>/dev/null
-incus profile device unset claude-dev eth0 security.mac_filtering 2>/dev/null
-incus profile device unset claude-dev eth0 security.ipv4_filtering 2>/dev/null
+if incus network show claudenet >/dev/null 2>&1; then
+  timeout -k 5 30 incus network unset claudenet dns.mode >/dev/null 2>&1
+fi
+if incus profile show claude-dev >/dev/null 2>&1; then
+  timeout -k 5 30 incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
+  timeout -k 5 30 incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
+fi
+left="$(incus list --format csv --columns n 2>/dev/null | tr '\n' ' ')"
+[ -n "$left" ] && inf "instances still on this host (not ours, left alone): $left"
+
+inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
+if ! timeout -k 10 300 ~/.local/share/claudebox/host/setup-host.sh; then
+  echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
+  echo "  it should take seconds on a host that already has incus. usual causes:" >&2
+  echo "    · instances still attached to claudenet while its ACLs are reconfigured" >&2
+  echo "        incus list" >&2
+  echo "    · the firewall unit not completing" >&2
+  echo "        systemctl status claudebox-firewall.service --no-pager" >&2
+  echo "    · the incus daemon wedged by an earlier aborted run" >&2
+  echo "        systemctl status incus --no-pager; journalctl -u incus -n 30 --no-pager" >&2
+  exit 1
+fi
+inf "host setup complete"
 
 # A real server has room for the production profile (8GiB/4cpu), and drilling the
 # real profile is worth more than drilling a shrunken one. Only shrink if we must.
