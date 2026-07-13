@@ -1,0 +1,131 @@
+# Drill run log
+
+What the drill has actually found, what has broken *in the drill itself*, and
+how to diagnose the next stall without starting from zero. Append a section per
+run; keep the traps table current — it is the part that saves time.
+
+The audit this feeds is [#15](https://github.com/heavy-duty/claudebox/issues/15).
+
+## Where the audit stands
+
+| Probe | Answer | Run |
+| --- | --- | --- |
+| A1/A5 egress + gateway DNS | **PASS** | 2, 3, 4 |
+| A2 box → host | **dropped** | 2, 3, 4 |
+| A2 box → RFC1918 | **dropped** | 2, 3, 4 |
+| **A3 sibling isolation** | ⏳ **still unanswered** — blocked by a drill bug in every run so far | — |
+| A4 DNS enumeration | **LEAKS** — a box resolves its sibling by name (as #12 predicted) | 2, 3, 4 |
+| A6 IPv6 off | `none` ✓ | 2, 3, 4 |
+| A7 inbound host → box | **dropped** | 3, 4 |
+| B1 `@internal` on a bridge ACL | **REJECTED** — `Unsupported nftables subject` ⇒ #16 derives the subnet | 2, 3 |
+| B2 `incus copy` preserves `user.*` | **YES** ⇒ #17's metadata design holds | 2, 3, 4 |
+| B3 `dns.mode=none` | closes the leak; **egress verdict FLIPPED between runs** (see below) | 2, 3 |
+| B4 `config get` on unset key | **empty + exit 0** ⇒ #17 must use `${var:-}`, never `\|\|` | 2, 3, 4 |
+| B5 L2 filtering | box networking **intact**; in-box docker unverified | 2, 3 |
+
+**A3 is the whole point and it has never fired.** It is the one claim #12 could
+not verify from a code reading. Until it is answered, #16 does not know whether
+it is writing a *formalization* or a *fix*.
+
+## Findings in claudebox (not in the drill)
+
+| Finding | Status |
+| --- | --- |
+| `setup-host.sh` called `nft` but a stock Debian 13 cloud image ships neither nftables nor UFW — host setup died on a fresh cloud host | **fixed** (setup-host installs it) |
+| `claudebox exec box -- claude …` — the help's own example — failed: the binary is in `~/.local/bin`, but cloud-init exported PATH only in `.bashrc`/`.zshrc`, which the non-interactive shell behind `exec` never reads (login shell is zsh, so even `sudo -i` misses both) | **fixed** (symlink into `/usr/local/bin`) |
+| Cold mint takes **~95s**, not the ~10 min the docs claim — consistently. Either the host is fast, or `cloud-init status --wait` returns before `runcmd` finishes (which would hand over boxes whose installs are still running) | **open** — worth its own issue if run 6 shows cloud-init mid-flight |
+
+## Traps this script has already fallen into
+
+Read this before adding a probe. Every one of these cost a run.
+
+1. **`set -o pipefail` breaks refusal checks.** Half the drill is
+   `claudebox <refusal> 2>&1 | grep -q 'text'`. The refusal exits 1/2 *by
+   design*, and `grep -q` SIGPIPEs the left side when it matches early. Under
+   pipefail both become false FAILs. The pipeline's verdict must be grep's
+   alone — hence `set -u` and no pipefail.
+2. **`$( )` waits for stdout to CLOSE, not for the command to exit.** A
+   grandchild inheriting an `incus exec` session's stdout holds the
+   substitution open forever, and `timeout` does *not* save you: it kills the
+   wrapper, not the process holding the pipe. Use `in_box`/`box_curl`, which
+   talk to `incus exec` directly, pin stdin to `/dev/null`, and land output in
+   a file rather than a pipe.
+3. **Never start a background process inside a box.** Same mechanism as (2),
+   and it is why the drill now runs **no listener anywhere**. It does not need
+   one: `curl` exit `7` (refused) means the packet *arrived*, `28` (timeout)
+   means it was *dropped*. A closed port answers the question.
+4. **`incus list` name filters are not regexes.** `incus list "^peer$"` matches
+   nothing and returns empty — silently. This is how A3 went unprobed for
+   three runs. Read addresses from inside the box (`ip -4 -o addr show dev
+   eth0`), not out of `incus list` CSV (which also quotes multi-address boxes
+   across lines).
+5. **`incus delete -f a b c` aborts at the first MISSING name.** One interrupted
+   run then poisons the next: stale boxes survive cleanup and cascade into
+   half a dozen unrelated FAILs. Delete one name at a time.
+6. **`apt-get -qq … >/dev/null` hides both a sudo prompt and the apt lock.**
+   `apt-daily`/`unattended-upgrades` hold the lock on a cloud image and apt
+   waits in complete silence. Pre-authorize sudo, set `DPkg::Lock::Timeout`,
+   and narrate.
+7. **`claudebox exec` is `sudo -u claude -i`** — a *login zsh* with oh-my-zsh.
+   Fine for a human, needless machinery for a probe, and one more thing that
+   can hold an fd. Probes use `incus exec` directly.
+
+## Diagnosing a stall
+
+The drill narrates every long step. If it goes quiet, open a second terminal:
+
+```sh
+# what is actually running / blocked?
+ps -eo pid,etimes,stat,args | grep -Ev grep | grep -E 'apt|dpkg|incus|setup-host|sudo|curl'
+
+# apt lock held by a background upgrade? (the classic silent stall)
+sudo fuser -v /var/lib/dpkg/lock-frontend
+systemctl status unattended-upgrades apt-daily.service
+
+# incus itself wedged?
+incus list
+journalctl -u incus --no-pager -n 30
+```
+
+## Running one probe by hand
+
+Nothing in the audit requires the whole drill. To answer **A3** on a host that
+already has two boxes up (`archive` and `peer`):
+
+```sh
+PEER_IP=$(timeout 20 incus exec peer -- ip -4 -o addr show dev eth0 \
+          | awk '{split($4,a,"/"); print a[1]}')
+timeout 30 incus exec archive -- curl -sS -m 5 -o /dev/null "http://$PEER_IP:8088"
+echo "curl exit: $?"    # 28 = dropped (isolated) · 7 = refused (it ARRIVED) · 0 = connected
+timeout 30 incus exec archive -- ping -c1 -W2 "$PEER_IP"
+echo "ping exit: $?"    # 0 = ICMP replies — isolation is partial at best
+```
+
+No listener is needed, and none should be started: see trap 3.
+
+## Run history
+
+| Run | Result | What it cost |
+| --- | --- | --- |
+| 1 | hung at C7; ~9 false FAILs | traps 1, 2, 4 — pipefail, the exec-pty hang, the DHCP race |
+| 2 | 42/49 | trap 5 — an interrupted run 1 left boxes behind, cascading 5 FAILs. Found the `claude`-on-PATH bug. Phase D delivered B1 (`@internal` rejected) and a B3 reading of *broken* |
+| 3 | 48/49 | trap 4 — `eth0_ip` never matched, so A3 again unprobed. B3 now read *intact*, contradicting run 2 |
+| 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
+| 5 | stalled in host setup | trap 6 — silence through apt/sudo |
+
+**The instrument has been less reliable than the thing it measures.** Four of
+five runs died on drill plumbing, not on claudebox. That is worth stating
+plainly: if a probe can be answered by hand (see above), answer it by hand and
+move on rather than paying for another full run.
+
+### The B3 flip — a lesson worth keeping
+
+Run 2 said `dns.mode=none` **broke** egress; run 3 said it was **intact**. Both
+probed ~2s after setting the key, and setting `dns.mode` restarts the network's
+dnsmasq — so run 2 caught the restart window and run 3 missed it. A design veto
+was posted to #16 on the strength of run 2, then retracted.
+
+**A verdict drawn from one observation of a system with restart semantics is not
+a verdict.** The probe now distinguishes *transient* (recovers within 30s) from
+*broken* (does not), and any test #16 ships must tolerate that window rather
+than race it.
