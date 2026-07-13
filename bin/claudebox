@@ -1,38 +1,77 @@
 #!/usr/bin/env bash
 # claudebox — trust-less, isolated Incus VMs with Claude Code, creds-free.
-# The help text lives in usage()/help_cmd(), not in this comment.
+# The command surface is the CMDS table below: it is the single source of truth
+# for what exists, what it looks like, what the help says, and what runs. The
+# help cannot drift from the code, because it is rendered from the same rows.
 set -euo pipefail
 
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 remote=""; mode="auto"; name=""; from=""; force=0; json=0; want_help=0
+inst=""   # the resolved Incus instance, set by the 'box' precondition
 
 die() { echo "claudebox: $*" >&2; exit 1; }         # 1 = it went wrong
 usage_error() { echo "claudebox: $*" >&2; echo "try 'claudebox help'." >&2; exit 2; }  # 2 = you asked wrong
 version() { echo "claudebox $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)"; }
 
-COMMANDS="new list info shell exec snapshot restore down start rm status help"
-is_command() { case " $COMMANDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+# ---------------------------------------------------------------------------
+# The command table.
+#
+#   verb ^ synopsis args ^ preconditions ^ one-line summary ^ action ^ ok message
+#
+# Fields are ^-separated because a synopsis may contain '|' ([--vm|--container]).
+#
+# preconditions (comma-separated):
+#   box      first positional is a box: resolve it, and REFUSE if the instance
+#            isn't tagged user.claudebox=1 — the boundary, enforced, not assumed
+#   arg2     a second positional is required
+#   stopped  the box must not be running
+#   confirm  destructive: prompt unless --force
+#
+# action:
+#   incus:<subcommand>   run `incus <subcommand> <instance> [rest...]`
+#   fn:<function>        call a shell function (it has real work to do)
+#
+# ok message: printed on success; {} = the box, {1} = the second positional.
+#
+# Adding a thin verb is one row. If a request can't be expressed as a row and
+# doesn't enforce a claudebox invariant, it is incus's job, not ours — that is
+# what `claudebox incus` is for.
+CMDS=(
+  "new^--name <box> [--from <src>[/<snap>]] [--vm|--container]^^Mint a box: fresh from cloud-init, or --from an existing box/snapshot^fn:cmd_new^"
+  "list^[--json]^^List your boxes^fn:cmd_list^"
+  "info^<box> [--json]^box^One box: state, type, IP, and its snapshot labels^fn:cmd_info^"
+  "shell^<box>^box^Open a shell in a box, as the claude user^fn:cmd_shell^"
+  "exec^<box> -- <cmd...>^box^Run a command inside a box^fn:cmd_exec^"
+  "snapshot^<box> [<label>]^box^Checkpoint a box (label defaults to manual-<epoch>)^fn:cmd_snapshot^"
+  "restore^<box> <snapshot>^box,arg2^Roll a box back to one of its snapshots^incus:restore^restored {} to {1}"
+  "rename^<box> <new-name>^box,arg2,stopped^Rename a box (it must be stopped first)^incus:rename^renamed {} to {1}"
+  "down^<box>^box^Stop a box, keeping its state ('start' resumes it)^incus:stop^stopped {}"
+  "start^<box>^box^Start a stopped box^incus:start^started {}"
+  "rm^<box> [--force]^box,confirm^Delete a box and its snapshots — irreversible, and it asks first^incus:delete -f^removed {}"
+  "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
+  "status^^^Deprecated alias for 'list'^fn:cmd_status^"
+  "help^[<command>]^^This help, or 'claudebox help <command>' for one command^fn:cmd_help^"
+)
 
-synopsis_of() {
-  case "$1" in
-    new)      echo "claudebox new --name <box> [--from <src>[/<snap>]] [--vm|--container]" ;;
-    list)     echo "claudebox list [--json]" ;;
-    info)     echo "claudebox info <box> [--json]" ;;
-    shell)    echo "claudebox shell <box>" ;;
-    exec)     echo "claudebox exec <box> -- <cmd...>" ;;
-    snapshot) echo "claudebox snapshot <box> [<label>]" ;;
-    restore)  echo "claudebox restore <box> <snapshot>" ;;
-    down)     echo "claudebox down <box>" ;;
-    start)    echo "claudebox start <box>" ;;
-    rm)       echo "claudebox rm <box> [--force]" ;;
-    status)   echo "claudebox status" ;;
-    help)     echo "claudebox help [<command>]" ;;
+cmd_row() { local r; for r in "${CMDS[@]}"; do case "$r" in "$1^"*) echo "$r"; return 0 ;; esac; done; return 1; }
+verbs()   { local r; for r in "${CMDS[@]}"; do echo "${r%%^*}"; done; }
+is_command() { cmd_row "$1" >/dev/null 2>&1; }
+# locals matter here: dispatch holds $pre/$action/$ok, and field() is called from
+# error paths inside it — a global read would clobber the row being dispatched.
+field() {
+  local r f_syn f_pre f_sum f_act f_ok
+  r="$(cmd_row "$1")" || return 1
+  IFS='^' read -r _ f_syn f_pre f_sum f_act f_ok <<<"$r"
+  case "$2" in
+    syn) echo "$f_syn" ;; pre) echo "$f_pre" ;; sum) echo "$f_sum" ;;
+    act) echo "$f_act" ;; ok) echo "$f_ok" ;;
   esac
 }
+synopsis_of() { local s; s="$(field "$1" syn)"; echo "claudebox $1${s:+ $s}"; }
 
 # Nearest command by edit distance — a typo should point somewhere, not just fail.
 suggest() {
-  printf '%s' "$COMMANDS" | tr ' ' '\n' | awk -v w="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
+  verbs | awk -v w="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
     function dist(a, b,   la, lb, i, j, c, prev, cur) {
       la = length(a); lb = length(b)
       for (j = 0; j <= lb; j++) prev[j] = j
@@ -72,18 +111,13 @@ USAGE
   claudebox <command> [<args>] [options]
 
 COMMANDS
-  new        Mint a box: fresh from cloud-init, or --from an existing box/snapshot
-  list       List your boxes
-  info       One box: state, type, IP, and its snapshot labels
-  shell      Open a shell in a box, as the claude user
-  exec       Run a command inside a box
-  snapshot   Checkpoint a box (label defaults to manual-<epoch>)
-  restore    Roll a box back to one of its snapshots
-  down       Stop a box, keeping its state ('start' resumes it)
-  start      Start a stopped box
-  rm         Delete a box and its snapshots — irreversible, and it asks first
-  status     Deprecated alias for 'list'
-  help       This help, or 'claudebox help <command>' for one command
+EOF
+  local r v sum
+  for r in "${CMDS[@]}"; do
+    IFS='^' read -r v _ _ sum _ _ <<<"$r"
+    printf '  %-9s %s\n' "$v" "$sum"
+  done
+  cat <<'EOF'
 
 OPTIONS
   --name <box>          Name for the new box                          (new)
@@ -115,6 +149,9 @@ EXAMPLES
   # run something without opening a shell
   claudebox exec work -- git -C project pull
 
+  # anything claudebox doesn't wrap: boxes are plain Incus instances
+  claudebox incus work -- config show
+
 EXIT STATUS
   0  ok
   1  it went wrong (Incus failed, no such box, aborted at a prompt)
@@ -126,10 +163,16 @@ THE MODEL
   secret. A box reaches the public internet and nothing else — there is no
   inbound path. Destroying a box loses nothing you didn't push.
 
+  claudebox owns a command when it must enforce something Incus cannot see: the
+  user.claudebox=1 boundary, the isolation stack, or the creds-free snapshot
+  workflow. Everything else is Incus's job — and 'claudebox incus' is the door.
+
   Docs: https://github.com/heavy-duty/claudebox
 EOF
 }
 
+# The synopsis and the summary come from the table; only prose lives here, and
+# only where a command has something to say beyond its summary.
 help_cmd() {
   echo "usage: $(synopsis_of "$1")"
   echo
@@ -201,17 +244,15 @@ that snapshot is lost. 'claudebox info <box>' lists the labels.
   claudebox restore work authed
 EOF
 ;;
-    down) cat <<'EOF'
-Stop a box. Its disk and state are kept — 'claudebox start' resumes it, Claude
-login and all.
+    rename) cat <<'EOF'
+Rename a box. Incus cannot rename a running instance, so stop it first:
 
   claudebox down work
-EOF
-;;
-    start) cat <<'EOF'
-Start a stopped box.
+  claudebox rename work archive
+  claudebox start archive
 
-  claudebox start work
+Snapshots and Claude auth follow the box; anything referring to the old name by
+hand (a --from line, a script) does not.
 EOF
 ;;
     rm) cat <<'EOF'
@@ -221,6 +262,25 @@ confirmation first; --force (-f) skips the prompt. With no TTY to confirm on
 
   claudebox rm work
   claudebox rm work --force
+EOF
+;;
+    incus) cat <<'EOF'
+The door out. claudebox wraps the box lifecycle and the isolation model, not
+all of Incus — so when you need something it doesn't wrap, run Incus through
+here and keep the safety rail that matters: the box name is resolved and
+checked against the user.claudebox=1 tag, so you cannot aim it at an instance
+claudebox didn't mint.
+
+Everything after -- is passed to incus verbatim. A literal {} is replaced with
+the resolved instance name; with no {}, the instance is appended at the end.
+The command that will run is echoed before it runs.
+
+  claudebox incus work -- config show
+  claudebox incus work -- config device add {} extra disk source=/data path=/data
+
+Changing the profile, the network, a device or a security.* key can take a box
+outside the isolation stack. claudebox warns and then does as you asked — from
+there, the trust boundary is yours to keep.
 EOF
 ;;
     status) cat <<'EOF'
@@ -233,9 +293,10 @@ EOF
 Print the general help, or the help for one command.
 
   claudebox help
-  claudebox help new
+  claudebox help rename
 EOF
 ;;
+    *) field "$1" sum ;;   # no prose: the table's summary is the help
   esac
 }
 
@@ -269,8 +330,8 @@ while [ $# -gt 0 ]; do
     # An unrecognized flag used to be swallowed as a positional — so a typo'd
     # --labl silently became a snapshot's label. Say so instead.
     -*)
-      if [ "$cmd" = exec ]; then
-        usage_error "unknown option: $1 — a command's own flags go after --, as in 'claudebox exec <box> -- <cmd...>'"
+      if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
+        usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
       usage_error "unknown option: $1 (see 'claudebox help $cmd')" ;;
     *) args+=("$1"); shift ;;
@@ -279,9 +340,38 @@ done
 
 if [ "$want_help" -eq 1 ]; then show_help "$cmd"; exit 0; fi
 
-iname_of() { echo "$remote$1"; }   # instance name = box name; claudebox tags them with user.claudebox=1
+# --- preconditions ---------------------------------------------------------
+
+iname_of() { echo "$remote$1"; }   # instance name = box name
+
+# The boundary, enforced: a box is an Incus instance WE tagged. Anything else is
+# somebody's VM, and claudebox will not stop, rename or delete it by accident.
+resolve_box() {
+  local box="$1" i tag
+  i="$(iname_of "$box")"
+  tag="$(incus config get "$i" user.claudebox 2>/dev/null || true)"
+  [ "$tag" = "1" ] || die "no such box: $box (see 'claudebox list')"
+  echo "$i"
+}
+
+box_state() { incus list "$1" --format csv --columns s 2>/dev/null | head -n1; }
+
+require_stopped() {
+  local i="$1" box="$2" st; st="$(box_state "$i")"
+  case "$st" in
+    STOPPED|Stopped|stopped) return 0 ;;
+    *) die "box '$box' is ${st:-not stopped} — Incus needs it stopped for this. Stop it: claudebox down $box" ;;
+  esac
+}
+
 need_name() {
   if [ "${#args[@]}" -lt 1 ] || [ -z "${args[0]}" ]; then
+    usage_error "usage: $(synopsis_of "$cmd")"
+  fi
+}
+
+need_arg2() {
+  if [ "${#args[@]}" -lt 2 ] || [ -z "${args[1]}" ]; then
     usage_error "usage: $(synopsis_of "$cmd")"
   fi
 }
@@ -294,6 +384,8 @@ confirm() {   # $1 = prompt. --force, or a TTY to ask on, or we refuse.
   read -r reply
   case "$reply" in y|Y|yes|YES|Yes) return 0 ;; *) die "aborted." ;; esac
 }
+
+# --- commands with real work -----------------------------------------------
 
 pick_mode() {
   if [ "$mode" != auto ]; then echo "$mode"; return; fi
@@ -313,8 +405,8 @@ wait_agent() {
   done
 }
 
-new() {
-  [ -n "$name" ] || die "usage: claudebox new --name <box> [--from <src>[/<snap>]]"
+cmd_new() {
+  [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
   local instance; instance="$(iname_of "$name")"
   if [ -n "$from" ]; then
     local src="${from%%/*}" snap="" srcref
@@ -350,7 +442,7 @@ boxes_csv() {
 }
 
 box_ipv4() {   # first address only; strips Incus's " (iface)" suffix. "-" if none.
-  incus list "$(iname_of "$1")" --format csv --columns 4 2>/dev/null \
+  incus list "$1" --format csv --columns 4 2>/dev/null \
     | tr -d '"' | sed 's/ (.*//' | grep -v '^[[:space:]]*$' | head -n1 \
     | grep . || echo "-"
 }
@@ -383,40 +475,9 @@ list_all() {
             sub(/ +$/, "", line); print line } }'
 }
 
-info() {
-  local box="$1" row
-  # Same tagged set as list_all: an untagged instance is not a box, it's someone
-  # else's VM, and we say "no such box" rather than reaching into it.
-  row="$(boxes_csv | awk -F, -v b="$box" '$1 == b { print; exit }')"
-  [ -n "$row" ] || die "no such box: $box (see 'claudebox list')"
-
-  local state type snaps
-  IFS=, read -r _ state type snaps <<<"$row"
-  printf '%-11s%s\n' NAME "$box" STATE "${state:--}" TYPE "$(short_type "$type")" \
-    IPV4 "$(box_ipv4 "$box")"
-
-  echo
-  case "${snaps:-0}" in
-    ''|0)
-      echo "SNAPSHOTS  (none)"
-      echo
-      echo "Take one:   claudebox snapshot $box authed"
-      return 0 ;;
-  esac
-  echo "SNAPSHOTS"
-  local first=""
-  while IFS=, read -r sname taken _; do
-    [ -n "$sname" ] || continue
-    [ -n "$first" ] || first="$sname"
-    printf '  %-14s%s\n' "$sname" "$taken"
-  done < <(incus snapshot list "$(iname_of "$box")" --format csv 2>/dev/null)
-  echo
-  echo "Clone one:  claudebox new --name <new> --from $box/${first:-<snapshot>}"
-}
-
 # 'list' lists them all; 'info' shows one. A box name handed to 'list' is a wrong
 # guess we can answer, not a surprise: point at the command that does want one.
-list() {
+cmd_list() {
   if [ "${#args[@]}" -ge 1 ] && [ -n "${args[0]}" ]; then
     die "list takes no box — for one box, use: claudebox info ${args[0]}"
   fi
@@ -427,23 +488,100 @@ list() {
   fi
 }
 
-case "$cmd" in
-  new)      new ;;
-  snapshot) need_name; label="${args[1]:-manual-$(date +%s)}"; incus snapshot create "$(iname_of "${args[0]}")" "$label"; echo "$label" ;;
-  restore)  need_name; [ -n "${args[1]:-}" ] || die "usage: claudebox restore <box> <snapshot>"; incus restore "$(iname_of "${args[0]}")" "${args[1]}" ;;
-  shell)    need_name; incus exec "$(iname_of "${args[0]}")" -- sudo -u claude -i ;;
-  exec)     need_name; incus exec "$(iname_of "${args[0]}")" -- sudo -u claude -i "${args[@]:1}" ;;
-  down)     need_name; incus stop "$(iname_of "${args[0]}")" ;;
-  start)    need_name; incus start "$(iname_of "${args[0]}")" ;;
-  # -f is how Incus deletes a *running* instance; it is not our confirmation.
-  # The prompt is: 'rm' destroys the box and every snapshot on it.
-  rm)       need_name; inst="$(iname_of "${args[0]}")"
-            confirm "delete $inst and all its snapshots"
-            incus delete -f "$inst"; echo "claudebox: removed $inst" ;;
-  list)     list ;;
-  info)     need_name
-            if [ "$json" -eq 1 ]; then incus list "$(iname_of "${args[0]}")" --format json; else info "${args[0]}"; fi ;;
-  status)   echo "claudebox: 'status' is deprecated — use 'claudebox list'." >&2; list_all ;;
-  help)     show_help "${args[0]:-}" ;;
-  *)        unknown_command "$cmd" ;;
+cmd_info() {
+  local box="${args[0]}" row
+  if [ "$json" -eq 1 ]; then incus list "$inst" --format json; return; fi
+
+  row="$(boxes_csv | awk -F, -v b="$box" '$1 == b { print; exit }')"
+  [ -n "$row" ] || die "no such box: $box (see 'claudebox list')"
+
+  local state type snaps
+  IFS=, read -r _ state type snaps <<<"$row"
+  printf '%-11s%s\n' NAME "$box" STATE "${state:--}" TYPE "$(short_type "$type")" \
+    IPV4 "$(box_ipv4 "$inst")"
+
+  echo
+  case "${snaps:-0}" in
+    ''|0)
+      echo "SNAPSHOTS  (none)"
+      echo
+      echo "Take one:   claudebox snapshot $box authed"
+      return 0 ;;
+  esac
+  echo "SNAPSHOTS"
+  local first="" sname taken
+  while IFS=, read -r sname taken _; do
+    [ -n "$sname" ] || continue
+    [ -n "$first" ] || first="$sname"
+    printf '  %-14s%s\n' "$sname" "$taken"
+  done < <(incus snapshot list "$inst" --format csv 2>/dev/null)
+  echo
+  echo "Clone one:  claudebox new --name <new> --from $box/${first:-<snapshot>}"
+}
+
+cmd_shell() { incus exec "$inst" -- sudo -u claude -i; }
+cmd_exec()  { incus exec "$inst" -- sudo -u claude -i "${args[@]:1}"; }
+
+cmd_snapshot() {
+  local label="${args[1]:-manual-$(date +%s)}"
+  incus snapshot create "$inst" "$label"
+  echo "$label"
+}
+
+cmd_status() {
+  echo "claudebox: 'status' is deprecated — use 'claudebox list'." >&2
+  list_all
+}
+
+cmd_help() { show_help "${args[0]:-}"; }
+
+# The escape hatch. The box is resolved and tag-checked; everything else is
+# yours. {} is the instance name; without it, the instance goes last.
+warn_isolation() {
+  case " $* " in
+    *" profile "*|*" network "*|*" device "*|*security.*|*" nic "*)
+      echo "claudebox: warning: this can move the box off the isolation stack" >&2
+      echo "claudebox: (profile / network / device / security.*). The trust boundary is yours from here." >&2 ;;
+  esac
+}
+
+cmd_incus() {
+  local rest=("${args[@]:1}") out=() a replaced=0
+  [ "${#rest[@]}" -gt 0 ] || usage_error "usage: $(synopsis_of incus)"
+  for a in "${rest[@]}"; do
+    case "$a" in
+      *"{}"*) out+=("${a//\{\}/$inst}"); replaced=1 ;;
+      *) out+=("$a") ;;
+    esac
+  done
+  [ "$replaced" -eq 1 ] || out+=("$inst")
+  warn_isolation "${out[@]}"
+  echo "claudebox: incus ${out[*]}" >&2   # no magic: show what runs
+  incus "${out[@]}"
+}
+
+# --- dispatch: driven by the table, not by a hand-written case --------------
+
+row="$(cmd_row "$cmd")" || unknown_command "$cmd"
+IFS='^' read -r _ _ pre _ action ok <<<"$row"
+
+case ",$pre," in *,box,*)     need_name; inst="$(resolve_box "${args[0]}")" ;; esac
+case ",$pre," in *,arg2,*)    need_arg2 ;; esac
+case ",$pre," in *,stopped,*) require_stopped "$inst" "${args[0]}" ;; esac
+case ",$pre," in *,confirm,*) confirm "delete $inst and all its snapshots" ;; esac
+
+case "$action" in
+  fn:*)
+    "${action#fn:}"
+    ;;
+  incus:*)
+    sub="${action#incus:}"
+    # word-split intentionally: a subcommand may carry a flag ("delete -f")
+    # shellcheck disable=SC2086
+    incus $sub "$inst" "${args[@]:1}"
+    if [ -n "$ok" ]; then
+      msg="${ok//\{\}/${args[0]}}"; msg="${msg//\{1\}/${args[1]:-}}"
+      echo "claudebox: $msg"
+    fi
+    ;;
 esac

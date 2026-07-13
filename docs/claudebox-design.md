@@ -54,6 +54,42 @@ Not host-executed shell. A repo that wants to be easy to stand up in a sandbox
 ships a runbook (prose + optional scripts the agent may run). A repo that does
 not, you set up by hand. The tool enforces no contract; there is no `install`.
 
+## What claudebox owns, and what it doesn't
+
+Boxes are ordinary Incus instances, tagged `user.claudebox=1`. That makes every
+Incus verb a candidate feature request — `rename`, `info`, `file push`, on
+forever — and wrapping them one at a time grows a worse `incus`. The rule:
+
+> **claudebox owns a command when it must enforce an invariant Incus cannot see:**
+> the `user.claudebox=1` boundary (never touch an instance we didn't mint), the
+> isolation stack (`claude-dev` profile + `claudenet` + ACL), or the creds-free
+> snapshot→clone workflow. Everything else is Incus's job.
+
+The rule cuts both ways, and that's the point:
+
+- `rename` **is** ours — not because it adds logic to `incus rename`, but because
+  resolving the name *is* the logic: check the tag, apply `--remote`, and notice
+  the box is running (Incus won't rename a running instance) so we can say "stop
+  it first" rather than leak an Incus error.
+- `incus config set security.nesting=false` is **not** ours. It dismantles the
+  trust boundary; wrapping it would imply we bless it.
+
+Two mechanisms keep this honest.
+
+**The command table** (`CMDS` in `bin/claudebox`) is the single source of truth
+for what exists, its synopsis, its help line, its preconditions and what runs.
+Dispatch and help are both rendered from it, so the help cannot describe a
+command that doesn't exist — the failure that produced #8. A thin verb is one
+row; a verb that can't be expressed as a row and enforces no invariant of ours
+doesn't belong in the tool.
+
+**The escape hatch** — `claudebox incus <box> -- <args...>` — resolves and
+tag-checks the box, then hands the rest to Incus verbatim. It means "no" to a
+proxy request is not "you can't do that", and it keeps the one rail that matters:
+you cannot aim it at an instance claudebox didn't mint. If the command can move
+the box off the isolation stack (profile, network, device, `security.*`), it
+warns and proceeds — from there the trust boundary is yours to keep.
+
 ## Isolation (unchanged)
 
 Dedicated NAT bridge `claudenet` + Incus `claude-isolate` ACL dropping all

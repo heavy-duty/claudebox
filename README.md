@@ -82,9 +82,11 @@ claudebox shell <box>              # enter as the claude user
 claudebox exec <box> -- <cmd...>   # run a command in the box
 claudebox snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
 claudebox restore <box> <snap>     # roll back to a snapshot
+claudebox rename <box> <new>       # rename a box (stop it first)
 claudebox down <box>               # stop (state kept; `start` resumes)
 claudebox start <box>              # start a stopped box
 claudebox rm <box> [--force]       # delete the box + its snapshots (asks first)
+claudebox incus <box> -- <args...> # escape hatch: any incus command, box resolved
 claudebox status                   # deprecated alias for `list`
 claudebox help [<command>]         # full help, or one command's page
 ```
@@ -97,6 +99,26 @@ wrong.
 snapshot. VM mode (`--vm`, the default where `/dev/kvm` exists) is the trust-less
 target; container mode (auto-fallback, `security.nesting=true`) is for hosts
 without nested virt — weaker isolation, dev/test only.
+
+## Boxes are just Incus instances
+
+A box is an ordinary Incus instance tagged `user.claudebox=1`. claudebox wraps
+the box lifecycle and the isolation model — not all of Incus. It owns a command
+when it must enforce something Incus can't see: that tag (it will not stop,
+rename or delete an instance it didn't mint), the isolation stack, or the
+creds-free snapshot workflow. For everything else, there's the door:
+
+```sh
+claudebox incus work -- config show        # instance name appended
+claudebox incus work -- file push x.tar {}/tmp/   # or placed with {}
+```
+
+The box is resolved and tag-checked; the rest is passed to `incus` verbatim, and
+the command is echoed before it runs. If it can move the box off the isolation
+stack (profile, network, device, `security.*`), claudebox warns and proceeds —
+the trust boundary is then yours to keep. See
+[docs/claudebox-design.md](docs/claudebox-design.md) for the rule and why the
+command surface is a table.
 
 ## Isolation
 
