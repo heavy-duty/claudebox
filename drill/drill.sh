@@ -103,22 +103,29 @@ eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
   return 1
 }
 
-box_listen() { # start a throwaway HTTP listener INSIDE a box, detached.
-               # Every redirect here is load-bearing: a child still holding the
-               # exec session's stdio makes the call wait forever.
-  in_box "$1" sh -c \
-    "command -v python3 >/dev/null && { nohup python3 -m http.server $2 --bind 0.0.0.0 >/dev/null 2>&1 </dev/null & } ; exit 0" \
-    >/dev/null 2>&1
-  sleep 1
-}
-
-# A probe that must not hang, and whose curl exit code is the finding itself.
-# Prints the exit code; 28 = timed out (dropped), 7 = refused (it ARRIVED), 0 = connected.
+# A probe that must not hang, and whose curl exit code IS the finding.
+#   0  = connected            → reachable
+#   7  = connection REFUSED   → the packet ARRIVED and something answered (a RST
+#                               from a closed port). Reachable. Not isolated.
+#   28 = timed out            → the packet was DROPPED in flight. Isolated.
+# That 7-vs-28 split is why no listener is needed to prove reachability — and
+# the listener is exactly what kept wedging the run (a backgrounded process in
+# an 'incus exec' session holds the session open, whatever you redirect).
+# A closed port is a perfectly good target: it answers, or it doesn't.
 box_curl() {   # box_curl <box> <url> [timeout]
   local b="$1" url="$2" t="${3:-5}"
   timeout -k 5 $((t + 15)) incus exec "$b" -- curl -sS -m "$t" -o /dev/null "$url" \
     >/dev/null 2>&1 </dev/null
   printf '%s\n' "$?"
+}
+
+verdict() {    # verdict <curl-exit> → reachable | refused | dropped | odd
+  case "$1" in
+    0)  echo reachable ;;
+    7)  echo refused ;;
+    28) echo dropped ;;
+    *)  echo "odd($1)" ;;
+  esac
 }
 
 # --- stage 1: consent, install, then re-enter inside the incus-admin group ---
@@ -372,40 +379,57 @@ fi
   && { ok "box reaches the public internet (and gateway DNS resolves public names)"; aud "A1/A5 egress + public DNS: PASS"; } \
   || { no "box cannot reach the internet (a box that can't is useless)"; aud "A1/A5 egress: FAIL"; }
 
-# C2 — box → host (#15 A2): the host listens on the claudenet gateway
-python3 -m http.server 8099 --bind 10.87.0.1 >/dev/null 2>&1 &
-srv=$!
-sleep 2
-if [ "$(box_curl archive http://10.87.0.1:8099)" = 0 ]; then
-  no "THE BOX REACHED THE HOST on 10.87.0.1:8099 — the firewall rules are not holding"
-  aud "A2 box→host: FAIL — reached a gateway listener"
-else
-  ok "box → host is blocked (no path to the machine's sockets)"
-  aud "A2 box→host: blocked"
-fi
-kill $srv 2>/dev/null
+# C2 — box → host (#15 A2). The host DOES listen on the gateway: dnsmasq is on
+# :53 by design (that carve-out is what makes egress DNS work). So probe a port
+# nothing serves and read refused-vs-dropped — refused would mean the box's
+# packet reached the host's stack, which is the thing the firewall must prevent.
+# (No background listener: one less process to leak, one less way to wedge.)
+hv="$(verdict "$(box_curl archive http://10.87.0.1:8099)")"
+case "$hv" in
+  reachable|refused)
+    no "THE BOX'S PACKETS REACH THE HOST on 10.87.0.1:8099 [$hv] — the firewall rules are not holding"
+    aud "A2 box→host: FAIL — $hv (the packet reached the host's stack)" ;;
+  dropped)
+    ok "box → host is blocked (no path to the machine's sockets)"
+    aud "A2 box→host: dropped" ;;
+  *)
+    note "box→host probe inconclusive ($hv)"
+    aud "A2 box→host: INCONCLUSIVE ($hv)" ;;
+esac
 
 # C3 — RFC1918 (#15 A2)
 [ "$(box_curl archive http://192.168.1.1)" = 0 ] \
   && { no "box reached a private-range address — the ACL is not dropping RFC1918"; aud "A2 RFC1918: FAIL"; } \
   || { ok "box → RFC1918 is dropped by the ACL"; aud "A2 RFC1918: dropped"; }
 
-# C4 — SIBLING isolation (#15 A3): the central claim of #12, never reproduced
-# live. A listener runs on peer so the curl exit code is unambiguous:
-#   0 = connected (isolation broken) · 7 = refused (the packet ARRIVED — the
-#   egress drop is not covering siblings) · timeout = dropped, as designed.
+# C4 — SIBLING isolation (#15 A3): the central claim of #12, and the one probe
+# three runs failed to fire. NO listener on the peer, deliberately — a closed
+# port answers the question just as well (refused = the packet arrived), and
+# the listener was what kept wedging the run. Ping corroborates: if the two
+# disagree, say so rather than pick one.
 PEER_IP="$(eth0_ip peer)"
 if [ -n "$PEER_IP" ]; then
-  box_listen peer 8088
-  inf "probing archive → peer at $PEER_IP:8088 …"
+  inf "probing archive → peer ($PEER_IP), no listener: refused means it arrived, timeout means it was dropped"
   rc="$(box_curl archive "http://$PEER_IP:8088")"
-  case "$rc" in
-    0) no "BOX A CONNECTED TO BOX B ($PEER_IP:8088) — sibling isolation does not hold"
-       aud "A3 sibling: FAIL — connected. #16 is a FIX, not a formalization" ;;
-    7) no "box A's packets ARRIVE at box B (connection refused, not dropped)"
-       aud "A3 sibling: FAIL — refused means the packet arrived. #16 is a FIX" ;;
-    *) ok "box A cannot reach box B (drop — curl exit $rc)"
-       aud "A3 sibling: blocked (the incidental 10.0.0.0/8 drop covers it, as #12 read)" ;;
+  v="$(verdict "$rc")"
+  timeout -k 5 30 incus exec archive -- ping -c1 -W2 "$PEER_IP" >/dev/null 2>&1 </dev/null
+  png=$?
+
+  case "$v" in
+    reachable|refused)
+      no "BOX A REACHES BOX B ($PEER_IP) — sibling isolation does NOT hold [tcp: $v]"
+      aud "A3 sibling: FAIL — tcp $v (the packet arrived). #16 is a FIX, not a formalization" ;;
+    dropped)
+      if [ "$png" -eq 0 ]; then
+        no "TCP to box B is dropped, but ICMP gets through — sibling isolation is partial"
+        aud "A3 sibling: PARTIAL — tcp dropped, ping REPLIES. #16 must cover icmp too" 
+      else
+        ok "box A cannot reach box B: tcp dropped, ping unanswered"
+        aud "A3 sibling: BLOCKED (tcp dropped + no icmp reply) — the incidental 10.0.0.0/8 drop does cover siblings, as #12 read"
+      fi ;;
+    *)
+      no "sibling probe gave an unexpected curl exit ($rc) — inconclusive"
+      aud "A3 sibling: INCONCLUSIVE (curl exit $rc, ping exit $png)" ;;
   esac
 else
   no "could not read peer's eth0 address — the sibling probe never ran"
@@ -429,15 +453,26 @@ fi
   && { ok "claudenet ipv6.address = none (the IPv4-only ACLs have no uncovered path)"; aud "A6 ipv6: none, as contract requires"; } \
   || { no "claudenet has IPv6 enabled — and not one ACL rule covers IPv6"; aud "A6 ipv6: ENABLED and uncovered"; }
 
-# C7 — inbound, host → box (#15 A7): the ACL's default ingress drop
+# C7 — inbound, host → box (#15 A7): the ACL's default ingress drop. Same
+# listener-free logic, run from the host this time.
 ARCH_IP="$(eth0_ip archive)"
-box_listen archive 8087
-if [ -n "$ARCH_IP" ] && curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" 2>/dev/null; then
-  no "the HOST connected to a listener inside the box — the default ingress drop is not holding"
-  aud "A7 inbound host→box: FAIL — reached a box listener"
+if [ -n "$ARCH_IP" ]; then
+  curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" >/dev/null 2>&1
+  hv="$(verdict $?)"
+  case "$hv" in
+    reachable|refused)
+      no "the HOST's packets REACH the box ($ARCH_IP) — the default ingress drop is not holding [$hv]"
+      aud "A7 inbound host→box: FAIL — $hv (the packet arrived)" ;;
+    dropped)
+      ok "host → box is dropped (entry is 'incus exec' only, as designed)"
+      aud "A7 inbound host→box: dropped" ;;
+    *)
+      note "inbound probe inconclusive ($hv)"
+      aud "A7 inbound host→box: INCONCLUSIVE ($hv)" ;;
+  esac
 else
-  ok "host → box is dropped (entry is 'incus exec' only, as designed)"
-  aud "A7 inbound host→box: dropped"
+  no "could not read archive's eth0 address — the inbound probe never ran"
+  aud "A7 inbound host→box: NOT PROBED"
 fi
 
 # ===========================================================================
