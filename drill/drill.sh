@@ -25,7 +25,12 @@
 # The file is one long 'probe && ok "..." || no "..."'. ok/no always return 0, so
 # the C-may-run-when-A-is-true trap SC2015 warns about cannot fire here.
 # shellcheck disable=SC2015
-set -uo pipefail   # NOT -e: a failing check is data, not a crash
+#
+# NOT -e: a failing check is data, not a crash. NOT pipefail: half the checks
+# are 'refusal 2>&1 | grep -q text' where the refusal exits 1/2 BY DESIGN, and
+# 'grep -q' SIGPIPEs the left side on early match — pipefail turned both into
+# false FAILs on the first live run. The pipeline verdict must be grep's alone.
+set -u
 
 REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
 REF="${CLAUDEBOX_REF:-main}"
@@ -62,9 +67,25 @@ wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
 }
 
 eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
-               # docker reports several addresses across quoted CSV lines
-  incus list "^$1\$" --format csv --columns 4 | tr -d '"' | tr ',' '\n' \
-    | awk '/\(eth0\)$/ { print $1; exit }'
+               # docker reports several addresses across quoted CSV lines.
+               # Retries: the agent answers before DHCP hands out the address.
+  local b="$1" ip _i
+  for _i in $(seq 1 15); do
+    ip="$(incus list "^$b\$" --format csv --columns 4 | tr -d '"' | tr ',' '\n' \
+          | awk '/\(eth0\)$/ { print $1; exit }')"
+    [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
+    sleep 2
+  done
+  return 1
+}
+
+box_listen() { # start a throwaway HTTP listener INSIDE a box, detached.
+               # </dev/null is load-bearing: a child holding the exec pty makes
+               # 'incus exec' wait forever (the first live run hung here).
+  timeout 20 claudebox exec "$1" -- bash -c \
+    "command -v python3 >/dev/null && { nohup python3 -m http.server $2 --bind 0.0.0.0 >/dev/null 2>&1 </dev/null & }" \
+    >/dev/null 2>&1
+  sleep 1
 }
 
 # --- stage 1: consent, install, then re-enter inside the incus-admin group ---
@@ -233,8 +254,16 @@ fi
 claudebox info drill | grep -q '^IPV4' && ok "info shows an IPv4" || no "info has no IPV4 row"
 claudebox info drill | grep -q 'SNAPSHOTS  (none)' && ok "info: no snapshots yet, offers to take one" || no "info snapshot-empty state wrong"
 
-claudebox exec drill -- claude --version >/dev/null 2>&1 \
-  && ok "Claude Code is installed in the box" || no "'claude --version' failed inside the box"
+if claudebox exec drill -- claude --version >/dev/null 2>&1; then
+  ok "Claude Code is installed in the box"
+elif timeout 30 claudebox exec drill -- bash -lc 'claude --version' >/dev/null 2>&1; then
+  no "'claude' is installed but NOT on exec's PATH — repo bug: the help promises 'claudebox exec work -- claude --version'"
+  inf "PATH as exec sees it: $(timeout 30 claudebox exec drill -- printenv PATH 2>/dev/null)"
+else
+  no "'claude --version' failed inside the box"
+  inf "cloud-init: $(timeout 30 claudebox incus drill -- exec {} -- cloud-init status 2>&1 | head -1)"
+  inf "claude's ~/.local/bin holds: $(timeout 30 claudebox incus drill -- exec {} -- ls /home/claude/.local/bin 2>&1 | tr '\n' ' ' | cut -c1-120)"
+fi
 claudebox exec drill -- gh --version >/dev/null 2>&1 \
   && ok "the GitHub CLI is installed in the box (PR #5)" || no "'gh --version' failed inside the box"
 
@@ -327,7 +356,7 @@ claudebox exec archive -- curl -sS -m 5 -o /dev/null http://192.168.1.1 2>/dev/n
 #   egress drop is not covering siblings) · timeout = dropped, as designed.
 PEER_IP="$(eth0_ip peer)"
 if [ -n "$PEER_IP" ]; then
-  claudebox exec peer -- bash -c 'command -v python3 >/dev/null && nohup python3 -m http.server 8088 --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
+  box_listen peer 8088
   claudebox exec archive -- curl -sS -m 5 -o /dev/null "http://$PEER_IP:8088" 2>/dev/null
   rc=$?
   case "$rc" in
@@ -362,7 +391,7 @@ fi
 
 # C7 — inbound, host → box (#15 A7): the ACL's default ingress drop
 ARCH_IP="$(eth0_ip archive)"
-claudebox exec archive -- bash -c 'command -v python3 >/dev/null && nohup python3 -m http.server 8087 --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
+box_listen archive 8087
 if [ -n "$ARCH_IP" ] && curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" 2>/dev/null; then
   no "the HOST connected to a listener inside the box — the default ingress drop is not holding"
   aud "A7 inbound host→box: FAIL — reached a box listener"
