@@ -69,10 +69,15 @@ claudebox new --name feature --from work/authed   # clone the authed state into 
 preserving isolation. You can also `claudebox new --name x --from work` to clone
 a box's live state, or roll a box back with `claudebox restore work authed`.
 
+Forgotten what you called a checkpoint? `claudebox info work` prints the box's
+snapshot labels and the `--from` line to clone one.
+
 ## Commands
 
 ```
 claudebox new --name <box> [--from <src>[/<snap>]] [--vm|--container] [--remote r]
+claudebox list                     # list your boxes
+claudebox info <box>               # one box: state, IP, snapshot labels
 claudebox shell <box>              # enter as the claude user
 claudebox exec <box> -- <cmd...>   # run a command in the box
 claudebox snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
@@ -80,7 +85,7 @@ claudebox restore <box> <snap>     # roll back to a snapshot
 claudebox down <box>               # stop (state kept; `start` resumes)
 claudebox start <box>              # start a stopped box
 claudebox rm <box>                 # delete the box (irreversible; snapshot first)
-claudebox status                   # list boxes
+claudebox status                   # deprecated alias for `list`
 ```
 
 `new` fresh-launches from cloud-init, or with `--from` clones an existing box or

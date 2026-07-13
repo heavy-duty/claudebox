@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # claudebox — trust-less, isolated Incus VMs with Claude Code, creds-free.
 #   claudebox new --name <box> [--from <src>[/<snap>]] [--remote r] [--vm|--container]
-#   claudebox shell|down|start|status|rm <box>
+#   claudebox list [--json]            — all your boxes
+#   claudebox info <box>               — one box: state, IP, snapshot labels
+#   claudebox shell|down|start|rm <box>
 #   claudebox exec <box> -- <cmd...>
 #   claudebox snapshot <box> [label]
 #   claudebox restore <box> <snapshot>
@@ -10,7 +12,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-remote=""; mode="auto"; name=""; from=""; force=0
+remote=""; mode="auto"; name=""; from=""; force=0; json=0
 cmd="${1:-help}"; shift || true
 args=()
 while [ $# -gt 0 ]; do
@@ -21,6 +23,7 @@ while [ $# -gt 0 ]; do
     --vm) mode=vm; shift ;;
     --container) mode=container; shift ;;
     --force) force=1; shift ;;
+    --json) json=1; shift ;;
     --) shift; args+=("$@"); break ;;
     *) args+=("$1"); shift ;;
   esac
@@ -76,6 +79,94 @@ new() {
   echo "claudebox: ready — 'claudebox shell $name'. Log into Claude inside: run 'claude' then /login."
 }
 
+# Boxes are ordinary Incus instances tagged user.claudebox=1 — that tag is the
+# only thing that makes them ours, so every read below is filtered by it and we
+# never report on (or touch) an instance claudebox didn't mint.
+# Emits: name,state,type,snapshot-count — none of which can contain a comma or a
+# newline, so a plain -F, split is safe. (IPv4 can: a box running docker has
+# several addresses and Incus quotes them across lines. It's fetched separately.)
+boxes_csv() {
+  incus list ${remote:+"$remote"} "user.claudebox=1" --format csv --columns nstS
+}
+
+box_ipv4() {   # first address only; strips Incus's " (iface)" suffix. "-" if none.
+  incus list "$(iname_of "$1")" --format csv --columns 4 2>/dev/null \
+    | tr -d '"' | sed 's/ (.*//' | grep -v '^[[:space:]]*$' | head -n1 \
+    | grep . || echo "-"
+}
+
+# VIRTUAL-MACHINE is a mouthful in a table; anything unexpected passes through.
+short_type() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    virtual-machine|virtualmachine) echo VM ;;
+    container) echo CT ;;
+    *) echo "$1" ;;
+  esac
+}
+
+list_all() {
+  local rows; rows="$(boxes_csv)"
+  if [ -z "$rows" ]; then
+    echo "claudebox: no boxes yet — create one with: claudebox new --name work" >&2
+    return 0
+  fi
+  {
+    echo "NAME,STATE,TYPE,SNAPSHOTS"
+    while IFS=, read -r n s t snaps; do
+      [ -n "$n" ] || continue
+      echo "$n,${s:--},$(short_type "$t"),${snaps:-0}"
+    done <<<"$rows"
+  } | awk -F, '
+    { for (i = 1; i <= NF; i++) { cell[NR, i] = $i; if (length($i) > w[i]) w[i] = length($i) } n = NR }
+    END { for (r = 1; r <= n; r++) { line = ""
+            for (i = 1; i <= 4; i++) line = line sprintf("%-*s  ", w[i], cell[r, i])
+            sub(/ +$/, "", line); print line } }'
+}
+
+info() {
+  local box="$1" row
+  # Same tagged set as list_all: an untagged instance is not a box, it's someone
+  # else's VM, and we say "no such box" rather than reaching into it.
+  row="$(boxes_csv | awk -F, -v b="$box" '$1 == b { print; exit }')"
+  [ -n "$row" ] || die "no such box: $box (see 'claudebox list')"
+
+  local state type snaps
+  IFS=, read -r _ state type snaps <<<"$row"
+  printf '%-11s%s\n' NAME "$box" STATE "${state:--}" TYPE "$(short_type "$type")" \
+    IPV4 "$(box_ipv4 "$box")"
+
+  echo
+  case "${snaps:-0}" in
+    ''|0)
+      echo "SNAPSHOTS  (none)"
+      echo
+      echo "Take one:   claudebox snapshot $box authed"
+      return 0 ;;
+  esac
+  echo "SNAPSHOTS"
+  local first=""
+  while IFS=, read -r sname taken _; do
+    [ -n "$sname" ] || continue
+    [ -n "$first" ] || first="$sname"
+    printf '  %-14s%s\n' "$sname" "$taken"
+  done < <(incus snapshot list "$(iname_of "$box")" --format csv 2>/dev/null)
+  echo
+  echo "Clone one:  claudebox new --name <new> --from $box/${first:-<snapshot>}"
+}
+
+# 'list' lists them all; 'info' shows one. A box name handed to 'list' is a wrong
+# guess we can answer, not a surprise: point at the command that does want one.
+list() {
+  if [ "${#args[@]}" -ge 1 ] && [ -n "${args[0]}" ]; then
+    die "list takes no box — for one box, use: claudebox info ${args[0]}"
+  fi
+  if [ "$json" -eq 1 ]; then
+    incus list ${remote:+"$remote"} "user.claudebox=1" --format json
+  else
+    list_all
+  fi
+}
+
 case "$cmd" in
   new)      new ;;
   snapshot) need_name; label="${args[1]:-manual-$(date +%s)}"; incus snapshot create "$(iname_of "${args[0]}")" "$label"; echo "$label" ;;
@@ -85,6 +176,9 @@ case "$cmd" in
   down)     need_name; incus stop "$(iname_of "${args[0]}")" ;;
   start)    need_name; incus start "$(iname_of "${args[0]}")" ;;
   rm)       need_name; incus delete -f "$(iname_of "${args[0]}")"; echo "claudebox: removed $(iname_of "${args[0]}")" ;;
-  status)   incus list ${remote:+"$remote"} "user.claudebox=1" ;;
-  help|*)   sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//' ;;
+  list)     list ;;
+  info)     need_name
+            if [ "$json" -eq 1 ]; then incus list "$(iname_of "${args[0]}")" --format json; else info "${args[0]}"; fi ;;
+  status)   echo "claudebox: 'status' is deprecated — use 'claudebox list'." >&2; list_all ;;
+  help|*)   sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
