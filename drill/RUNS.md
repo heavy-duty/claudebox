@@ -54,11 +54,18 @@ Read this before adding a probe. Every one of these cost a run.
    and it is why the drill now runs **no listener anywhere**. It does not need
    one: `curl` exit `7` (refused) means the packet *arrived*, `28` (timeout)
    means it was *dropped*. A closed port answers the question.
-4. **`incus list` name filters are not regexes.** `incus list "^peer$"` matches
-   nothing and returns empty — silently. This is how A3 went unprobed for
-   three runs. Read addresses from inside the box (`ip -4 -o addr show dev
-   eth0`), not out of `incus list` CSV (which also quotes multi-address boxes
-   across lines).
+4. **The box's address is hard to read, and every way of getting it wrong was
+   tried.** (a) `incus list` name filters are **not regexes** — `incus list
+   "^peer$"` silently matches nothing. (b) Its CSV quotes a multi-address box
+   across lines. (c) **The interface is not `eth0`.** The *profile* names the
+   device `eth0`, but inside a **VM guest** predictable naming renames it
+   **`enp5s0`** — so `ip addr show dev eth0` finds nothing either. That is the
+   real reason A3 went unprobed for six runs, through two "fixes" of mine that
+   never questioned the interface name. Read it from inside the box and select
+   by **subnet** (`10.87.x`), not by interface name: docker0 (`172.17.x`) is
+   the decoy, and the NIC's name is the guest's business.
+   *Lesson: when the same probe fails three different ways, stop patching the
+   probe and go look at the thing itself.*
 5. **`incus delete -f a b c` aborts at the first MISSING name.** One interrupted
    run then poisons the next: stale boxes survive cleanup and cascade into
    half a dozen unrelated FAILs. Delete one name at a time.
