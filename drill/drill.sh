@@ -11,21 +11,24 @@
 #   bash drill/drill.sh --ref main       # drill a different branch of claudebox
 #   bash drill/drill.sh --keep-boxes     # leave the boxes up to poke at
 #
-# Three phases:
+# Four phases:
 #   A. Incus semantics — the assumptions claudebox is built on, probed directly.
 #      These were only ever verified against a stub.
 #   B. The claudebox surface — the whole CLI, end to end, including the boundary.
-#   C. Isolation — does the trust boundary actually hold?
+#   C. Isolation baseline — does the trust boundary actually hold? (#15 section A)
+#   D. Hardening rehearsal — #16's proposed changes, applied live and re-probed
+#      (#15 section B). FAILs here are design vetoes, not code bugs.
 #
-# Exit 0 = every check passed.
+# Exit 0 = every check passed. The summary ends with a block of audit answers
+# to paste into heavy-duty/claudebox#15.
 #
 # The file is one long 'probe && ok "..." || no "..."'. ok/no always return 0, so
 # the C-may-run-when-A-is-true trap SC2015 warns about cannot fire here.
 # shellcheck disable=SC2015
 set -uo pipefail   # NOT -e: a failing check is data, not a crash
 
-REPO="${CLAUDEBOX_REPO:-claude-hdb/claudebox}"
-REF="${CLAUDEBOX_REF:-refactor/command-table}"
+REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
+REF="${CLAUDEBOX_REF:-main}"
 YES=0; KEEP=0
 SELF="$(readlink -f "$0")"
 
@@ -41,12 +44,28 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-pass=0; fail=0; findings=()
+pass=0; fail=0; findings=(); audit=()
 ok()   { printf '  \033[32mPASS\033[0m  %s\n' "$*"; pass=$((pass + 1)); }
 no()   { printf '  \033[31mFAIL\033[0m  %s\n' "$*"; fail=$((fail + 1)); findings+=("FAIL: $*"); }
 note() { printf '  \033[33mNOTE\033[0m  %s\n' "$*"; findings+=("NOTE: $*"); }
 inf()  { printf '        %s\n' "$*"; }
 phase(){ printf '\n\033[1m══ %s\033[0m\n' "$*"; }
+aud()  { audit+=("$*"); }                       # an answer for the #15 audit
+
+wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
+  local b="$1" _i
+  for _i in $(seq 1 60); do
+    claudebox exec "$b" -- true >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
+eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
+               # docker reports several addresses across quoted CSV lines
+  incus list "^$1\$" --format csv --columns 4 | tr -d '"' | tr ',' '\n' \
+    | awk '/\(eth0\)$/ { print $1; exit }'
+}
 
 # --- stage 1: consent, install, then re-enter inside the incus-admin group ---
 if [ "${IN_GROUP:-0}" != 1 ]; then
@@ -56,7 +75,8 @@ This will, ON THIS HOST ($(hostname)):
   · install Incus and a systemd unit
   · create a network (claudenet), an ACL, and a profile
   · rewrite firewall rules (nft or UFW, and Docker's DOCKER-USER chain)
-  · create and destroy instances named: drill, clone, archive, payroll, cbprobe
+  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy
+  · mutate the network and profile mid-run to rehearse the #16 hardening
 Only do this on a machine you can format.
 EOF
     [ -t 0 ] || { echo "drill: no TTY to confirm on — pass --yes if you mean it." >&2; exit 2; }
@@ -72,11 +92,11 @@ EOF
   export PATH="$HOME/.local/bin:$PATH"
 
   phase "Host setup (Incus, claudenet, ACL, profile, firewall)"
-  # setup-host.sh drives nft directly, but a stock Debian cloud image has no
-  # nftables. If that's the case here, it is a real gap in the repo: record it.
+  # setup-host.sh installs nftables itself when neither nft nor UFW exists
+  # (fixed in this PR — a stock Debian 13 cloud image ships neither). This
+  # guard stays as a tripwire: if it fires, that fix regressed.
   if ! command -v nft >/dev/null 2>&1 && ! command -v ufw >/dev/null 2>&1; then
-    note "setup-host.sh needs 'nft' (no UFW here either) but nftables is NOT installed — installing it by hand to proceed. Repo gap: setup-host should install its own dependency."
-    sudo apt-get install -y -qq nftables >/dev/null 2>&1
+    note "neither nft nor ufw present pre-setup — setup-host.sh must install nftables itself (it fixed this once; watch that it still does)"
   fi
   sudo apt-get install -y -qq incus >/dev/null 2>&1   # so the group exists before we sg
   ~/.local/share/claudebox/host/setup-host.sh || true # first run may only add the group
@@ -89,7 +109,10 @@ KEEP="${KEEP:-0}"
 ~/.local/share/claudebox/host/setup-host.sh || { echo "setup-host failed inside the group"; exit 1; }
 
 # Re-runnable: clear anything a previous drill left behind.
-incus delete -f drill clone archive payroll cbprobe cbnotours >/dev/null 2>&1
+incus delete -f drill clone archive peer payroll cbprobe cbcopy cbnotours >/dev/null 2>&1
+incus network unset claudenet dns.mode 2>/dev/null
+incus profile device unset claude-dev eth0 security.mac_filtering 2>/dev/null
+incus profile device unset claude-dev eth0 security.ipv4_filtering 2>/dev/null
 
 # A real server has room for the production profile (8GiB/4cpu), and drilling the
 # real profile is worth more than drilling a shrunken one. Only shrink if we must.
@@ -150,13 +173,42 @@ s1="$(incus snapshot list cbprobe --format csv 2>&1 | head -1)"
 # A7 — the IPv4 column. #9 assumes it can be quoted/multi-line, hence fetching it apart.
 inf "ipv4 column raw: $(incus list cbprobe --format csv --columns 4 2>&1 | tr '\n' '|')"
 
+# A8 — unset config keys read as EMPTY with exit 0 (#15 B4). The '|| echo root'
+# fallback #12 first proposed could never fire if so; #17's lookup depends on this.
+u="$(incus config get cbprobe user.never-set 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && [ -z "$u" ]; then
+  ok "config get on an unset key → empty string, exit 0"
+  aud "B4 config-get unset key: empty + exit 0 — #17 fallbacks must use \${var:-}, never ||"
+else
+  note "config get on an unset key → rc=$rc out='$u' (not the documented empty+0 — #17's lookup adapts)"
+  aud "B4 config-get unset key: rc=$rc out='$u'"
+fi
+
+# A9 — 'incus copy' preserves user.* keys (#15 B2). #17's whole metadata design:
+# a clone must still know what it is without consulting the template.
+incus config set cbprobe user.box.user claude 2>/dev/null
+incus stop -f cbprobe >/dev/null 2>&1
+incus copy cbprobe cbcopy >/dev/null 2>&1
+c="$(incus config get cbcopy user.box.user 2>/dev/null)"
+if [ "$c" = claude ]; then
+  ok "incus copy preserves user.* keys (a clone knows what it is)"
+  aud "B2 copy preserves user.*: YES — #17's metadata-stamp design holds"
+else
+  no "incus copy DROPPED user.* keys (got '$c') — #17's metadata design fails without them"
+  aud "B2 copy preserves user.*: NO — #17 blocked as designed"
+fi
+incus delete -f cbcopy >/dev/null 2>&1
+
 incus delete -f cbprobe cbnotours >/dev/null 2>&1
 
 # ===========================================================================
 phase "B. The claudebox surface"
 # ===========================================================================
+# Compare against the installed tree's VERSION file, not a hardcoded number —
+# a pinned literal here would fail the drill on every release.
+expected="$(cat "$HOME/.local/share/claudebox/VERSION" 2>/dev/null || echo '?')"
 v="$(claudebox --version 2>&1)"
-case "$v" in *0.3.0*) ok "claudebox --version → $v" ;; *) no "unexpected version: $v" ;; esac
+case "$v" in *"$expected"*) ok "claudebox --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
 
 claudebox list >/dev/null 2>&1 && claudebox list 2>&1 | grep -q 'no boxes yet' \
   && ok "empty host: 'no boxes yet', exit 0" || no "empty-host message wrong"
@@ -232,34 +284,150 @@ claudebox list archive 2>&1 | grep -q 'claudebox info archive' && ok "'list <box
 claudebox snapshot archive --labl x 2>&1 | grep -q 'unknown option' && ok "typo'd flag rejected (not swallowed as a label)" || no "unknown flag was swallowed"
 
 # ===========================================================================
-phase "C. Isolation — does the boundary actually hold?"
+phase "C. Isolation baseline — does the boundary actually hold? (#15 section A)"
 # ===========================================================================
 claudebox start archive >/dev/null 2>&1
-sleep 10
+wait_box archive && ok "archive is back up (agent answering)" \
+                 || no "archive did not come back within 2 min of start"
 
+# Sibling isolation needs a sibling. Clone from the snapshot — fast, no cold mint.
+printf '\n  cloning a peer for the sibling probes…\n'
+if claudebox new --name peer --from archive/authed >/tmp/peer.log 2>&1 && wait_box peer; then
+  ok "peer minted from archive/authed and answering"
+else
+  no "peer clone failed or never answered — tail: $(tail -3 /tmp/peer.log | tr '\n' ' ')"
+fi
+
+# C1 — public egress (#15 A1; resolving the hostname also proves A5, gateway DNS)
 claudebox exec archive -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com 2>/dev/null | grep -q 200 \
-  && ok "box reaches the public internet" || no "box cannot reach the internet (a box that can't is useless)"
+  && { ok "box reaches the public internet (and gateway DNS resolves public names)"; aud "A1/A5 egress + public DNS: PASS"; } \
+  || { no "box cannot reach the internet (a box that can't is useless)"; aud "A1/A5 egress: FAIL"; }
 
-# The host listens on the claudenet gateway; the box must NOT be able to reach it.
+# C2 — box → host (#15 A2): the host listens on the claudenet gateway
 python3 -m http.server 8099 --bind 10.87.0.1 >/dev/null 2>&1 &
 srv=$!
 sleep 2
 if claudebox exec archive -- curl -sS -m 5 -o /dev/null http://10.87.0.1:8099 2>/dev/null; then
   no "THE BOX REACHED THE HOST on 10.87.0.1:8099 — the firewall rules are not holding"
+  aud "A2 box→host: FAIL — reached a gateway listener"
 else
-  ok "box → host is blocked (no inbound path to the machine)"
+  ok "box → host is blocked (no path to the machine's sockets)"
+  aud "A2 box→host: blocked"
 fi
 kill $srv 2>/dev/null
 
+# C3 — RFC1918 (#15 A2)
 claudebox exec archive -- curl -sS -m 5 -o /dev/null http://192.168.1.1 2>/dev/null \
-  && no "box reached a private-range address — the ACL is not dropping RFC1918" \
-  || ok "box → RFC1918 is dropped by the ACL"
+  && { no "box reached a private-range address — the ACL is not dropping RFC1918"; aud "A2 RFC1918: FAIL"; } \
+  || { ok "box → RFC1918 is dropped by the ACL"; aud "A2 RFC1918: dropped"; }
+
+# C4 — SIBLING isolation (#15 A3): the central claim of #12, never reproduced
+# live. A listener runs on peer so the curl exit code is unambiguous:
+#   0 = connected (isolation broken) · 7 = refused (the packet ARRIVED — the
+#   egress drop is not covering siblings) · timeout = dropped, as designed.
+PEER_IP="$(eth0_ip peer)"
+if [ -n "$PEER_IP" ]; then
+  claudebox exec peer -- bash -c 'command -v python3 >/dev/null && nohup python3 -m http.server 8088 --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
+  claudebox exec archive -- curl -sS -m 5 -o /dev/null "http://$PEER_IP:8088" 2>/dev/null
+  rc=$?
+  case "$rc" in
+    0) no "BOX A CONNECTED TO BOX B ($PEER_IP:8088) — sibling isolation does not hold"
+       aud "A3 sibling: FAIL — connected. #16 is a FIX, not a formalization" ;;
+    7) no "box A's packets ARRIVE at box B (connection refused, not dropped)"
+       aud "A3 sibling: FAIL — refused means the packet arrived. #16 is a FIX" ;;
+    *) ok "box A cannot reach box B (drop — curl exit $rc)"
+       aud "A3 sibling: blocked (the incidental 10.0.0.0/8 drop covers it, as #12 read)" ;;
+  esac
+else
+  no "could not read peer's eth0 address — the sibling probe never ran"
+  aud "A3 sibling: NOT PROBED (no eth0 address on peer)"
+fi
+
+# C5 — DNS enumeration (#15 A4): #12 predicts this LEAKS today. Either way it
+# is audit data, not a code failure — #16's dns.mode=none is the fix.
+e1="$(claudebox exec archive -- getent hosts peer 2>/dev/null)"
+e2="$(claudebox exec archive -- getent hosts peer.incus 2>/dev/null)"
+if [ -n "$e1$e2" ]; then
+  note "DNS enumeration leaks, as #12 predicted: a box resolves its sibling ($(printf '%s' "$e1$e2" | head -1 | cut -c1-50))"
+  aud "A4 dns enumeration: LEAKS (bare='${e1:+yes}' fqdn='${e2:+yes}') — #16's dns.mode=none earns its place"
+else
+  note "DNS enumeration did NOT leak — #16's dns.mode item shrinks to an assertion"
+  aud "A4 dns enumeration: no leak observed"
+fi
+
+# C6 — IPv6 off (#15 A6): every ACL rule is IPv4-only; off is the only cover.
+[ "$(incus network get claudenet ipv6.address 2>/dev/null)" = none ] \
+  && { ok "claudenet ipv6.address = none (the IPv4-only ACLs have no uncovered path)"; aud "A6 ipv6: none, as contract requires"; } \
+  || { no "claudenet has IPv6 enabled — and not one ACL rule covers IPv6"; aud "A6 ipv6: ENABLED and uncovered"; }
+
+# C7 — inbound, host → box (#15 A7): the ACL's default ingress drop
+ARCH_IP="$(eth0_ip archive)"
+claudebox exec archive -- bash -c 'command -v python3 >/dev/null && nohup python3 -m http.server 8087 --bind 0.0.0.0 >/dev/null 2>&1 & sleep 1' >/dev/null 2>&1
+if [ -n "$ARCH_IP" ] && curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" 2>/dev/null; then
+  no "the HOST connected to a listener inside the box — the default ingress drop is not holding"
+  aud "A7 inbound host→box: FAIL — reached a box listener"
+else
+  ok "host → box is dropped (entry is 'incus exec' only, as designed)"
+  aud "A7 inbound host→box: dropped"
+fi
+
+# ===========================================================================
+phase "D. Hardening rehearsal — #16's changes, applied live (#15 section B)"
+# ===========================================================================
+# The host is disposable, so rehearse the exact changes #16 proposes and watch
+# what breaks. A FAIL here vetoes a piece of #16's design before it is written.
+
+# D1 — dns.mode=none (#15 B3): must kill sibling resolution, must NOT kill egress
+if incus network set claudenet dns.mode=none 2>/dev/null; then
+  sleep 2
+  claudebox exec archive -- getent hosts peer.incus >/dev/null 2>&1 \
+    && { no "dns.mode=none did not stop sibling resolution"; aud "B3 dns.mode=none: does NOT close the leak"; } \
+    || { ok "dns.mode=none: sibling names no longer resolve"; aud "B3 dns.mode=none: closes the enumeration leak"; }
+  claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
+    && { ok "dns.mode=none: public egress still works"; aud "B3 egress under dns.mode=none: intact — safe to ship"; } \
+    || { no "dns.mode=none BROKE public DNS — #16 cannot ship it as-is"; aud "B3 egress under dns.mode=none: BROKEN — design veto"; }
+else
+  no "incus rejected dns.mode=none on claudenet"
+  aud "B3 dns.mode=none: REJECTED by incus — #16 needs another mechanism"
+fi
+
+# D2 — L2 filtering (#15 B5): the box must keep working with it on.
+# Filtering binds at NIC attach, so the boxes restart here.
+if incus profile device set claude-dev eth0 security.mac_filtering=true security.ipv4_filtering=true 2>/dev/null; then
+  incus restart -f archive peer >/dev/null 2>&1
+  wait_box archive || note "archive slow to return after the filtering restart"
+  claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
+    && { ok "mac+ipv4 filtering on: the box still reaches the internet"; aud "B5 L2 filtering: box networking intact — safe for the claude workload"; } \
+    || { no "mac+ipv4 filtering BROKE the box's networking"; aud "B5 L2 filtering: BREAKS the box — design veto"; }
+  claudebox exec archive -- docker info >/dev/null 2>&1 \
+    && { ok "…and in-box Docker still works under ipv4_filtering"; aud "B5 in-box docker under filtering: fine (NAT hides behind eth0, as #12 argued)"; } \
+    || { note "in-box docker not confirmed under filtering ('docker info' failed — may be container-mode)"; aud "B5 in-box docker under filtering: UNVERIFIED here"; }
+else
+  no "incus rejected security filtering on the profile NIC"
+  aud "B5 L2 filtering: REJECTED on a profile NIC"
+fi
+
+# D3 — @internal as an ACL destination on a bridge network (#15 B1). If it
+# holds AND egress survives (the gateway carve-out must win the ordering),
+# #16's sibling drop is renumber-proof by construction.
+if incus network acl rule add claude-isolate egress action=drop destination=@internal 2>/tmp/ai.err; then
+  ok "@internal accepted as an ACL destination on a bridge network"
+  claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
+    && { ok "…and public egress survives the @internal drop (the carve-out wins)"; aud "B1 @internal: accepted, egress survives ⇒ #16 uses @internal"; } \
+    || { no "the @internal drop killed egress/DNS — ordering does not protect the carve-out"; aud "B1 @internal: accepted but kills DNS ⇒ #16 derives the subnet instead"; }
+  incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
+else
+  note "@internal rejected on a bridge ACL ($(head -1 /tmp/ai.err 2>/dev/null | cut -c1-60))"
+  aud "B1 @internal: rejected ⇒ #16 derives the subnet in setup-host.sh (mask the gateway CIDR)"
+fi
 
 # ===========================================================================
 if [ "$KEEP" = 1 ]; then
   phase "Boxes left up (--keep-boxes)"
   claudebox list
+  inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
+  claudebox rm peer --force >/dev/null 2>&1
   claudebox rm archive --force >/dev/null 2>&1
   claudebox list 2>&1 | grep -q 'no boxes yet' && ok "teardown: no boxes left" || no "a box survived teardown"
 fi
@@ -270,7 +438,14 @@ if [ "${#findings[@]}" -gt 0 ]; then
   echo
   printf '  %s\n' "${findings[@]}"
 fi
+
+if [ "${#audit[@]}" -gt 0 ]; then
+  phase "#15 audit answers — paste this block into heavy-duty/claudebox#15"
+  printf '  %s\n' "${audit[@]}"
+fi
+
 echo
-inf "this host still has Incus, claudenet, the ACL, the profile and the firewall rules."
+inf "this host still has Incus, claudenet, the ACL, the profile and the firewall rules"
+inf "(plus, unless re-run: dns.mode=none and NIC filtering from the D phase)."
 inf "to undo:  ~/.local/share/claudebox/host/teardown-host.sh [--purge-incus]"
 [ "$fail" -eq 0 ]
