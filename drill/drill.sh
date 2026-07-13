@@ -86,17 +86,20 @@ in_box() {
   return "$rc"
 }
 
-eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
-               # docker has several addresses, so never just "the first IP".
-               # ('incus list' name filters are NOT regexes — the anchored
-               # "^b$" form matched nothing, which is how A3 went unprobed for
-               # three runs — and its CSV quotes multi-address boxes across
-               # lines. Reading 'ip -o' inside the box is unambiguous.)
-               # Retries: the agent answers before DHCP hands out the address.
+# The box's address ON CLAUDENET. Three ways to get this wrong, all of them hit:
+#   · 'incus list' name filters are NOT regexes ("^b$" silently matches nothing)
+#   · its CSV quotes a multi-address box across lines
+#   · and the interface is NOT called eth0. The PROFILE names the device eth0,
+#     but inside a VM guest predictable naming renames it enp5s0. Six runs of
+#     A3 "not probed" were this, not the network.
+# So: read it from inside the box, and select by SUBNET (10.87.x, what claudenet
+# hands out) rather than by interface name — docker0 (172.17.x) is the decoy,
+# and the NIC's name is the guest's business, not ours.
+claudenet_ip() {
   local b="$1" ip _i
   for _i in $(seq 1 15); do
-    ip="$(in_box "$b" ip -4 -o addr show dev eth0 \
-          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet") { split($(i+1), a, "/"); print a[1]; exit } }')"
+    ip="$(in_box "$b" ip -4 -o addr show scope global \
+          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i+1) ~ /^10\.87\./) { split($(i+1), a, "/"); print a[1]; exit } }')"
     [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
     sleep 2
   done
@@ -457,9 +460,17 @@ esac
 # port answers the question just as well (refused = the packet arrived), and
 # the listener was what kept wedging the run. Ping corroborates: if the two
 # disagree, say so rather than pick one.
-PEER_IP="$(eth0_ip peer)"
-if [ -n "$PEER_IP" ]; then
-  inf "probing archive → peer ($PEER_IP), no listener: refused means it arrived, timeout means it was dropped"
+PEER_IP="$(claudenet_ip peer)"
+ARCH_IP_PRE="$(claudenet_ip archive)"
+if [ -n "$PEER_IP" ] && [ "$PEER_IP" = "$ARCH_IP_PRE" ]; then
+  # Guard, because this actually happened: a clone inherited its source's
+  # machine-id, hence its DHCP lease, hence its ADDRESS. Probing "archive →
+  # peer" was archive probing itself, and would have reported a cheerful
+  # "reachable" as a sibling-isolation failure. Never let A3 answer this.
+  no "archive and peer hold the SAME address ($PEER_IP) — the clone did not get its own identity; A3 cannot be probed"
+  aud "A3 sibling: NOT PROBED — clone/source IP collision (see the clone-identity fix)"
+elif [ -n "$PEER_IP" ]; then
+  inf "probing archive ($ARCH_IP_PRE) → peer ($PEER_IP), no listener: refused means it arrived, timeout means it was dropped"
   rc="$(box_curl archive "http://$PEER_IP:8088")"
   v="$(verdict "$rc")"
   timeout -k 5 30 incus exec archive -- ping -c1 -W2 "$PEER_IP" >/dev/null 2>&1 </dev/null
@@ -482,8 +493,8 @@ if [ -n "$PEER_IP" ]; then
       aud "A3 sibling: INCONCLUSIVE (curl exit $rc, ping exit $png)" ;;
   esac
 else
-  no "could not read peer's eth0 address — the sibling probe never ran"
-  aud "A3 sibling: NOT PROBED (no eth0 address on peer)"
+  no "could not read peer's claudenet address — the sibling probe never ran"
+  aud "A3 sibling: NOT PROBED (no 10.87.x address on peer)"
 fi
 
 # C5 — DNS enumeration (#15 A4): #12 predicts this LEAKS today. Either way it
@@ -505,7 +516,7 @@ fi
 
 # C7 — inbound, host → box (#15 A7): the ACL's default ingress drop. Same
 # listener-free logic, run from the host this time.
-ARCH_IP="$(eth0_ip archive)"
+ARCH_IP="$(claudenet_ip archive)"
 if [ -n "$ARCH_IP" ]; then
   curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" >/dev/null 2>&1
   hv="$(verdict $?)"
@@ -521,7 +532,7 @@ if [ -n "$ARCH_IP" ]; then
       aud "A7 inbound host→box: INCONCLUSIVE ($hv)" ;;
   esac
 else
-  no "could not read archive's eth0 address — the inbound probe never ran"
+  no "could not read archive's claudenet address — the inbound probe never ran"
   aud "A7 inbound host→box: NOT PROBED"
 fi
 
