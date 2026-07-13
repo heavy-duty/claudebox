@@ -405,6 +405,27 @@ wait_agent() {
   done
 }
 
+# A clone must not BE its source. Incus regenerates the MAC, but /etc/machine-id
+# rides along inside the disk — and systemd derives its DHCP client identifier
+# (DUID) from it. Same client-id, same dnsmasq lease: two boxes, one IP address,
+# to the second on the lease timer. Every box cloned from one snapshot collided
+# on the network, which is exactly the workflow claudebox exists for (log in
+# once, snapshot, clone forever).
+#
+# Truncating /etc/machine-id makes systemd mint a fresh one on the next boot, so
+# the reset costs one reboot. Do it before handing the box over, never after.
+reset_identity() {
+  local i="$1"
+  echo "claudebox: giving the clone its own identity (machine-id, DHCP lease)..."
+  incus exec "$i" -- sh -c '
+    : >/etc/machine-id
+    rm -f /var/lib/dbus/machine-id
+    ln -sf /etc/machine-id /var/lib/dbus/machine-id
+  ' || die "could not reset the clone's machine-id"
+  incus restart "$i"
+  wait_agent "$i"
+}
+
 cmd_new() {
   [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
   local instance; instance="$(iname_of "$name")"
@@ -415,6 +436,7 @@ cmd_new() {
     incus copy "$srcref" "$instance"
     incus start "$instance"
     wait_agent "$instance"
+    reset_identity "$instance"
     echo "claudebox: cloned $srcref — isolation and Claude auth carry over from the source."
   else
     local m extra=(); m="$(pick_mode)"
