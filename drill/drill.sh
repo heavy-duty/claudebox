@@ -129,8 +129,12 @@ export PATH="$HOME/.local/bin:$PATH"
 KEEP="${KEEP:-0}"
 ~/.local/share/claudebox/host/setup-host.sh || { echo "setup-host failed inside the group"; exit 1; }
 
-# Re-runnable: clear anything a previous drill left behind.
-incus delete -f drill clone archive peer payroll cbprobe cbcopy cbnotours >/dev/null 2>&1
+# Re-runnable: clear anything a previous drill left behind. One name at a
+# time — 'incus delete -f a b c' aborts at the first MISSING name, which is
+# how run 2 inherited run 1's boxes and cascaded five false FAILs.
+for n in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
+  incus delete -f "$n" >/dev/null 2>&1
+done
 incus network unset claudenet dns.mode 2>/dev/null
 incus profile device unset claude-dev eth0 security.mac_filtering 2>/dev/null
 incus profile device unset claude-dev eth0 security.ipv4_filtering 2>/dev/null
@@ -261,8 +265,11 @@ elif timeout 30 claudebox exec drill -- bash -lc 'claude --version' >/dev/null 2
   inf "PATH as exec sees it: $(timeout 30 claudebox exec drill -- printenv PATH 2>/dev/null)"
 else
   no "'claude --version' failed inside the box"
-  inf "cloud-init: $(timeout 30 claudebox incus drill -- exec {} -- cloud-init status 2>&1 | head -1)"
-  inf "claude's ~/.local/bin holds: $(timeout 30 claudebox incus drill -- exec {} -- ls /home/claude/.local/bin 2>&1 | tr '\n' ' ' | cut -c1-120)"
+  # diag output must skip the hatch's own 'claudebox: incus exec …' announce lines
+  hatch_out() { timeout 30 claudebox incus drill -- exec {} -- "$@" 2>&1 | grep -v '^claudebox:' | tail -1 | cut -c1-120; }
+  inf "cloud-init:   $(hatch_out cloud-init status)"
+  inf "binary runs?  $(hatch_out sudo -u claude /home/claude/.local/bin/claude --version)"
+  inf "exec PATH:    $(timeout 30 claudebox exec drill -- printenv PATH 2>/dev/null | tail -1)"
 fi
 claudebox exec drill -- gh --version >/dev/null 2>&1 \
   && ok "the GitHub CLI is installed in the box (PR #5)" || no "'gh --version' failed inside the box"
@@ -428,9 +435,14 @@ if incus profile device set claude-dev eth0 security.mac_filtering=true security
   claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
     && { ok "mac+ipv4 filtering on: the box still reaches the internet"; aud "B5 L2 filtering: box networking intact — safe for the claude workload"; } \
     || { no "mac+ipv4 filtering BROKE the box's networking"; aud "B5 L2 filtering: BREAKS the box — design veto"; }
-  claudebox exec archive -- docker info >/dev/null 2>&1 \
-    && { ok "…and in-box Docker still works under ipv4_filtering"; aud "B5 in-box docker under filtering: fine (NAT hides behind eth0, as #12 argued)"; } \
-    || { note "in-box docker not confirmed under filtering ('docker info' failed — may be container-mode)"; aud "B5 in-box docker under filtering: UNVERIFIED here"; }
+  if claudebox exec archive -- docker info >/dev/null 2>&1; then
+    ok "…and in-box Docker still works under ipv4_filtering"
+    aud "B5 in-box docker under filtering: fine (NAT hides behind eth0, as #12 argued)"
+  else
+    note "in-box docker not confirmed under filtering ('docker info' failed)"
+    aud "B5 in-box docker under filtering: UNVERIFIED here"
+    inf "dockerd: $(timeout 30 claudebox incus archive -- exec {} -- systemctl is-active docker 2>&1 | grep -v '^claudebox:' | tail -1 | cut -c1-80)"
+  fi
 else
   no "incus rejected security filtering on the profile NIC"
   aud "B5 L2 filtering: REJECTED on a profile NIC"
@@ -456,8 +468,8 @@ if [ "$KEEP" = 1 ]; then
   claudebox list
   inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
-  claudebox rm peer --force >/dev/null 2>&1
-  claudebox rm archive --force >/dev/null 2>&1
+  # every name the drill can have left, whatever branch a partial run took
+  for n in drill clone archive peer; do claudebox rm "$n" --force >/dev/null 2>&1; done
   claudebox list 2>&1 | grep -q 'no boxes yet' && ok "teardown: no boxes left" || no "a box survived teardown"
 fi
 

@@ -49,6 +49,10 @@ runcmd:
   - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   - apt-get install -y nodejs
   - sudo -u claude bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
+  # 'claudebox exec box -- claude …' runs through a NON-interactive shell, which
+  # reads no .bashrc/.zshrc — a PATH export there is invisible to it. The
+  # symlink makes claude reachable from every shell, interactive or not.
+  - ln -sf /home/claude/.local/bin/claude /usr/local/bin/claude
   - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.bashrc
   - chsh -s /usr/bin/zsh claude
   - sudo -u claude bash -lc 'RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
