@@ -66,16 +66,36 @@ wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
   return 1
 }
 
+# Read from inside a box WITHOUT ever hanging the drill.
+#
+# Two traps, both hit for real:
+#   · 'claudebox exec' becomes 'sudo -u claude -i' — a LOGIN zsh (oh-my-zsh and
+#     all). Fine for a person, needless machinery for a probe.
+#   · $( ) waits for stdout to CLOSE, not for the command to exit. A grandchild
+#     inheriting the exec session's stdout keeps the substitution open forever,
+#     and 'timeout' does not save you: it kills the wrapper, not the holder of
+#     the pipe. Run 4 hung 10+ minutes on exactly this.
+# So: talk to 'incus exec' directly, pin stdin to /dev/null, land the output in
+# a file (never a pipe), and hard-kill on timeout.
+in_box() {
+  local b="$1"; shift
+  local out; out="$(mktemp)"
+  timeout -k 5 20 incus exec "$b" -- "$@" >"$out" 2>/dev/null </dev/null
+  local rc=$?
+  cat "$out"; rm -f "$out"
+  return "$rc"
+}
+
 eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
-               # docker reports several addresses, so never just "the first IP".
-               # Read it from INSIDE the box: 'incus list' name filters are not
-               # regexes (the anchored "^b$" form matched nothing, which is how
-               # A3 went unprobed for three runs), and its CSV quotes multi-
-               # address boxes across lines. 'ip -o' is unambiguous.
+               # docker has several addresses, so never just "the first IP".
+               # ('incus list' name filters are NOT regexes — the anchored
+               # "^b$" form matched nothing, which is how A3 went unprobed for
+               # three runs — and its CSV quotes multi-address boxes across
+               # lines. Reading 'ip -o' inside the box is unambiguous.)
                # Retries: the agent answers before DHCP hands out the address.
   local b="$1" ip _i
   for _i in $(seq 1 15); do
-    ip="$(timeout 20 claudebox exec "$b" -- ip -4 -o addr show dev eth0 2>/dev/null \
+    ip="$(in_box "$b" ip -4 -o addr show dev eth0 \
           | awk '{ for (i = 1; i < NF; i++) if ($i == "inet") { split($(i+1), a, "/"); print a[1]; exit } }')"
     [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
     sleep 2
@@ -84,12 +104,21 @@ eth0_ip() {    # the box's address on claudenet — eth0 exactly; a box running
 }
 
 box_listen() { # start a throwaway HTTP listener INSIDE a box, detached.
-               # </dev/null is load-bearing: a child holding the exec pty makes
-               # 'incus exec' wait forever (the first live run hung here).
-  timeout 20 claudebox exec "$1" -- bash -c \
-    "command -v python3 >/dev/null && { nohup python3 -m http.server $2 --bind 0.0.0.0 >/dev/null 2>&1 </dev/null & }" \
+               # Every redirect here is load-bearing: a child still holding the
+               # exec session's stdio makes the call wait forever.
+  in_box "$1" sh -c \
+    "command -v python3 >/dev/null && { nohup python3 -m http.server $2 --bind 0.0.0.0 >/dev/null 2>&1 </dev/null & } ; exit 0" \
     >/dev/null 2>&1
   sleep 1
+}
+
+# A probe that must not hang, and whose curl exit code is the finding itself.
+# Prints the exit code; 28 = timed out (dropped), 7 = refused (it ARRIVED), 0 = connected.
+box_curl() {   # box_curl <box> <url> [timeout]
+  local b="$1" url="$2" t="${3:-5}"
+  timeout -k 5 $((t + 15)) incus exec "$b" -- curl -sS -m "$t" -o /dev/null "$url" \
+    >/dev/null 2>&1 </dev/null
+  printf '%s\n' "$?"
 }
 
 # --- stage 1: consent, install, then re-enter inside the incus-admin group ---
@@ -339,7 +368,7 @@ else
 fi
 
 # C1 — public egress (#15 A1; resolving the hostname also proves A5, gateway DNS)
-claudebox exec archive -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://api.github.com 2>/dev/null | grep -q 200 \
+[ "$(box_curl archive https://api.github.com 20)" = 0 ] \
   && { ok "box reaches the public internet (and gateway DNS resolves public names)"; aud "A1/A5 egress + public DNS: PASS"; } \
   || { no "box cannot reach the internet (a box that can't is useless)"; aud "A1/A5 egress: FAIL"; }
 
@@ -347,7 +376,7 @@ claudebox exec archive -- curl -sS -m 20 -o /dev/null -w '%{http_code}' https://
 python3 -m http.server 8099 --bind 10.87.0.1 >/dev/null 2>&1 &
 srv=$!
 sleep 2
-if claudebox exec archive -- curl -sS -m 5 -o /dev/null http://10.87.0.1:8099 2>/dev/null; then
+if [ "$(box_curl archive http://10.87.0.1:8099)" = 0 ]; then
   no "THE BOX REACHED THE HOST on 10.87.0.1:8099 — the firewall rules are not holding"
   aud "A2 box→host: FAIL — reached a gateway listener"
 else
@@ -357,7 +386,7 @@ fi
 kill $srv 2>/dev/null
 
 # C3 — RFC1918 (#15 A2)
-claudebox exec archive -- curl -sS -m 5 -o /dev/null http://192.168.1.1 2>/dev/null \
+[ "$(box_curl archive http://192.168.1.1)" = 0 ] \
   && { no "box reached a private-range address — the ACL is not dropping RFC1918"; aud "A2 RFC1918: FAIL"; } \
   || { ok "box → RFC1918 is dropped by the ACL"; aud "A2 RFC1918: dropped"; }
 
@@ -368,8 +397,8 @@ claudebox exec archive -- curl -sS -m 5 -o /dev/null http://192.168.1.1 2>/dev/n
 PEER_IP="$(eth0_ip peer)"
 if [ -n "$PEER_IP" ]; then
   box_listen peer 8088
-  claudebox exec archive -- curl -sS -m 5 -o /dev/null "http://$PEER_IP:8088" 2>/dev/null
-  rc=$?
+  inf "probing archive → peer at $PEER_IP:8088 …"
+  rc="$(box_curl archive "http://$PEER_IP:8088")"
   case "$rc" in
     0) no "BOX A CONNECTED TO BOX B ($PEER_IP:8088) — sibling isolation does not hold"
        aud "A3 sibling: FAIL — connected. #16 is a FIX, not a formalization" ;;
@@ -385,8 +414,8 @@ fi
 
 # C5 — DNS enumeration (#15 A4): #12 predicts this LEAKS today. Either way it
 # is audit data, not a code failure — #16's dns.mode=none is the fix.
-e1="$(claudebox exec archive -- getent hosts peer 2>/dev/null)"
-e2="$(claudebox exec archive -- getent hosts peer.incus 2>/dev/null)"
+e1="$(in_box archive getent hosts peer)"
+e2="$(in_box archive getent hosts peer.incus)"
 if [ -n "$e1$e2" ]; then
   note "DNS enumeration leaks, as #12 predicted: a box resolves its sibling ($(printf '%s' "$e1$e2" | head -1 | cut -c1-50))"
   aud "A4 dns enumeration: LEAKS (bare='${e1:+yes}' fqdn='${e2:+yes}') — #16's dns.mode=none earns its place"
@@ -424,19 +453,18 @@ phase "D. Hardening rehearsal — #16's changes, applied live (#15 section B)"
 # Distinguish TRANSIENT (recovers) from BROKEN (still dead after 30s), and say so.
 if incus network set claudenet dns.mode=none 2>/dev/null; then
   sleep 2
-  claudebox exec archive -- getent hosts peer.incus >/dev/null 2>&1 \
+  [ -n "$(in_box archive getent hosts peer.incus)" ] \
     && { no "dns.mode=none did not stop sibling resolution"; aud "B3 dns.mode=none: does NOT close the leak"; } \
     || { ok "dns.mode=none: sibling names no longer resolve"; aud "B3 dns.mode=none: closes the enumeration leak"; }
 
-  if claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null; then
+  if [ "$(box_curl archive https://api.github.com 20)" = 0 ]; then
     ok "dns.mode=none: public egress still works, immediately"
     aud "B3 egress under dns.mode=none: intact, no outage window"
   else
     settled=0
     for _i in $(seq 1 6); do
       sleep 5
-      claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
-        && { settled=1; break; }
+      [ "$(box_curl archive https://api.github.com 20)" = 0 ] && { settled=1; break; }
     done
     if [ "$settled" = 1 ]; then
       note "dns.mode=none caused a TRANSIENT DNS outage (dnsmasq restart), recovered within 30s"
@@ -456,15 +484,15 @@ fi
 if incus profile device set claude-dev eth0 security.mac_filtering=true security.ipv4_filtering=true 2>/dev/null; then
   incus restart -f archive peer >/dev/null 2>&1
   wait_box archive || note "archive slow to return after the filtering restart"
-  claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
+  [ "$(box_curl archive https://api.github.com 20)" = 0 ] \
     && { ok "mac+ipv4 filtering on: the box still reaches the internet"; aud "B5 L2 filtering: box networking intact — safe for the claude workload"; } \
     || { no "mac+ipv4 filtering BROKE the box's networking"; aud "B5 L2 filtering: BREAKS the box — design veto"; }
   # 'docker info' as the claude user needs the docker group, which a fresh exec
   # session may not have picked up; sudo is the honest probe of the DAEMON.
-  if claudebox exec archive -- sudo docker run --rm alpine:latest true >/dev/null 2>&1; then
+  if in_box archive docker run --rm alpine:latest true >/dev/null 2>&1; then
     ok "…and in-box Docker still pulls and runs a container under ipv4_filtering"
     aud "B5 in-box docker under filtering: WORKS — pulls + runs (NAT hides behind eth0, as #12 argued)"
-  elif claudebox exec archive -- sudo docker info >/dev/null 2>&1; then
+  elif in_box archive docker info >/dev/null 2>&1; then
     note "dockerd is up under filtering but could not pull/run a container — check egress from docker0"
     aud "B5 in-box docker under filtering: daemon up, container run FAILED — #16 must check docker0 egress"
   else
@@ -481,7 +509,7 @@ fi
 # #16's sibling drop is renumber-proof by construction.
 if incus network acl rule add claude-isolate egress action=drop destination=@internal 2>/tmp/ai.err; then
   ok "@internal accepted as an ACL destination on a bridge network"
-  claudebox exec archive -- curl -sS -m 20 -o /dev/null https://api.github.com 2>/dev/null \
+  [ "$(box_curl archive https://api.github.com 20)" = 0 ] \
     && { ok "…and public egress survives the @internal drop (the carve-out wins)"; aud "B1 @internal: accepted, egress survives ⇒ #16 uses @internal"; } \
     || { no "the @internal drop killed egress/DNS — ordering does not protect the carve-out"; aud "B1 @internal: accepted but kills DNS ⇒ #16 derives the subnet instead"; }
   incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
