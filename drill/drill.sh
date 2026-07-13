@@ -154,20 +154,46 @@ EOF
 
   phase "Host setup (Incus, claudenet, ACL, profile, firewall)"
   # setup-host.sh installs nftables itself when neither nft nor UFW exists
-  # (fixed in this PR — a stock Debian 13 cloud image ships neither). This
-  # guard stays as a tripwire: if it fires, that fix regressed.
+  # (a stock Debian 13 cloud image ships neither). This guard is a tripwire:
+  # if it fires, that fix regressed.
   if ! command -v nft >/dev/null 2>&1 && ! command -v ufw >/dev/null 2>&1; then
     note "neither nft nor ufw present pre-setup — setup-host.sh must install nftables itself (it fixed this once; watch that it still does)"
   fi
-  sudo apt-get install -y -qq incus >/dev/null 2>&1   # so the group exists before we sg
-  ~/.local/share/claudebox/host/setup-host.sh || true # first run may only add the group
+
+  # Sudo, up front and out loud. Later calls run unattended, and a password
+  # prompt swallowed by a '-qq' redirect looks exactly like a hang.
+  sudo -v || { echo "drill: need sudo (the host setup installs packages and firewall rules)"; exit 1; }
+
+  # apt's lock is held by apt-daily / unattended-upgrades on a fresh cloud
+  # image, and 'apt-get -qq >/dev/null' waits for it in COMPLETE SILENCE —
+  # which is how run 5 looked stuck for minutes right after this header.
+  # Say what we are waiting for, and give up rather than hang forever.
+  if ! command -v incus >/dev/null 2>&1; then
+    inf "installing incus (waiting for the apt lock if a background upgrade holds it)…"
+    if ! sudo DEBIAN_FRONTEND=noninteractive timeout 600 \
+           apt-get -o DPkg::Lock::Timeout=300 install -y incus; then
+      echo "drill: 'apt-get install incus' failed or timed out." >&2
+      echo "  a background apt job usually holds the lock. check with:" >&2
+      echo "    sudo fuser -v /var/lib/dpkg/lock-frontend" >&2
+      echo "    systemctl status unattended-upgrades apt-daily.service" >&2
+      exit 1
+    fi
+  else
+    inf "incus already installed — skipping apt"
+  fi
+
+  inf "running setup-host.sh (first pass: may only add you to incus-admin)…"
+  ~/.local/share/claudebox/host/setup-host.sh || true
   # The group we were just added to isn't in this shell's credentials yet.
+  inf "re-entering inside the incus-admin group…"
   exec sg incus-admin -c "IN_GROUP=1 CLAUDEBOX_REPO='$REPO' CLAUDEBOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
 KEEP="${KEEP:-0}"
+inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
 ~/.local/share/claudebox/host/setup-host.sh || { echo "setup-host failed inside the group"; exit 1; }
+inf "host setup complete"
 
 # Re-runnable: clear anything a previous drill left behind. One name at a
 # time — 'incus delete -f a b c' aborts at the first MISSING name, which is
