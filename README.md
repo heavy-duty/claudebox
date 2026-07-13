@@ -84,9 +84,14 @@ claudebox snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch
 claudebox restore <box> <snap>     # roll back to a snapshot
 claudebox down <box>               # stop (state kept; `start` resumes)
 claudebox start <box>              # start a stopped box
-claudebox rm <box>                 # delete the box (irreversible; snapshot first)
+claudebox rm <box> [--force]       # delete the box + its snapshots (asks first)
 claudebox status                   # deprecated alias for `list`
+claudebox help [<command>]         # full help, or one command's page
 ```
+
+Every command takes `--help`, and options come after the command
+(`claudebox list --json`). Exit status: `0` ok, `1` it went wrong, `2` you asked
+wrong.
 
 `new` fresh-launches from cloud-init, or with `--from` clones an existing box or
 snapshot. VM mode (`--vm`, the default where `/dev/kvm` exists) is the trust-less

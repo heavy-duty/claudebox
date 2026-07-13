@@ -1,38 +1,298 @@
 #!/usr/bin/env bash
 # claudebox — trust-less, isolated Incus VMs with Claude Code, creds-free.
-#   claudebox new --name <box> [--from <src>[/<snap>]] [--remote r] [--vm|--container]
-#   claudebox list [--json]            — all your boxes
-#   claudebox info <box>               — one box: state, IP, snapshot labels
-#   claudebox shell|down|start|rm <box>
-#   claudebox exec <box> -- <cmd...>
-#   claudebox snapshot <box> [label]
-#   claudebox restore <box> <snapshot>
-# Boxes carry NO secrets: log into Claude interactively inside ('claude' then
-# /login). Reuse an authenticated box via 'snapshot' + 'new --from'.
+# The help text lives in usage()/help_cmd(), not in this comment.
 set -euo pipefail
 
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-remote=""; mode="auto"; name=""; from=""; force=0; json=0
+remote=""; mode="auto"; name=""; from=""; force=0; json=0; want_help=0
+
+die() { echo "claudebox: $*" >&2; exit 1; }         # 1 = it went wrong
+usage_error() { echo "claudebox: $*" >&2; echo "try 'claudebox help'." >&2; exit 2; }  # 2 = you asked wrong
+version() { echo "claudebox $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)"; }
+
+COMMANDS="new list info shell exec snapshot restore down start rm status help"
+is_command() { case " $COMMANDS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+synopsis_of() {
+  case "$1" in
+    new)      echo "claudebox new --name <box> [--from <src>[/<snap>]] [--vm|--container]" ;;
+    list)     echo "claudebox list [--json]" ;;
+    info)     echo "claudebox info <box> [--json]" ;;
+    shell)    echo "claudebox shell <box>" ;;
+    exec)     echo "claudebox exec <box> -- <cmd...>" ;;
+    snapshot) echo "claudebox snapshot <box> [<label>]" ;;
+    restore)  echo "claudebox restore <box> <snapshot>" ;;
+    down)     echo "claudebox down <box>" ;;
+    start)    echo "claudebox start <box>" ;;
+    rm)       echo "claudebox rm <box> [--force]" ;;
+    status)   echo "claudebox status" ;;
+    help)     echo "claudebox help [<command>]" ;;
+  esac
+}
+
+# Nearest command by edit distance — a typo should point somewhere, not just fail.
+suggest() {
+  printf '%s' "$COMMANDS" | tr ' ' '\n' | awk -v w="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" '
+    function dist(a, b,   la, lb, i, j, c, prev, cur) {
+      la = length(a); lb = length(b)
+      for (j = 0; j <= lb; j++) prev[j] = j
+      for (i = 1; i <= la; i++) {
+        cur[0] = i
+        for (j = 1; j <= lb; j++) {
+          c = (substr(a, i, 1) == substr(b, j, 1)) ? 0 : 1
+          cur[j] = prev[j] + 1
+          if (cur[j - 1] + 1 < cur[j]) cur[j] = cur[j - 1] + 1
+          if (prev[j - 1] + c < cur[j]) cur[j] = prev[j - 1] + c
+        }
+        for (j = 0; j <= lb; j++) prev[j] = cur[j]
+      }
+      return prev[lb]
+    }
+    BEGIN { best = 99 }
+    { d = dist(w, $0); if (d < best) { best = d; hit = $0 } }
+    END { if (best <= 2) print hit }'
+}
+
+unknown_command() {
+  local hint; hint="$(suggest "$1")"
+  if [ -n "$hint" ]; then
+    echo "claudebox: unknown command: $1 — did you mean '$hint'?" >&2
+  else
+    echo "claudebox: unknown command: $1" >&2
+  fi
+  echo "try 'claudebox help' for the command list." >&2
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+claudebox — trust-less, network-isolated Incus VMs with Claude Code, creds-free.
+
+USAGE
+  claudebox <command> [<args>] [options]
+
+COMMANDS
+  new        Mint a box: fresh from cloud-init, or --from an existing box/snapshot
+  list       List your boxes
+  info       One box: state, type, IP, and its snapshot labels
+  shell      Open a shell in a box, as the claude user
+  exec       Run a command inside a box
+  snapshot   Checkpoint a box (label defaults to manual-<epoch>)
+  restore    Roll a box back to one of its snapshots
+  down       Stop a box, keeping its state ('start' resumes it)
+  start      Start a stopped box
+  rm         Delete a box and its snapshots — irreversible, and it asks first
+  status     Deprecated alias for 'list'
+  help       This help, or 'claudebox help <command>' for one command
+
+OPTIONS
+  --name <box>          Name for the new box                          (new)
+  --from <src>[/<snap>] Clone from box <src>, or from its snapshot    (new)
+  --vm                  Force VM mode: the trust-less target          (new)
+  --container           Force container mode: weaker isolation,       (new)
+                          dev/test only. Default where /dev/kvm is absent.
+  --json                Emit Incus JSON instead of a table     (list, info)
+  --force, -f           Delete without the confirmation prompt        (rm)
+  --remote <r>          Act on Incus remote <r>                       (any)
+  --help, -h            Help; after a command, help for that command
+  --version, -V         Print the claudebox version
+
+  Options come after the command: 'claudebox list --json', not 'claudebox --json list'.
+
+EXAMPLES
+  # mint a box and log in inside it — the tool never handles your token
+  claudebox new --name work
+  claudebox shell work                    # then: run 'claude', then /login
+
+  # log in once, reuse forever: checkpoint the authed box, clone from it
+  claudebox snapshot work authed
+  claudebox new --name feature --from work/authed
+
+  # what have I got, and what can I clone?
+  claudebox list
+  claudebox info work
+
+  # run something without opening a shell
+  claudebox exec work -- git -C project pull
+
+EXIT STATUS
+  0  ok
+  1  it went wrong (Incus failed, no such box, aborted at a prompt)
+  2  you asked wrong (unknown command, bad flag, destructive act without --force)
+
+THE MODEL
+  A box carries NO credentials. You authenticate interactively inside it
+  ('claude' then /login; 'gh auth login'); claudebox never stores or injects a
+  secret. A box reaches the public internet and nothing else — there is no
+  inbound path. Destroying a box loses nothing you didn't push.
+
+  Docs: https://github.com/heavy-duty/claudebox
+EOF
+}
+
+help_cmd() {
+  echo "usage: $(synopsis_of "$1")"
+  echo
+  case "$1" in
+    new) cat <<'EOF'
+Mint a box. Without --from, launches a fresh Debian 13 box from cloud-init
+(~10 min cold) with Claude Code installed and NO credentials. With --from,
+clones an existing box or one of its snapshots — Claude login, git creds and
+clones carry over, isolation is preserved.
+
+  --name <box>           Required. The box's name.
+  --from <src>[/<snap>]  Clone src's live state, or its snapshot <snap>.
+  --vm | --container     Force the mode. VM is the trust boundary and the
+                         default wherever /dev/kvm exists; container mode
+                         (security.nesting=true) is the fallback for hosts
+                         without nested virt — weaker isolation, dev/test only.
+
+  claudebox new --name work
+  claudebox new --name feature --from work/authed
+EOF
+;;
+    list) cat <<'EOF'
+List the boxes claudebox minted on this host: name, state, type, snapshot count.
+Takes no box — for one box, that's 'claudebox info <box>'.
+
+  --json   Incus's JSON, straight through, for scripting.
+
+  claudebox list
+EOF
+;;
+    info) cat <<'EOF'
+Show one box: state, type, IP address, and — the reason this exists — the
+labels of its snapshots, with the --from line to clone one.
+
+  --json   Incus's JSON, straight through, for scripting.
+
+  claudebox info work
+EOF
+;;
+    shell) cat <<'EOF'
+Open an interactive shell in a running box as the 'claude' user. This is the
+only entry path — there is no SSH and no inbound route to a box.
+
+  claudebox shell work
+EOF
+;;
+    exec) cat <<'EOF'
+Run a command inside a box as the 'claude' user. Everything after -- is passed
+through untouched; the -- is required, or claudebox will read your command's
+flags as its own.
+
+  claudebox exec work -- git -C project pull
+  claudebox exec work -- claude --version
+EOF
+;;
+    snapshot) cat <<'EOF'
+Checkpoint a box. Snapshots are how an authenticated box is reused: log in
+once, snapshot, then 'new --from <box>/<label>' as often as you like. The
+label defaults to manual-<epoch>; 'claudebox info <box>' shows the labels you
+have.
+
+  claudebox snapshot work authed
+EOF
+;;
+    restore) cat <<'EOF'
+Roll a box back to one of its snapshots, in place. Anything in the box since
+that snapshot is lost. 'claudebox info <box>' lists the labels.
+
+  claudebox restore work authed
+EOF
+;;
+    down) cat <<'EOF'
+Stop a box. Its disk and state are kept — 'claudebox start' resumes it, Claude
+login and all.
+
+  claudebox down work
+EOF
+;;
+    start) cat <<'EOF'
+Start a stopped box.
+
+  claudebox start work
+EOF
+;;
+    rm) cat <<'EOF'
+Delete a box and every snapshot it has. This cannot be undone, so it asks for
+confirmation first; --force (-f) skips the prompt. With no TTY to confirm on
+(a script, a pipe), it refuses unless --force is given.
+
+  claudebox rm work
+  claudebox rm work --force
+EOF
+;;
+    status) cat <<'EOF'
+Deprecated alias for 'claudebox list'. It ignored the <box> argument it
+advertised, so it was split into 'list' (all boxes) and 'info <box>' (one). It
+still works, and forwards to 'list'.
+EOF
+;;
+    help) cat <<'EOF'
+Print the general help, or the help for one command.
+
+  claudebox help
+  claudebox help new
+EOF
+;;
+  esac
+}
+
+show_help() {   # "" → general help
+  case "${1:-}" in
+    ""|help) usage ;;
+    *) is_command "$1" || unknown_command "$1"; help_cmd "$1" ;;
+  esac
+}
+
 cmd="${1:-help}"; shift || true
+case "$cmd" in
+  -h|--help)    usage; exit 0 ;;
+  -V|--version) version; exit 0 ;;
+  -*)           usage_error "options come after the command — try 'claudebox <command> $cmd ...'" ;;
+esac
+
 args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --name) name="$2"; shift 2 ;;
-    --from) from="$2"; shift 2 ;;
-    --remote) remote="$2:"; shift 2 ;;
+    --name) [ $# -ge 2 ] || usage_error "--name needs a value"; name="$2"; shift 2 ;;
+    --from) [ $# -ge 2 ] || usage_error "--from needs a value"; from="$2"; shift 2 ;;
+    --remote) [ $# -ge 2 ] || usage_error "--remote needs a value"; remote="$2:"; shift 2 ;;
     --vm) mode=vm; shift ;;
     --container) mode=container; shift ;;
-    --force) force=1; shift ;;
+    --force|-f) force=1; shift ;;
     --json) json=1; shift ;;
+    --help|-h) want_help=1; shift ;;
+    --version|-V) version; exit 0 ;;
     --) shift; args+=("$@"); break ;;
+    # An unrecognized flag used to be swallowed as a positional — so a typo'd
+    # --labl silently became a snapshot's label. Say so instead.
+    -*)
+      if [ "$cmd" = exec ]; then
+        usage_error "unknown option: $1 — a command's own flags go after --, as in 'claudebox exec <box> -- <cmd...>'"
+      fi
+      usage_error "unknown option: $1 (see 'claudebox help $cmd')" ;;
     *) args+=("$1"); shift ;;
   esac
 done
 
-die() { echo "claudebox: $*" >&2; exit 1; }
+if [ "$want_help" -eq 1 ]; then show_help "$cmd"; exit 0; fi
+
 iname_of() { echo "$remote$1"; }   # instance name = box name; claudebox tags them with user.claudebox=1
 need_name() {
-  [ "${#args[@]}" -ge 1 ] && [ -n "${args[0]}" ] || die "usage: claudebox $cmd <box>"
+  if [ "${#args[@]}" -lt 1 ] || [ -z "${args[0]}" ]; then
+    usage_error "usage: $(synopsis_of "$cmd")"
+  fi
+}
+
+confirm() {   # $1 = prompt. --force, or a TTY to ask on, or we refuse.
+  if [ "$force" -eq 1 ]; then return 0; fi
+  [ -t 0 ] || usage_error "refusing to $1 without --force (no terminal to confirm on)"
+  local reply
+  printf 'claudebox: %s? this cannot be undone. [y/N] ' "$1"
+  read -r reply
+  case "$reply" in y|Y|yes|YES|Yes) return 0 ;; *) die "aborted." ;; esac
 }
 
 pick_mode() {
@@ -175,10 +435,15 @@ case "$cmd" in
   exec)     need_name; incus exec "$(iname_of "${args[0]}")" -- sudo -u claude -i "${args[@]:1}" ;;
   down)     need_name; incus stop "$(iname_of "${args[0]}")" ;;
   start)    need_name; incus start "$(iname_of "${args[0]}")" ;;
-  rm)       need_name; incus delete -f "$(iname_of "${args[0]}")"; echo "claudebox: removed $(iname_of "${args[0]}")" ;;
+  # -f is how Incus deletes a *running* instance; it is not our confirmation.
+  # The prompt is: 'rm' destroys the box and every snapshot on it.
+  rm)       need_name; inst="$(iname_of "${args[0]}")"
+            confirm "delete $inst and all its snapshots"
+            incus delete -f "$inst"; echo "claudebox: removed $inst" ;;
   list)     list ;;
   info)     need_name
             if [ "$json" -eq 1 ]; then incus list "$(iname_of "${args[0]}")" --format json; else info "${args[0]}"; fi ;;
   status)   echo "claudebox: 'status' is deprecated — use 'claudebox list'." >&2; list_all ;;
-  help|*)   sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+  help)     show_help "${args[0]:-}" ;;
+  *)        unknown_command "$cmd" ;;
 esac
