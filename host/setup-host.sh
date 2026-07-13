@@ -45,6 +45,11 @@ incus network set claudenet security.acls=claude-isolate \
 # which the RFC1918-only ACL cannot express. Rules live in
 # claudebox-firewall.sh; a boot-time systemd unit re-applies the runtime-only
 # parts (nft table, DOCKER-USER) after every reboot.
+# The no-UFW path drives nft directly, and a stock Debian 13 cloud image ships
+# neither nftables nor UFW — install the dependency we are about to use.
+if ! command -v ufw >/dev/null 2>&1 && ! command -v nft >/dev/null 2>&1; then
+  sudo apt-get install -y nftables
+fi
 sudo install -m 755 "$here/host/claudebox-firewall.sh" /usr/local/sbin/claudebox-firewall
 sudo install -m 644 "$here/host/claudebox-firewall.service" /etc/systemd/system/
 sudo systemctl daemon-reload
