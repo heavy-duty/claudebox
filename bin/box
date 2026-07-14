@@ -830,6 +830,15 @@ cmd_info() {
   printf '%-11s%s\n' NAME "$box" STATE "${state:--}" TYPE "$(short_type "$type")" \
     IPV4 "$(box_ipv4 "$inst")"
 
+  # A box with a hole says so — an exposure visible only to --list is a hole
+  # info would deny. One line per open door.
+  local d listen
+  while IFS= read -r d; do
+    case "$d" in expose-*) : ;; *) continue ;; esac
+    listen="$(incus config device get "$inst" "$d" listen 2>/dev/null)"
+    printf '%-11s%s → port %s\n' EXPOSED "${listen#tcp:}" "${d#expose-}"
+  done < <(incus config device list "$inst" 2>/dev/null)
+
   echo
   case "${snaps:-0}" in
     ''|0)
@@ -957,15 +966,19 @@ cmd_incus() {
 #   · Each exposure is a named proxy device (expose-<port>), so 'box info' and
 #     --list can see it and --remove can undo it. A box with a hole says so.
 #
-# Mechanism (VMs): an Incus 'proxy' device forwards host 127.0.0.1:<hostport>
-# to the box's <ip>:<port>. Because a VM's forkproxy connects over the network
-# to the guest, the in-box server must listen on 0.0.0.0 (not just its own
-# loopback) — inside an isolated box that is safe: boxnet + port-isolation +
-# the ingress drop mean only this proxy can reach it. And that ingress drop is
-# exactly what would eat the forkproxy's connection, so expose adds a SCOPED
-# ACL allow (this box's ip + this port only) beside the device. Whether the
-# proxy needs that allow, or bypasses the ACL, is settled by the drill, not
-# here — the allow is scoped and harmless if redundant.
+# Mechanism (VMs): an Incus 'proxy' device in NAT mode DNATs host
+# 127.0.0.1:<hostport> to the box's <ip>:<port>. The traffic rides the
+# network into the guest, so the in-box server must listen on 0.0.0.0 (not
+# just its own loopback) — inside an isolated box that is safe: boxnet +
+# port-isolation + the ingress drop mean only this door can reach it. Three
+# pieces beside the device itself, each one a drill-found absence:
+#   · a SCOPED ACL allow (this box's ip + this port only) — the ingress drop
+#     that makes A7 true would eat the DNAT'd packet;
+#   · route_localnet + a loopback masquerade on the host (box-firewall.sh) —
+#     Incus installs only the DNAT, and a loopback-sourced packet can neither
+#     leave the host nor be answered without them;
+#   · a static ipv4.address pin on the NIC — NAT mode refuses to start
+#     without one (see below).
 exposure_dev() { echo "expose-$1"; }   # device name for a port
 
 cmd_expose() {
@@ -1061,6 +1074,14 @@ cmd_expose() {
     rm -f "$err"
     echo "box: 127.0.0.1:$hport → $box:$port"
     echo "box: (the in-box server must listen on 0.0.0.0:$port, not only its own loopback)"
+    # The device alone is not the door: the DNAT'd loopback packet also needs
+    # route_localnet on the bridge (box-firewall.sh installs it, with the
+    # masquerade). Readable without root — warn instead of handing over a
+    # door that silently does not answer.
+    if [ "$(cat /proc/sys/net/ipv4/conf/boxnet/route_localnet 2>/dev/null)" != 1 ]; then
+      echo "box: WARNING — route_localnet is off on boxnet, so this door will NOT answer." >&2
+      echo "box: the host firewall predates expose — apply it: sudo /usr/local/sbin/box-firewall" >&2
+    fi
   else
     # NEVER swallow incus's reason — the first cut of this verb died with a bare
     # "could not add the proxy device" and told the drill nothing.
