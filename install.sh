@@ -4,7 +4,7 @@ set -euo pipefail
 # claudebox installer — intended for: curl -fsSL .../install.sh | bash
 #
 # Downloads the claudebox repo tarball, installs the whole tree under
-# $DEST, and puts a `claudebox` symlink on PATH via $BINDIR.
+# $DEST, and puts a `box` symlink on PATH via $BINDIR.
 
 REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
 REF="${CLAUDEBOX_REF:-main}"
@@ -26,7 +26,7 @@ trap cleanup EXIT
 
 URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
 
-log "installing claudebox ($REPO@$REF)"
+log "installing box (the claudebox repo) ($REPO@$REF)"
 log "downloading $URL"
 curl -fsSL "$URL" -o "$TMPDIR/claudebox.tar.gz" \
   || die "failed to download $URL"
@@ -38,7 +38,7 @@ tar -xzf "$TMPDIR/claudebox.tar.gz" -C "$TMPDIR" \
 # GitHub archives extract to a single top-level dir like claudebox-<ref>/
 EXTRACTED="$(find "$TMPDIR" -maxdepth 1 -type d -name 'claudebox-*' | head -n1)"
 [ -n "$EXTRACTED" ] || die "could not find extracted claudebox-* directory in archive"
-[ -f "$EXTRACTED/bin/claudebox" ] || die "archive does not contain bin/claudebox — is $REPO@$REF correct?"
+[ -f "$EXTRACTED/bin/box" ] || die "archive does not contain bin/box — is $REPO@$REF correct?"
 
 # --- atomically replace $DEST ---------------------------------------------
 log "installing into $DEST"
@@ -46,12 +46,19 @@ rm -rf "$DEST"
 mkdir -p "$(dirname "$DEST")"
 mv "$EXTRACTED" "$DEST"
 
-chmod +x "$DEST/bin/claudebox"
+chmod +x "$DEST/bin/box"
 
-# --- put claudebox on PATH -------------------------------------------------
+# --- put box on PATH -------------------------------------------------------
 mkdir -p "$BINDIR"
-ln -sf "$DEST/bin/claudebox" "$BINDIR/claudebox"
-log "linked $BINDIR/claudebox -> $DEST/bin/claudebox"
+ln -sf "$DEST/bin/box" "$BINDIR/box"
+log "linked $BINDIR/box -> $DEST/bin/box"
+# 0.4.0 renamed the binary (clean cut): clear a stale claudebox symlink so it
+# cannot dangle at the old bin path forever. Old BOXES keep working — the CLI
+# honors their legacy tag — it is only the old command name that retires.
+if [ -L "$BINDIR/claudebox" ]; then
+  rm -f "$BINDIR/claudebox"
+  log "removed the old claudebox symlink — the command is 'box' now (your existing boxes keep working)"
+fi
 
 # --- PATH check ------------------------------------------------------------
 case ":$PATH:" in
@@ -65,8 +72,8 @@ esac
 
 # --- environment check -----------------------------------------------------
 if ! command -v incus >/dev/null 2>&1; then
-  warn "incus was not found. claudebox needs Incus on the host."
+  warn "incus was not found. box needs Incus on the host."
   warn "  run the one-time host setup: $DEST/host/setup-host.sh"
 fi
 
-log "done — try: claudebox new --name test"
+log "done — try: box new --name test"

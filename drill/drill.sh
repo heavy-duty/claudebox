@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# drill.sh — end-to-end drill for claudebox, against a real Incus.
+# drill.sh — end-to-end drill for box (the claudebox repo), against a real Incus.
 #
 #   ⚠ DESTRUCTIVE, AND MEANT TO BE. Run it on a THROWAWAY host you can format.
 #     It installs Incus, rewrites the host's firewall rules, installs a systemd
@@ -8,13 +8,13 @@
 #
 #   bash drill/drill.sh                  # asks first
 #   bash drill/drill.sh --yes            # no prompt (CI, or you've read it)
-#   bash drill/drill.sh --ref main       # drill a different branch of claudebox
+#   bash drill/drill.sh --ref main       # drill a different branch of the repo
 #   bash drill/drill.sh --keep-boxes     # leave the boxes up to poke at
 #
 # Four phases:
-#   A. Incus semantics — the assumptions claudebox is built on, probed directly.
+#   A. Incus semantics — the assumptions box is built on, probed directly.
 #      These were only ever verified against a stub.
-#   B. The claudebox surface — the whole CLI, end to end, including the boundary.
+#   B. The box surface — the whole CLI, end to end, including the boundary.
 #   C. Isolation baseline — does the trust boundary actually hold? (#15 section A)
 #   D. Hardening rehearsal — #16's proposed changes, applied live and re-probed
 #      (#15 section B). FAILs here are design vetoes, not code bugs.
@@ -60,7 +60,7 @@ aud()  { audit+=("$*"); }                       # an answer for the #15 audit
 wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
   local b="$1" _i
   for _i in $(seq 1 60); do
-    claudebox exec "$b" -- true >/dev/null 2>&1 && return 0
+    box exec "$b" -- true >/dev/null 2>&1 && return 0
     sleep 2
   done
   return 1
@@ -69,7 +69,7 @@ wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
 # Read from inside a box WITHOUT ever hanging the drill.
 #
 # Two traps, both hit for real:
-#   · 'claudebox exec' becomes 'sudo -u claude -i' — a LOGIN zsh (oh-my-zsh and
+#   · 'box exec' becomes 'sudo -u <template user> -i' — a LOGIN zsh (oh-my-zsh and
 #     all). Fine for a person, needless machinery for a probe.
 #   · $( ) waits for stdout to CLOSE, not for the command to exit. A grandchild
 #     inheriting the exec session's stdout keeps the substitution open forever,
@@ -86,20 +86,20 @@ in_box() {
   return "$rc"
 }
 
-# The box's address ON CLAUDENET. Three ways to get this wrong, all of them hit:
+# The box's address ON BOXNET. Three ways to get this wrong, all of them hit:
 #   · 'incus list' name filters are NOT regexes ("^b$" silently matches nothing)
 #   · its CSV quotes a multi-address box across lines
 #   · and the interface is NOT called eth0. The PROFILE names the device eth0,
 #     but inside a VM guest predictable naming renames it enp5s0. Six runs of
 #     A3 "not probed" were this, not the network.
-# So: read it from inside the box, and select by SUBNET (10.87.x, what claudenet
+# So: read it from inside the box, and select by SUBNET (10.88.x, what boxnet
 # hands out) rather than by interface name — docker0 (172.17.x) is the decoy,
 # and the NIC's name is the guest's business, not ours.
-claudenet_ip() {
+boxnet_ip() {
   local b="$1" ip _i
   for _i in $(seq 1 15); do
     ip="$(in_box "$b" ip -4 -o addr show scope global \
-          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i+1) ~ /^10\.87\./) { split($(i+1), a, "/"); print a[1]; exit } }')"
+          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i+1) ~ /^10\.88\./) { split($(i+1), a, "/"); print a[1]; exit } }')"
     [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
     sleep 2
   done
@@ -137,15 +137,29 @@ box_pings() {   # box_pings <box> <ip> → 0 if it answers ICMP
   timeout -k 5 20 incus exec "$1" -- ping -c1 -W2 "$2" >/dev/null 2>&1 </dev/null
 }
 
+# Mint with a heartbeat. box new's own narration lands in the log; a dot every
+# 5s on the drill's terminal proves the run is ALIVE — a silent multi-minute
+# mint is indistinguishable from a wedge, and that ambiguity has cost whole
+# evenings. The log line says where to watch the real progress.
+mint_box() {   # mint_box <log> <box-new args...> → box new's exit code
+  local log="$1"; shift
+  inf "watch it live in another terminal:  tail -f $log"
+  box new "$@" >"$log" 2>&1 </dev/null &
+  local pid=$!
+  while kill -0 "$pid" 2>/dev/null; do printf '.'; sleep 5; done
+  printf '\n'
+  wait "$pid"
+}
+
 # --- stage 1: consent, install, then re-enter inside the incus-admin group ---
 if [ "${IN_GROUP:-0}" != 1 ]; then
   if [ "$YES" -ne 1 ]; then
     cat <<EOF
 This will, ON THIS HOST ($(hostname)):
   · install Incus and a systemd unit
-  · create a network (claudenet), an ACL, and a profile
+  · create a network (boxnet), an ACL, and a profile
   · rewrite firewall rules (nft or UFW, and Docker's DOCKER-USER chain)
-  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy
+  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl
   · mutate the network and profile mid-run to rehearse the #16 hardening
 Only do this on a machine you can format.
 EOF
@@ -155,13 +169,13 @@ EOF
     case "$reply" in y|Y|yes) ;; *) echo "stopped."; exit 1 ;; esac
   fi
 
-  phase "Installing claudebox ($REPO@$REF)"
+  phase "Installing box ($REPO@$REF)"
   CLAUDEBOX_REPO="$REPO" CLAUDEBOX_REF="$REF" \
     bash -c "$(curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install.sh")" \
     || { echo "install failed"; exit 1; }
   export PATH="$HOME/.local/bin:$PATH"
 
-  phase "Host setup (Incus, claudenet, ACL, profile, firewall)"
+  phase "Host setup (Incus, boxnet, ACL, profile, firewall)"
   # setup-host.sh installs nftables itself when neither nft nor UFW exists
   # (a stock Debian 13 cloud image ships neither). This guard is a tripwire:
   # if it fires, that fix regressed.
@@ -214,27 +228,33 @@ KEEP="${KEEP:-0}"
 # DNS-enumeration leak), so it is no longer "dirt" from a rehearsal — do not
 # revert it. Only the vetoed NIC filtering counts as leftover.
 dirty=""
-[ -n "$(incus profile device get claude-dev eth0 security.ipv4_filtering 2>/dev/null)" ] && dirty="$dirty ipv4_filtering"
-[ -n "$(incus profile device get claude-dev eth0 security.mac_filtering 2>/dev/null)" ] && dirty="$dirty mac_filtering"
+for p in box-net claude-dev; do
+  [ -n "$(incus profile device get "$p" eth0 security.ipv4_filtering 2>/dev/null)" ] && dirty="$dirty $p:ipv4_filtering"
+  [ -n "$(incus profile device get "$p" eth0 security.mac_filtering 2>/dev/null)" ] && dirty="$dirty $p:mac_filtering"
+done
 if [ -n "$dirty" ]; then
   note "this host carries the VETOED NIC filtering from an old rehearsal:$dirty — reverting"
-  incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
-  incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
+  for p in box-net claude-dev; do
+    incus profile device unset "$p" eth0 security.mac_filtering >/dev/null 2>&1
+    incus profile device unset "$p" eth0 security.ipv4_filtering >/dev/null 2>&1
+  done
 fi
 
 inf "clearing anything a previous run left behind…"
 # One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
 # which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
-for n in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
+for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl; do
   timeout -k 5 60 incus delete -f "$n" >/dev/null 2>&1
 done
-if incus network show claudenet >/dev/null 2>&1; then
-  timeout -k 5 30 incus network unset claudenet dns.mode >/dev/null 2>&1
+if incus network show boxnet >/dev/null 2>&1; then
+  timeout -k 5 30 incus network unset boxnet dns.mode >/dev/null 2>&1
 fi
-if incus profile show claude-dev >/dev/null 2>&1; then
-  timeout -k 5 30 incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
-  timeout -k 5 30 incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
-fi
+for p in box-net claude-dev; do
+  if incus profile show "$p" >/dev/null 2>&1; then
+    timeout -k 5 30 incus profile device unset "$p" eth0 security.mac_filtering >/dev/null 2>&1
+    timeout -k 5 30 incus profile device unset "$p" eth0 security.ipv4_filtering >/dev/null 2>&1
+  fi
+done
 left="$(incus list --format csv --columns n 2>/dev/null | tr '\n' ' ')"
 [ -n "$left" ] && inf "instances still on this host (not ours, left alone): $left"
 
@@ -242,48 +262,51 @@ inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
 if ! timeout -k 10 300 ~/.local/share/claudebox/host/setup-host.sh; then
   echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
   echo "  it should take seconds on a host that already has incus. usual causes:" >&2
-  echo "    · instances still attached to claudenet while its ACLs are reconfigured" >&2
+  echo "    · instances still attached to boxnet while its ACLs are reconfigured" >&2
   echo "        incus list" >&2
   echo "    · the firewall unit not completing" >&2
-  echo "        systemctl status claudebox-firewall.service --no-pager" >&2
+  echo "        systemctl status box-firewall.service --no-pager" >&2
   echo "    · the incus daemon wedged by an earlier aborted run" >&2
   echo "        systemctl status incus --no-pager; journalctl -u incus -n 30 --no-pager" >&2
   exit 1
 fi
 inf "host setup complete"
 
-# A real server has room for the production profile (8GiB/4cpu), and drilling the
-# real profile is worth more than drilling a shrunken one. Only shrink if we must.
+# A real server has room for the claude template's resources (8GiB/4cpu), and
+# drilling the real numbers is worth more than drilling shrunken ones. Only
+# shrink if we must. Since 0.4.0 resources are per-box, stamped from the
+# template at mint — a profile edit no longer reaches them; the supported
+# override is the BOX_* environment, which every 'box new' below inherits.
 ram="$(awk '/MemTotal/{print int($2/1024/1024)}' /proc/meminfo)"
 if [ "$ram" -lt 20 ]; then
-  incus profile set claude-dev limits.memory=3GiB limits.cpu=2
-  note "host has ${ram}GiB RAM — lowered claude-dev to 3GiB/2cpu for the drill (production profile is 8GiB/4cpu, and that is what was NOT drilled)"
+  export BOX_MEMORY=3GiB BOX_CPU=2
+  note "host has ${ram}GiB RAM — minting at 3GiB/2cpu via BOX_MEMORY/BOX_CPU (the claude template's 8GiB/4cpu is what was NOT drilled)"
 else
-  inf "host has ${ram}GiB RAM — drilling the production profile (8GiB/4cpu) unchanged"
+  inf "host has ${ram}GiB RAM — drilling the claude template's resources (8GiB/4cpu) unchanged"
 fi
 
 KVM=0; [ -e /dev/kvm ] && KVM=1
 [ "$KVM" = 1 ] && inf "/dev/kvm present — boxes will be VMs (the real trust boundary)" \
-               || note "NO /dev/kvm on this host — claudebox will fall back to CONTAINER mode, so this run does NOT validate the VM trust boundary"
+               || note "NO /dev/kvm on this host — box will fall back to CONTAINER mode, so this run does NOT validate the VM trust boundary"
 
 # ===========================================================================
-phase "A. Incus semantics — the assumptions claudebox is built on"
+phase "A. Incus semantics — the assumptions box is built on"
 # ===========================================================================
-incus launch images:debian/13 cbprobe --config user.claudebox=1 >/dev/null 2>&1
+incus launch images:debian/13 cbprobe --config user.box=1 >/dev/null 2>&1
 incus launch images:debian/13 cbnotours >/dev/null 2>&1      # untagged: not ours
 sleep 3
 
 # A1 — the tag read. #13 puts this on the path of EVERY box command.
-t="$(incus config get cbprobe user.claudebox 2>&1)"
-[ "$t" = "1" ] && ok "config get user.claudebox → '1'" \
-               || no "config get user.claudebox → '$t' (expected '1'; every box command would fail closed)"
+t="$(incus config get cbprobe user.box 2>&1)"
+[ "$t" = "1" ] && ok "config get user.box → '1'" \
+               || no "config get user.box → '$t' (expected '1'; every box command would fail closed)"
 
 # A2 — the list filter, and that it EXCLUDES an instance we didn't mint
-f="$(incus list user.claudebox=1 --format csv --columns nstS 2>&1)"
+f="$(incus list user.box=1 --format csv --columns nstS 2>&1)"
 if echo "$f" | grep -q '^cbprobe,' && ! echo "$f" | grep -q '^cbnotours,'; then
-  ok "list filter user.claudebox=1 selects ours, excludes theirs"
+  ok "list filter user.box=1 selects ours, excludes theirs"
 else
-  no "list filter user.claudebox=1 is wrong — got: $(echo "$f" | tr '\n' ' ')"
+  no "list filter user.box=1 is wrong — got: $(echo "$f" | tr '\n' ' ')"
 fi
 
 # A3 — four fields, no commas/newlines to mangle the awk table
@@ -340,36 +363,80 @@ incus delete -f cbcopy >/dev/null 2>&1
 incus delete -f cbprobe cbnotours >/dev/null 2>&1
 
 # ===========================================================================
-phase "B. The claudebox surface"
+phase "B. The box surface"
 # ===========================================================================
 # Compare against the installed tree's VERSION file, not a hardcoded number —
 # a pinned literal here would fail the drill on every release.
 expected="$(cat "$HOME/.local/share/claudebox/VERSION" 2>/dev/null || echo '?')"
-v="$(claudebox --version 2>&1)"
-case "$v" in *"$expected"*) ok "claudebox --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
+v="$(box --version 2>&1)"
+case "$v" in *"$expected"*) ok "box --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
 
 # The drill must not require an empty host: operator boxes tagged
-# user.claudebox=1 are legitimate tenants, and the teardown below deliberately
+# user.box=1 (or the legacy tag) are legitimate tenants, and the teardown below deliberately
 # refuses to touch them. The empty-host message is only TESTABLE when the host
 # is actually empty — on a shared host, skip it instead of failing it.
-tenants="$(incus list user.claudebox=1 --format csv --columns n 2>/dev/null | tr '\n' ' ')"
+tenants="$({ incus list user.box=1 --format csv --columns n 2>/dev/null
+             incus list user.claudebox=1 --format csv --columns n 2>/dev/null; } | sort -u | tr '\n' ' ')"
 if [ -n "${tenants% }" ]; then
-  inf "host already has claudebox boxes (${tenants% }) — the empty-host message cannot be tested this run"
+  inf "host already has boxes (${tenants% }) — the empty-host message cannot be tested this run"
 else
-  claudebox list >/dev/null 2>&1 && claudebox list 2>&1 | grep -q 'no boxes yet' \
+  box list >/dev/null 2>&1 && box list 2>&1 | grep -q 'no boxes yet' \
     && ok "empty host: 'no boxes yet', exit 0" || no "empty-host message wrong"
 fi
 
-printf '\n  minting a box (cold, ~10 min)…\n'
+# --- templates: the mint surface is itself a surface to test ----------------
+box templates 2>/dev/null | grep -q '^  blank' && box templates 2>/dev/null | grep -q '^  claude' \
+  && ok "templates: lists blank and claude" || no "templates listing is missing a shipped template"
+box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
+  && ok "unknown template refused, points at 'box templates'" || no "an unknown template was not refused"
+# The one rule that keeps templates honest: no key can name a network. Plant a
+# bad template in the installed tree (the drill owns this host), expect the
+# parser to reject it BY NAME, remove it.
+badt="$HOME/.local/share/claudebox/templates/cbdrill-bad"
+mkdir -p "$badt" && printf 'BOX_IMAGE="x"\nBOX_USER="y"\nBOX_NETWORK="lan"\n' >"$badt/box.env" && : >"$badt/user-data.yaml"
+box new --name tpl --template cbdrill-bad 2>&1 | grep -q "unknown key 'BOX_NETWORK'" \
+  && ok "a template cannot name a network — BOX_NETWORK rejected by name" \
+  || no "a box.env key outside the allowlist was ACCEPTED — a template could weaken isolation"
+rm -rf "$badt"
+
+printf '\n  minting a blank box (the DEFAULT template — no tooling, fast)…\n'
 t0=$SECONDS
-if claudebox new --name drill >/tmp/new.log 2>&1; then
-  ok "claudebox new --name drill  ($((SECONDS - t0))s)"
+if mint_box /tmp/mint-tpl.log --name tpl; then
+  ok "box new --name tpl, no --template  ($((SECONDS - t0))s)"
+  tt="$(incus config get tpl user.box.template 2>/dev/null)"
+  [ "$tt" = blank ] && ok "the default template is blank (user.box.template=blank)" \
+                    || no "default template is '${tt:-<unset>}' — expected blank"
+  [ "$(incus config get tpl user.box.user 2>/dev/null)" = dev ] \
+    && ok "template user stamped on the instance (user.box.user=dev)" || no "user.box.user not stamped"
+  incus config show tpl 2>/dev/null | grep -q '^- box-net' \
+    && ok "blank box launched with the box-net profile — same placement contract" \
+    || no "blank box is NOT on box-net — a template picked its own placement?!"
+  u="$(timeout -k 5 30 box exec tpl -- whoami </dev/null 2>/dev/null | tr -d '[:space:]')"
+  [ "$u" = dev ] && ok "exec lands in the template's user ($u) — nothing hardcodes claude" \
+                 || no "exec landed in '${u:-<nothing>}', expected dev"
+  timeout -k 5 30 box exec tpl -- sh -lc 'command -v claude' </dev/null >/dev/null 2>&1 \
+    && no "the blank box has claude installed — 'blank' is not blank" \
+    || ok "blank box has no claude — nobody home, as designed"
+  box_pings tpl 1.1.1.1 && ok "blank box reaches the internet (same egress as any template)" \
+                        || no "blank box has NO egress — isolation parity broken"
+  in_box tpl getent hosts deb.debian.org >/dev/null 2>&1 \
+    && ok "blank box resolves public names (pinned resolver serves every template)" \
+    || no "blank box cannot resolve — DNS parity broken"
+  box rm tpl --force >/dev/null 2>&1 && ok "blank box removed" || no "could not remove the blank box"
 else
-  no "claudebox new FAILED — tail: $(tail -3 /tmp/new.log | tr '\n' ' ')"
+  no "blank mint FAILED — tail: $(tail -3 /tmp/mint-tpl.log | tr '\n' ' ')"
+fi
+
+printf '\n  minting a claude box (cold, ~10 min)…\n'
+t0=$SECONDS
+if mint_box /tmp/mint-drill.log --name drill --template claude; then
+  ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
+else
+  no "box new FAILED — tail: $(tail -3 /tmp/mint-drill.log | tr '\n' ' ')"
   echo; echo "── cannot continue without a box"; printf '  %s\n' "${findings[@]}"; exit 1
 fi
 
-typ="$(claudebox list | awk '$1 == "drill" { print $3 }')"
+typ="$(box list | awk '$1 == "drill" { print $3 }')"
 if [ "$KVM" = 1 ]; then
   [ "$typ" = VM ] && ok "the box is a VM — the trust boundary is real" \
                   || no "the box is '$typ' but /dev/kvm exists — it should have been a VM"
@@ -377,83 +444,83 @@ else
   note "the box is '$typ' (no /dev/kvm on this host)"
 fi
 
-claudebox info drill | grep -q '^IPV4' && ok "info shows an IPv4" || no "info has no IPV4 row"
-claudebox info drill | grep -q 'SNAPSHOTS  (none)' && ok "info: no snapshots yet, offers to take one" || no "info snapshot-empty state wrong"
+box info drill | grep -q '^IPV4' && ok "info shows an IPv4" || no "info has no IPV4 row"
+box info drill | grep -q 'SNAPSHOTS  (none)' && ok "info: no snapshots yet, offers to take one" || no "info snapshot-empty state wrong"
 
-if claudebox exec drill -- claude --version >/dev/null 2>&1; then
+if box exec drill -- claude --version >/dev/null 2>&1; then
   ok "Claude Code is installed in the box"
-elif timeout 30 claudebox exec drill -- bash -lc 'claude --version' >/dev/null 2>&1; then
-  no "'claude' is installed but NOT on exec's PATH — repo bug: the help promises 'claudebox exec work -- claude --version'"
-  inf "PATH as exec sees it: $(timeout 30 claudebox exec drill -- printenv PATH 2>/dev/null)"
+elif timeout 30 box exec drill -- bash -lc 'claude --version' >/dev/null 2>&1; then
+  no "'claude' is installed but NOT on exec's PATH — repo bug: the help promises 'box exec work -- claude --version'"
+  inf "PATH as exec sees it: $(timeout 30 box exec drill -- printenv PATH 2>/dev/null)"
 else
   no "'claude --version' failed inside the box"
-  # diag output must skip the hatch's own 'claudebox: incus exec …' announce lines
-  hatch_out() { timeout 30 claudebox incus drill -- exec {} -- "$@" 2>&1 | grep -v '^claudebox:' | tail -1 | cut -c1-120; }
+  # diag output must skip the hatch's own 'box: incus exec …' announce lines
+  hatch_out() { timeout 30 box incus drill -- exec {} -- "$@" 2>&1 | grep -v '^box:' | tail -1 | cut -c1-120; }
   inf "cloud-init:   $(hatch_out cloud-init status)"
   inf "binary runs?  $(hatch_out sudo -u claude /home/claude/.local/bin/claude --version)"
-  inf "exec PATH:    $(timeout 30 claudebox exec drill -- printenv PATH 2>/dev/null | tail -1)"
+  inf "exec PATH:    $(timeout 30 box exec drill -- printenv PATH 2>/dev/null | tail -1)"
 fi
-claudebox exec drill -- gh --version >/dev/null 2>&1 \
+box exec drill -- gh --version >/dev/null 2>&1 \
   && ok "the GitHub CLI is installed in the box (PR #5)" || no "'gh --version' failed inside the box"
 
 # --- the snapshot → clone workflow, which is the whole point of the tool ---
-claudebox snapshot drill authed 2>&1 | grep -q authed && ok "snapshot drill authed" || no "snapshot failed"
-claudebox info drill | grep -q 'authed' && ok "info lists the snapshot label" || no "info does not show the label"
-claudebox info drill | grep -q -- '--from drill/authed' && ok "info prints the --from line to clone it" || no "info lacks the --from hint"
+box snapshot drill authed 2>&1 | grep -q authed && ok "snapshot drill authed" || no "snapshot failed"
+box info drill | grep -q 'authed' && ok "info lists the snapshot label" || no "info does not show the label"
+box info drill | grep -q -- '--from drill/authed' && ok "info prints the --from line to clone it" || no "info lacks the --from hint"
 
-# --- the boundary: an instance claudebox did NOT mint ----------------------
+# --- the boundary: an instance box did NOT mint ----------------------
 incus launch images:debian/13 payroll >/dev/null 2>&1   # somebody else's instance
 sleep 2
-claudebox down payroll 2>&1 | grep -q 'no such box' && ok "boundary: 'down' refuses an untagged instance" || no "boundary: 'down' touched an instance claudebox didn't mint!"
-claudebox rm payroll --force 2>&1 | grep -q 'no such box' && ok "boundary: 'rm' refuses an untagged instance" || no "boundary: 'rm' would DELETE a foreign instance!"
-claudebox incus payroll -- config show 2>&1 | grep -q 'no such box' && ok "boundary: the escape hatch refuses it too" || no "boundary: the hatch reached a foreign instance!"
+box down payroll 2>&1 | grep -q 'no such box' && ok "boundary: 'down' refuses an untagged instance" || no "boundary: 'down' touched an instance box didn't mint!"
+box rm payroll --force 2>&1 | grep -q 'no such box' && ok "boundary: 'rm' refuses an untagged instance" || no "boundary: 'rm' would DELETE a foreign instance!"
+box incus payroll -- config show 2>&1 | grep -q 'no such box' && ok "boundary: the escape hatch refuses it too" || no "boundary: the hatch reached a foreign instance!"
 incus list payroll --format csv --columns ns | grep -q '^payroll,RUNNING' && ok "…and payroll is still running, untouched" || no "payroll was harmed — the boundary leaked"
 incus delete -f payroll >/dev/null 2>&1
 
 # --- rename, and its precondition -----------------------------------------
-claudebox rename drill archive 2>&1 | grep -qi 'RUNNING' && ok "rename refuses a running box, and says how to fix it" || no "rename did not refuse a running box"
-claudebox down drill >/dev/null 2>&1 && ok "down drill" || no "down failed"
-claudebox rename drill archive 2>&1 | grep -q 'renamed drill to archive' && ok "rename drill → archive (stopped)" || no "rename failed on a stopped box"
-claudebox list | grep -q '^archive' && ok "list shows the new name" || no "list still shows the old name"
-claudebox info archive | grep -q authed && ok "the snapshot followed the rename" || no "snapshot lost across the rename"
+box rename drill archive 2>&1 | grep -qi 'RUNNING' && ok "rename refuses a running box, and says how to fix it" || no "rename did not refuse a running box"
+box down drill >/dev/null 2>&1 && ok "down drill" || no "down failed"
+box rename drill archive 2>&1 | grep -q 'renamed drill to archive' && ok "rename drill → archive (stopped)" || no "rename failed on a stopped box"
+box list | grep -q '^archive' && ok "list shows the new name" || no "list still shows the old name"
+box info archive | grep -q authed && ok "the snapshot followed the rename" || no "snapshot lost across the rename"
 
 # --- clone from a snapshot of a renamed box --------------------------------
 printf '\n  cloning from the snapshot…\n'
-if claudebox new --name clone --from archive/authed >/tmp/clone.log 2>&1; then
+if mint_box /tmp/mint-clone.log --name clone --from archive/authed; then
   ok "new --from archive/authed (clone of a snapshot of a renamed box)"
-  claudebox exec clone -- true >/dev/null 2>&1 && ok "the clone is alive and enterable" || no "the clone is not enterable"
+  box exec clone -- true >/dev/null 2>&1 && ok "the clone is alive and enterable" || no "the clone is not enterable"
 else
-  no "clone FAILED — tail: $(tail -3 /tmp/clone.log | tr '\n' ' ')"
+  no "clone FAILED — tail: $(tail -3 /tmp/mint-clone.log | tr '\n' ' ')"
 fi
 
 # --- the escape hatch ------------------------------------------------------
-claudebox incus archive -- config show 2>/dev/null | grep -q 'user.claudebox' && ok "hatch: 'incus archive -- config show', instance appended" || no "hatch passthrough failed"
-h="$(claudebox incus archive -- config device add {} scratch disk source=/tmp path=/mnt/scratch 2>&1)"
+box incus archive -- config show 2>/dev/null | grep -q 'user.box' && ok "hatch: 'incus archive -- config show', instance appended" || no "hatch passthrough failed"
+h="$(box incus archive -- config device add {} scratch disk source=/tmp path=/mnt/scratch 2>&1)"
 echo "$h" | grep -q 'isolation stack' && ok "hatch warns when a command can break isolation" || no "hatch did not warn on a device add"
-claudebox incus archive -- config device remove {} scratch >/dev/null 2>&1
+box incus archive -- config device remove {} scratch >/dev/null 2>&1
 
 # --- rm, and the guard that did not used to exist --------------------------
-claudebox rm clone </dev/null 2>&1 | grep -q 'refusing' && ok "rm with no TTY and no --force refuses (exit 2)" || no "rm destroyed a box with no confirmation!"
-claudebox rm clone --force 2>&1 | grep -q 'removed' && ok "rm --force removes the clone" || no "rm --force failed"
+box rm clone </dev/null 2>&1 | grep -q 'refusing' && ok "rm with no TTY and no --force refuses (exit 2)" || no "rm destroyed a box with no confirmation!"
+box rm clone --force 2>&1 | grep -q 'removed' && ok "rm --force removes the clone" || no "rm --force failed"
 
 # --- the CLI contract ------------------------------------------------------
-claudebox lst 2>&1 | grep -q "did you mean 'list'" && ok "typo → did-you-mean, exit 2" || no "unknown command not suggested"
-claudebox list archive 2>&1 | grep -q 'claudebox info archive' && ok "'list <box>' points at info" || no "'list <box>' does not point at info"
-claudebox snapshot archive --labl x 2>&1 | grep -q 'unknown option' && ok "typo'd flag rejected (not swallowed as a label)" || no "unknown flag was swallowed"
+box lst 2>&1 | grep -q "did you mean 'list'" && ok "typo → did-you-mean, exit 2" || no "unknown command not suggested"
+box list archive 2>&1 | grep -q 'box info archive' && ok "'list <box>' points at info" || no "'list <box>' does not point at info"
+box snapshot archive --labl x 2>&1 | grep -q 'unknown option' && ok "typo'd flag rejected (not swallowed as a label)" || no "unknown flag was swallowed"
 
 # ===========================================================================
 phase "C. Isolation baseline — does the boundary actually hold? (#15 section A)"
 # ===========================================================================
-claudebox start archive >/dev/null 2>&1
+box start archive >/dev/null 2>&1
 wait_box archive && ok "archive is back up (agent answering)" \
                  || no "archive did not come back within 2 min of start"
 
 # Sibling isolation needs a sibling. Clone from the snapshot — fast, no cold mint.
 printf '\n  cloning a peer for the sibling probes…\n'
-if claudebox new --name peer --from archive/authed >/tmp/peer.log 2>&1 && wait_box peer; then
+if mint_box /tmp/mint-peer.log --name peer --from archive/authed && wait_box peer; then
   ok "peer minted from archive/authed and answering"
 else
-  no "peer clone failed or never answered — tail: $(tail -3 /tmp/peer.log | tr '\n' ' ')"
+  no "peer clone failed or never answered — tail: $(tail -3 /tmp/mint-peer.log | tr '\n' ' ')"
 fi
 
 # C1 — public egress (#15 A1; resolving the hostname also proves A5, gateway DNS)
@@ -472,10 +539,10 @@ fi
 # nothing serves and read refused-vs-dropped — refused would mean the box's
 # packet reached the host's stack, which is the thing the firewall must prevent.
 # (No background listener: one less process to leak, one less way to wedge.)
-hv="$(box_probe archive http://10.87.0.1:8099)"
+hv="$(box_probe archive http://10.88.0.1:8099)"
 case "$hv" in
   reachable|refused)
-    no "THE BOX'S PACKETS REACH THE HOST on 10.87.0.1:8099 [$hv] — the firewall rules are not holding"
+    no "THE BOX'S PACKETS REACH THE HOST on 10.88.0.1:8099 [$hv] — the firewall rules are not holding"
     aud "A2 box→host: FAIL — $hv (the packet reached the host's stack)" ;;
   dropped)
     ok "box → host is blocked (no path to the machine's sockets)"
@@ -500,8 +567,8 @@ esac
 # port answers the question just as well (refused = the packet arrived), and
 # the listener was what kept wedging the run. Ping corroborates: if the two
 # disagree, say so rather than pick one.
-PEER_IP="$(claudenet_ip peer)"
-ARCH_IP_PRE="$(claudenet_ip archive)"
+PEER_IP="$(boxnet_ip peer)"
+ARCH_IP_PRE="$(boxnet_ip archive)"
 if [ -n "$PEER_IP" ] && [ "$PEER_IP" = "$ARCH_IP_PRE" ]; then
   # Guard, because this actually happened: a clone inherited its source's
   # machine-id, hence its DHCP lease, hence its ADDRESS. Probing "archive →
@@ -525,8 +592,8 @@ elif [ -n "$PEER_IP" ]; then
     aud "A3 sibling: BLOCKED — tcp dropped + no icmp reply (security.port_isolation)"
   fi
 else
-  no "could not read peer's claudenet address — the sibling probe never ran"
-  aud "A3 sibling: NOT PROBED (no 10.87.x address on peer)"
+  no "could not read peer's boxnet address — the sibling probe never ran"
+  aud "A3 sibling: NOT PROBED (no 10.88.x address on peer)"
 fi
 
 # C5 — DNS enumeration (#15 A4). Now a CONTRACT, not an observation: setup-host
@@ -542,13 +609,13 @@ else
 fi
 
 # C6 — IPv6 off (#15 A6): every ACL rule is IPv4-only; off is the only cover.
-[ "$(incus network get claudenet ipv6.address 2>/dev/null)" = none ] \
-  && { ok "claudenet ipv6.address = none (the IPv4-only ACLs have no uncovered path)"; aud "A6 ipv6: none, as contract requires"; } \
-  || { no "claudenet has IPv6 enabled — and not one ACL rule covers IPv6"; aud "A6 ipv6: ENABLED and uncovered"; }
+[ "$(incus network get boxnet ipv6.address 2>/dev/null)" = none ] \
+  && { ok "boxnet ipv6.address = none (the IPv4-only ACLs have no uncovered path)"; aud "A6 ipv6: none, as contract requires"; } \
+  || { no "boxnet has IPv6 enabled — and not one ACL rule covers IPv6"; aud "A6 ipv6: ENABLED and uncovered"; }
 
 # C7 — inbound, host → box (#15 A7): the ACL's default ingress drop. Same
 # listener-free logic, run from the host this time.
-ARCH_IP="$(claudenet_ip archive)"
+ARCH_IP="$(boxnet_ip archive)"
 if [ -n "$ARCH_IP" ]; then
   hmsg="$(curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" 2>&1)"; hrc=$?
   if [ "$hrc" -eq 0 ]; then hv=reachable
@@ -567,7 +634,7 @@ if [ -n "$ARCH_IP" ]; then
       aud "A7 inbound host→box: INCONCLUSIVE ($hv)" ;;
   esac
 else
-  no "could not read archive's claudenet address — the inbound probe never ran"
+  no "could not read archive's boxnet address — the inbound probe never ran"
   aud "A7 inbound host→box: NOT PROBED"
 fi
 
@@ -576,7 +643,7 @@ phase "D. The isolation contract, stated"
 # ===========================================================================
 # Phase D used to REHEARSE the hardening on a throwaway host, because nobody
 # knew whether it would work. That question is settled: the hardening now ships
-# in setup-host.sh and claudebox-firewall.sh, so phase C tests the real thing
+# in setup-host.sh and box-firewall.sh, so phase C tests the real thing
 # and there is nothing left to rehearse. What the rehearsal established, kept
 # here so it is not re-litigated:
 #
@@ -607,15 +674,15 @@ fi
 # ===========================================================================
 if [ "$KEEP" = 1 ]; then
   phase "Boxes left up (--keep-boxes)"
-  claudebox list
+  box list
   inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
   # every name the drill can have left, whatever branch a partial run took
-  for n in drill clone archive peer; do claudebox rm "$n" --force >/dev/null 2>&1; done
+  for n in drill clone archive peer tpl; do box rm "$n" --force >/dev/null 2>&1; done
   # Assert OUR boxes are gone — not that the host is empty. The rm loop above
   # already embodies the discipline (only names the drill minted); demanding
   # 'no boxes yet' here would flag any pre-existing operator box as a failure.
-  leftover="$(claudebox list 2>/dev/null | grep -E '^(drill|clone|archive|peer)([[:space:]]|$)' || true)"
+  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer|tpl)([[:space:]]|$)' || true)"
   [ -z "$leftover" ] && ok "teardown: every box the drill minted is gone" \
                      || no "a drill box survived teardown: $(printf '%s' "$leftover" | awk '{print $1}' | tr '\n' ' ')"
 fi
@@ -633,7 +700,7 @@ if [ "${#audit[@]}" -gt 0 ]; then
 fi
 
 echo
-inf "this host still has Incus, claudenet, the ACL, the profile and the firewall rules"
+inf "this host still has Incus, boxnet, the ACL, the profile and the firewall rules"
 inf "(plus, unless re-run: dns.mode=none and NIC filtering from the D phase)."
 inf "to undo:  ~/.local/share/claudebox/host/teardown-host.sh [--purge-incus]"
 [ "$fail" -eq 0 ]

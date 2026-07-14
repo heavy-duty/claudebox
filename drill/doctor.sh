@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # doctor.sh — is this host fit to mint boxes (and to drill), and if not, what
-# is wrong? Users reach it as 'claudebox doctor'; the drill runs it directly.
+# is wrong? Users reach it as 'box doctor'; the drill runs it directly.
 #
 #   bash drill/doctor.sh          # report
 #   bash drill/doctor.sh --fix    # report, then revert what the drill left behind
@@ -40,19 +40,19 @@ timeout 10 incus list >/dev/null 2>&1 || {
   exit 1
 }
 
-head_ "Network — claudenet"
-if incus network show claudenet >/dev/null 2>&1; then
+head_ "Network — boxnet"
+if incus network show boxnet >/dev/null 2>&1; then
   # dns.mode=none is SHIPPED — it is what stops a box enumerating its siblings
   # through the gateway's dnsmasq. Its ABSENCE is the problem, not its presence.
-  dns="$(incus network get claudenet dns.mode 2>/dev/null)"
+  dns="$(incus network get boxnet dns.mode 2>/dev/null)"
   if [ "$dns" = none ]; then
     ok "dns.mode = none — a box cannot enumerate its siblings by name"
   else
     no "dns.mode = ${dns:-<unset>} — a box can RESOLVE its siblings' names and addresses"
     inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
-    [ "$FIX" = 1 ] && { incus network set claudenet dns.mode=none && inf "set: dns.mode=none"; }
+    [ "$FIX" = 1 ] && { incus network set boxnet dns.mode=none && inf "set: dns.mode=none"; }
   fi
-  inf "ipv4.address = $(incus network get claudenet ipv4.address 2>/dev/null)"
+  inf "ipv4.address = $(incus network get boxnet ipv4.address 2>/dev/null)"
   # Incus reports the network as "Created" whether or not anything is actually
   # SERVING it. Kill the daemon uncleanly (a wedge, an OOM, a SIGKILL) and it
   # can come back without respawning this network's dnsmasq — the bridge is up,
@@ -60,75 +60,84 @@ if incus network show claudenet >/dev/null 2>&1; then
   # so it dies deep inside cloud-init with "Temporary failure resolving
   # deb.debian.org". Two cold mints and an hour of hunting went into learning
   # that Incus's own status does not cover this. Ask the process table instead.
-  if pgrep -af 'dnsmasq.*--interface=claudenet' >/dev/null 2>&1; then
-    ok "a dnsmasq is serving claudenet (DHCP + DNS)"
+  if pgrep -af 'dnsmasq.*--interface=boxnet' >/dev/null 2>&1; then
+    ok "a dnsmasq is serving boxnet (DHCP + DNS)"
   else
-    no "NO dnsmasq is serving claudenet — the bridge is up and incus says 'Created', but nothing hands out leases"
+    no "NO dnsmasq is serving boxnet — the bridge is up and incus says 'Created', but nothing hands out leases"
     inf "every box minted now gets no address, no DNS, and dies in cloud-init"
     inf "fix:  timeout 60 incus delete -f <any boxes>; sudo systemctl restart incus"
     inf "      (if it does not come back: teardown-host.sh, then re-run the drill)"
     [ "$FIX" = 1 ] && {
       inf "restarting incus to respawn it…"
       sudo systemctl restart incus && sleep 5
-      pgrep -af 'dnsmasq.*--interface=claudenet' >/dev/null 2>&1 \
-        && inf "reverted: dnsmasq is serving claudenet again" \
+      pgrep -af 'dnsmasq.*--interface=boxnet' >/dev/null 2>&1 \
+        && inf "reverted: dnsmasq is serving boxnet again" \
         || inf "STILL missing — run teardown-host.sh and let the drill rebuild the network"
     }
   fi
-  ipv6="$(incus network get claudenet ipv6.address 2>/dev/null)"
+  ipv6="$(incus network get boxnet ipv6.address 2>/dev/null)"
   [ "$ipv6" = none ] && ok "ipv6.address = none (the isolation contract — every ACL rule is IPv4-only)" \
                      || no "ipv6.address = $ipv6 — IPv6 is on and NOT covered by any ACL rule"
 else
-  inf "claudenet does not exist (a fresh host — setup-host.sh will create it)"
+  inf "boxnet does not exist (a fresh host — setup-host.sh will create it)"
 fi
 
 head_ "Firewall — the box-to-box drop"
-if sudo nft list table bridge claudebox >/dev/null 2>&1; then
-  ok "nft bridge table 'claudebox' is present — boxes cannot reach each other"
+if sudo nft list table bridge box >/dev/null 2>&1; then
+  ok "nft bridge table 'box' is present — boxes cannot reach each other"
 else
   no "the box-to-box drop is MISSING — boxes can reach each other"
   inf "an L3 ACL never sees frames switched between two ports of one bridge;"
   inf "the drop is an nft BRIDGE-family rule, and without it siblings are wide open."
-  inf "fix:  sudo /usr/local/sbin/claudebox-firewall"
-  inf "      (or: sudo systemctl restart claudebox-firewall.service)"
+  inf "fix:  sudo /usr/local/sbin/box-firewall"
+  inf "      (or: sudo systemctl restart box-firewall.service)"
 fi
 
-head_ "Profile — claude-dev (the NIC is the isolation contract)"
-if incus profile show claude-dev >/dev/null 2>&1; then
-  iso="$(incus profile device get claude-dev eth0 security.port_isolation 2>/dev/null)"
-  if [ "$iso" = "true" ]; then
-    ok "security.port_isolation = true — boxes cannot reach each other at L2"
-  else
-    no "security.port_isolation is NOT set — BOXES CAN REACH EACH OTHER"
-    inf "an L3 ACL cannot do this: two boxes on one bridge are on the same L2"
-    inf "segment, so their frames are switched, never routed past the ACL."
-    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
-  fi
-  for k in security.mac_filtering security.ipv4_filtering; do
-    v="$(incus profile device get claude-dev eth0 "$k" 2>/dev/null)"
-    if [ -z "$v" ]; then
-      ok "$k unset (as shipped)"
+# box-net is the placement contract since the 0.4.0 rename; claude-dev is its
+# pre-rename ancestor and may linger while legacy boxes still reference it.
+# Check whichever exist — an unisolated NIC is a fault on either.
+PROFILES=""
+incus profile show box-net >/dev/null 2>&1 && PROFILES="box-net"
+incus profile show claude-dev >/dev/null 2>&1 && PROFILES="$PROFILES claude-dev"
+head_ "Profile — the NIC is the isolation contract"
+if [ -n "$PROFILES" ]; then
+  for p in $PROFILES; do
+    [ "$p" = claude-dev ] && inf "claude-dev is legacy (pre-rename boxes still reference it)"
+    iso="$(incus profile device get "$p" eth0 security.port_isolation 2>/dev/null)"
+    if [ "$iso" = "true" ]; then
+      ok "$p: security.port_isolation = true — boxes cannot reach each other at L2"
     else
-      no "$k = $v  ← phase D left this behind. A box can fail to get on the network at all."
-      [ "$FIX" = 1 ] && { incus profile device unset claude-dev eth0 "$k" && inf "reverted: $k unset"; }
+      no "$p: security.port_isolation is NOT set — BOXES CAN REACH EACH OTHER"
+      inf "an L3 ACL cannot do this: two boxes on one bridge are on the same L2"
+      inf "segment, so their frames are switched, never routed past the ACL."
+      inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
     fi
+    for k in security.mac_filtering security.ipv4_filtering; do
+      v="$(incus profile device get "$p" eth0 "$k" 2>/dev/null)"
+      if [ -z "$v" ]; then
+        ok "$p: $k unset (as shipped)"
+      else
+        no "$p: $k = $v  ← phase D left this behind. A box can fail to get on the network at all."
+        [ "$FIX" = 1 ] && { incus profile device unset "$p" eth0 "$k" && inf "reverted: $k unset"; }
+      fi
+    done
   done
-  inf "cpu/mem: $(incus profile get claude-dev limits.cpu 2>/dev/null)/$(incus profile get claude-dev limits.memory 2>/dev/null) (the drill lowers these on a small host)"
+  inf "resources are per-box since 0.4.0 (stamped from the template at mint; BOX_CPU/BOX_MEMORY override)"
 else
-  inf "claude-dev does not exist (a fresh host)"
+  inf "box-net does not exist (a fresh host — setup-host.sh will create it)"
 fi
 
-head_ "ACL — claude-isolate"
-if incus network acl show claude-isolate >/dev/null 2>&1; then
-  n="$(incus network acl show claude-isolate | grep -c 'action:' || true)"
+head_ "ACL — box-isolate"
+if incus network acl show box-isolate >/dev/null 2>&1; then
+  n="$(incus network acl show box-isolate | grep -c 'action:' || true)"
   inf "$n rules"
-  incus network acl show claude-isolate | grep -E 'action:|destination:' | sed 's/^/        /'
-  if incus network acl show claude-isolate | grep -q '@internal'; then
+  incus network acl show box-isolate | grep -E 'action:|destination:' | sed 's/^/        /'
+  if incus network acl show box-isolate | grep -q '@internal'; then
     no "an @internal rule survived phase D"
-    [ "$FIX" = 1 ] && { incus network acl rule remove claude-isolate egress action=drop destination=@internal && inf "reverted: @internal rule removed"; }
+    [ "$FIX" = 1 ] && { incus network acl rule remove box-isolate egress action=drop destination=@internal && inf "reverted: @internal rule removed"; }
   fi
 else
-  inf "claude-isolate does not exist (a fresh host)"
+  inf "box-isolate does not exist (a fresh host)"
 fi
 
 # Config is a claim; the bridge port is the fact. Incus can accept
@@ -141,9 +150,9 @@ for c in bridge /usr/sbin/bridge /sbin/bridge; do
   sudo "$c" -V >/dev/null 2>&1 && { BRIDGE="$c"; break; }
 done
 if [ -n "$BRIDGE" ]; then
-  ports="$(sudo "$BRIDGE" -d link show 2>/dev/null | grep -A1 'master claudenet')"
+  ports="$(sudo "$BRIDGE" -d link show 2>/dev/null | grep -A1 'master boxnet')"
   if [ -z "$ports" ]; then
-    inf "no instance is attached to claudenet right now (mint a box to check the taps)"
+    inf "no instance is attached to boxnet right now (mint a box to check the taps)"
   else
     printf '%s\n' "$ports" | sed 's/^/        /'
     if printf '%s' "$ports" | grep -q 'isolated on'; then
@@ -173,9 +182,9 @@ done
 head_ "Host resolver — a box's DNS is forwarded through this"
 hostns="$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"
 inf "/etc/resolv.conf: ${hostns:-<none>}"
-raw="$(incus network get claudenet raw.dnsmasq 2>/dev/null | tr '\n' ';')"
+raw="$(incus network get boxnet raw.dnsmasq 2>/dev/null | tr '\n' ';')"
 if [ -n "$raw" ]; then
-  ok "claudenet has a pinned resolver (raw.dnsmasq: $raw)"
+  ok "boxnet has a pinned resolver (raw.dnsmasq: $raw)"
   inf "boxes do NOT inherit the host's resolver — good (issue #33)"
 else
   # 100.64.0.0/10 is CGNAT — which is exactly Tailscale's range.
@@ -191,8 +200,8 @@ else
 fi
 
 if [ "$PIN" = 1 ]; then
-  head_ "Pinning claudenet's resolver (issue #33)"
-  if incus network set claudenet raw.dnsmasq "$(printf 'no-resolv\nserver=1.1.1.1\nserver=8.8.8.8\n')" 2>/tmp/pin.err; then
+  head_ "Pinning boxnet's resolver (issue #33)"
+  if incus network set boxnet raw.dnsmasq "$(printf 'no-resolv\nserver=1.1.1.1\nserver=8.8.8.8\n')" 2>/tmp/pin.err; then
     ok "set raw.dnsmasq: no-resolv + 1.1.1.1 + 8.8.8.8 — dnsmasq now ignores /etc/resolv.conf"
     inf "a box's DNS no longer depends on the host's VPN state, and MagicDNS is out of the path"
     inf "re-run the drill; if the cold mint now succeeds, issue #33 is confirmed and the fix belongs in setup-host.sh"
@@ -203,8 +212,10 @@ if [ "$PIN" = 1 ]; then
 fi
 
 head_ "Can a box actually resolve DNS?"
-# Any box will do — the drill's names are not the only boxes on a host.
-probe="$(incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null \
+# Any box will do — the drill's names are not the only boxes on a host, and
+# a pre-rename box (legacy tag) is as good a probe as a new one.
+probe="$({ incus list "user.box=1" --format csv --columns ns 2>/dev/null
+           incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null; } \
          | awk -F, '$2 == "RUNNING" { print $1; exit }')"
 if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
   # Stdin MUST be pinned to /dev/null: with a TTY on stdin, 'incus exec' goes
@@ -215,8 +226,8 @@ if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
   inf "its resolv.conf: $(timeout -k 5 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' </dev/null 2>/dev/null | tr '\n' ' ')"
 
   # Routing is probed by ADDRESS against the public internet, NOT by pinging
-  # the gateway: claudebox-firewall.sh drops everything from a box to the host
-  # except DNS/DHCP, so ICMP to 10.87.0.1 fails BY DESIGN on a healthy host.
+  # the gateway: box-firewall.sh drops everything from a box to the host
+  # except DNS/DHCP, so ICMP to 10.88.0.1 fails BY DESIGN on a healthy host.
   # A gateway ping here is a check that can only ever lie.
   if timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null; then
     routing=1; ok "reaches 1.1.1.1 by address — egress routing is fine"
