@@ -53,6 +53,9 @@ CMDS=(
   "expose^<box> <port> [<host-port>] | --list | --remove <port>^box^Forward a box port to the host's loopback — see a dev server^fn:cmd_expose^"
   "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
   "doctor^[--fix | --pin-dns]^^Is this host fit to mint boxes? Diagnose the daemon, network, DNS, isolation^fn:cmd_doctor^"
+  "setup-host^^^One-time host setup: Incus, the boxnet stack, the profile, the firewall^fn:cmd_setup_host^"
+  "teardown-host^[--purge-incus]^^Remove the box host stack (both name generations)^fn:cmd_teardown_host^"
+  "migrate-host^--box <n> | --all-boxes | --retire-legacy^^Move a host from the pre-0.4.0 stack onto box^fn:cmd_migrate_host^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
   "help^[<command>]^^This help, or 'box help <command>' for one command^fn:cmd_help^"
 )
@@ -119,7 +122,7 @@ EOF
   local r v sum
   for r in "${CMDS[@]}"; do
     IFS='^' read -r v _ _ sum _ _ <<<"$r"
-    printf '  %-9s %s\n' "$v" "$sum"
+    printf '  %-13s %s\n' "$v" "$sum"
   done
   cat <<'EOF'
 
@@ -372,6 +375,37 @@ Exit 0 = clean; 1 = problems found (each printed with its fix). Read-only
 unless --fix or --pin-dns is given.
 EOF
 ;;
+    setup-host) cat <<'EOF'
+Prepare this host to mint boxes — one time. Installs Incus and builds the
+isolation stack: the boxnet NAT bridge (resolver pinned), the box-isolate
+ACL, the box-net profile, and the firewall rules, all re-applied at boot.
+Idempotent — safe to re-run after a box upgrade to pick up stack changes.
+
+If it has to add you to the incus-admin group it will say so and exit; log
+back in (or 'sg incus-admin') and run it again.
+
+  box setup-host
+EOF
+;;
+    teardown-host) cat <<'EOF'
+Remove the box host stack — all boxes, the boxnet/claudenet networks, the
+ACLs, the profiles, and the firewall rules of BOTH name generations (current
+and pre-0.4.0). Asks first.
+
+  box teardown-host                # the stack; leaves Incus installed
+  box teardown-host --purge-incus  # ...and uninstall Incus too
+EOF
+;;
+    migrate-host) cat <<'EOF'
+Move a host from the pre-0.4.0 'claudebox' stack onto 'box'. Re-homing
+preserves a box's authed state (no re-login) — it only re-tags and reassigns
+the profile, then verifies the box works on its new network leg.
+
+  box migrate-host --box <name>    # re-home one legacy box
+  box migrate-host --all-boxes     # re-home every legacy box
+  box migrate-host --retire-legacy # remove the old stack (once no legacy box remains)
+EOF
+;;
     status) cat <<'EOF'
 Deprecated alias for 'box list'. It ignored the <box> argument it
 advertised, so it was split into 'list' (all boxes) and 'info <box>' (one). It
@@ -424,6 +458,8 @@ while [ $# -gt 0 ]; do
       if [ "$cmd" = doctor ]; then args+=("$1"); shift; continue; fi
       # expose's own flags (--list, --remove) are positional to it, not box's
       if [ "$cmd" = expose ]; then args+=("$1"); shift; continue; fi
+      # the host verbs delegate their flags to the scripts they wrap
+      case "$cmd" in setup-host|teardown-host|migrate-host) args+=("$1"); shift; continue ;; esac
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
@@ -842,6 +878,19 @@ cmd_doctor() {
   [ -f "$script" ] || die "doctor script not found at $script — re-run install.sh"
   exec bash "$script" "${args[@]}"
 }
+
+# The host lifecycle scripts, as first-class verbs — nobody should have to know
+# where the install tree keeps its scripts. Each execs the installed script
+# with its flags passed through; the script owns its own behavior (setup-host's
+# incus-admin re-login dance, teardown's confirmation, migrate's per-box work).
+host_script() {   # $1 = script basename under host/
+  local script="$root/host/$1"
+  [ -f "$script" ] || die "$1 not found at $script — re-run install.sh"
+  exec bash "$script" "${args[@]}"
+}
+cmd_setup_host()    { host_script setup-host.sh; }
+cmd_teardown_host() { host_script teardown-host.sh; }
+cmd_migrate_host()  { host_script migrate-host.sh; }
 
 cmd_help() { show_help "${args[0]:-}"; }
 

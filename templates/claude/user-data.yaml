@@ -25,7 +25,7 @@ write_files:
       - **Disposable.** Nothing here is backed up. State is discarded when the box is
         removed; the operator persists work via git push and via `box snapshot`.
       - **Bootstrap runbook.** If the repository you are working in contains a
-        `.claudebox/` folder, read it as your setup runbook — how to install
+        `.box/` folder (older repos may use `.claudebox/`), read it as your setup runbook — how to install
         dependencies, start services, template environment files, seed data, and
         smoke-test — and follow it. It is documentation for you, not a script the
         host runs.

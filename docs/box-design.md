@@ -10,7 +10,7 @@ design decisions.
 
 - **The tool** mints isolated boxes with Claude installed but **unauthenticated**.
   It knows nothing about projects, secrets, recipes, or memory.
-- **The agent** (Claude Code, inside the box) reads an optional `.claudebox/`
+- **The agent** (Claude Code, inside the box) reads an optional `.box/`
   runbook in a cloned repo and acts on it. The recipe's consumer is the
   reasoning agent, not host machinery.
 
@@ -45,10 +45,10 @@ Log in once → snapshot → spin up authed boxes from it.
 
 cloud-init installs a global `~/.claude/CLAUDE.md` in every box telling Claude it
 is running in a box (trust-less, ephemeral, creds-free) and to treat a
-repo's `.claudebox/` folder as its bootstrap runbook. No "tell it" step, no host
+repo's `.box/` folder as its bootstrap runbook. No "tell it" step, no host
 execution.
 
-## `.claudebox/` is optional, agent-facing documentation
+## `.box/` is optional, agent-facing documentation
 
 Not host-executed shell. A repo that wants to be easy to stand up in a sandbox
 ships a runbook (prose + optional scripts the agent may run). A repo that does
@@ -56,12 +56,12 @@ not, you set up by hand. The tool enforces no contract; there is no `install`.
 
 ## What box owns, and what it doesn't
 
-Boxes are ordinary Incus instances, tagged `user.claudebox=1`. That makes every
+Boxes are ordinary Incus instances, tagged `user.box=1`. That makes every
 Incus verb a candidate feature request — `rename`, `info`, `file push`, on
 forever — and wrapping them one at a time grows a worse `incus`. The rule:
 
 > **box owns a command when it must enforce an invariant Incus cannot see:**
-> the `user.claudebox=1` boundary (never touch an instance we didn't mint), the
+> the `user.box=1` boundary (never touch an instance we didn't mint), the
 > isolation stack (`claude-dev` profile + `claudenet` + ACL), or the creds-free
 > snapshot→clone workflow. Everything else is Incus's job.
 

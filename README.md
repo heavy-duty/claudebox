@@ -18,7 +18,7 @@ live in a shared profile no template can touch, so `blank` is a box with
 nobody home — not a box with the safety off.
 
 **The tool knows nothing about your projects.** You just `git clone` inside a
-box. A repo can ship an optional [`.claudebox/`](docs/box-recipe.md)
+box. A repo can ship an optional [`.box/`](docs/box-recipe.md)
 runbook that Claude Code reads and acts on — there is no `install` step and no
 host-run setup. See [docs/box-design.md](docs/box-design.md) for the
 design rationale.
@@ -44,7 +44,7 @@ retires the old `claudebox` symlink. (No `git clone` needed.)
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
 ```sh
-~/.local/share/box/host/setup-host.sh   # run twice if it adds you to incus-admin (re-login between)
+box setup-host   # run twice if it adds you to incus-admin (re-login between)
 ```
 
 Idempotent. Installs Incus and creates the isolation stack: the `boxnet` NAT
@@ -70,7 +70,7 @@ claude                           # then run /login — copy the URL (press c), o
                                  #   in YOUR browser, paste the code back. No host CLI needed.
 gh auth login                    # or drop a PAT in — your git credentials, your call
 git clone https://github.com/you/project && cd project
-claude                           # if the repo has .claudebox/, Claude reads it and sets up
+claude                           # if the repo has .box/, Claude reads it and sets up
 ```
 
 ## Templates
@@ -158,7 +158,8 @@ dev/test only.
 ## Boxes are just Incus instances
 
 A box is an ordinary Incus instance tagged `user.box=1` (pre-0.4.0 boxes
-carry `user.claudebox=1`, honored forever). box wraps the box lifecycle and the isolation model — not all of Incus. It owns a command
+carry `user.claudebox=1`, honored forever). box wraps the box lifecycle and
+the isolation model — not all of Incus. It owns a command
 when it must enforce something Incus can't see: that tag (it will not stop,
 rename or delete an instance it didn't mint), the isolation stack, or the
 creds-free snapshot workflow. For everything else, there's the door:
@@ -227,9 +228,9 @@ diagnoses the host faults that have actually happened: a wedged Incus daemon,
 a dnsmasq that silently isn't serving, a VPN resolver that boxes would
 inherit.
 
-## Recipes: the `.claudebox/` convention
+## Recipes: the `.box/` convention
 
-A repo that wants to be easy to stand up in a box ships an optional `.claudebox/`
+A repo that wants to be easy to stand up in a box ships an optional `.box/`
 folder — a runbook Claude reads and follows (install deps, start services,
 template env, seed data, smoke-test). It is agent-facing documentation, not a
 host-executed script. See [docs/box-recipe.md](docs/box-recipe.md).
@@ -237,9 +238,9 @@ host-executed script. See [docs/box-recipe.md](docs/box-recipe.md).
 ## Uninstall
 
 ```sh
-~/.local/share/box/host/teardown-host.sh               # boxes, network, ACL, profile, firewall
-~/.local/share/box/host/teardown-host.sh --purge-incus # ...and Incus itself
-rm -rf ~/.local/share/box ~/.local/bin/box             # the CLI
+box teardown-host                # boxes, network, ACL, profile, firewall
+box teardown-host --purge-incus  # ...and Incus itself
+rm -rf ~/.local/share/box ~/.local/bin/box   # the CLI itself
 ```
 
 ## Non-goals
