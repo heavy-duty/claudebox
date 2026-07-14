@@ -762,6 +762,21 @@ box_ipv4() {   # first address only; strips Incus's " (iface)" suffix. "-" if no
     | grep . || echo "-"
 }
 
+# The box's address ON BOXNET — which is NOT the same as "its first address".
+# A box running docker also carries 172.17.0.1 (docker0), and Incus happily
+# lists that FIRST. box_ipv4() hands you the decoy, and pointing anything at it
+# is pointing at the wrong interface: 'box expose' did exactly that until Incus
+# refused with `Connect IP "172.17.0.1" must be one of the instance's static
+# IPv4 addresses`. The drill has known this trap since run 4; the CLI had not.
+# Derive the prefix from the network rather than hardcoding it.
+box_net_ip() {
+  local pfx
+  pfx="$(incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1 | cut -d. -f1-3)"
+  [ -n "$pfx" ] || return 1
+  incus list "$1" --format csv --columns 4 2>/dev/null \
+    | tr -d '"' | tr ' ,' '\n\n' | grep -E "^${pfx//./\\.}\.[0-9]+$" | head -n1 | grep .
+}
+
 # VIRTUAL-MACHINE is a mouthful in a table; anything unexpected passes through.
 short_type() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -981,8 +996,8 @@ cmd_expose() {
       && echo "box: closed the door on port $port"
     # Remove the scoped ACL allow, if one was added. Best-effort: its absence
     # is not an error (the drill may show the allow was never needed).
-    local ip; ip="$(box_ipv4 "$inst")"
-    [ "$ip" != "-" ] && incus network acl rule remove box-isolate ingress \
+    local ip; ip="$(box_net_ip "$inst" || true)"
+    [ -n "$ip" ] && incus network acl rule remove box-isolate ingress \
       action=allow "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
     return 0
   fi
@@ -992,8 +1007,8 @@ cmd_expose() {
   [ -n "$port" ] || usage_error "usage: $(synopsis_of expose)"
   case "$port$hport" in *[!0-9]*) usage_error "ports must be numbers — got port='$port' host-port='$hport'" ;; esac
 
-  local ip; ip="$(box_ipv4 "$inst")"
-  [ "$ip" != "-" ] || die "$box has no IP yet — is it running? (box info $box)"
+  local ip; ip="$(box_net_ip "$inst")" \
+    || die "$box has no boxnet address yet — is it running? (box info $box)"
 
   local dev; dev="$(exposure_dev "$port")"
   if incus config device get "$inst" "$dev" listen >/dev/null 2>&1; then
@@ -1016,8 +1031,12 @@ cmd_expose() {
   # unnecessary, and it is what made expose fail before it ever reached the
   # proxy. Ask for less; the docs said so.
   local err; err="$(mktemp)"
+  # connect=0.0.0.0 is deliberate: in NAT mode Incus resolves the instance's
+  # OWN current address off the bridge's neighbour table. Naming an address
+  # here instead makes Incus demand it be a *static* one — and the address we
+  # would have named was docker0's. Let it find the box; it knows where it is.
   if incus config device add "$inst" "$dev" proxy \
-       "listen=tcp:127.0.0.1:$hport" "connect=tcp:$ip:$port" \
+       "listen=tcp:127.0.0.1:$hport" "connect=tcp:0.0.0.0:$port" \
        bind=host nat=true >/dev/null 2>"$err"; then
     rm -f "$err"
     echo "box: 127.0.0.1:$hport → $box:$port"
