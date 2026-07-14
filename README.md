@@ -32,8 +32,10 @@ Installs the tree to `~/.local/share/claudebox` and links `claudebox` onto your
 ```
 
 Idempotent. Installs Incus and creates the isolation stack: the `claudenet` NAT
-bridge, the `claude-isolate` ACL (drops all RFC1918/CGNAT/link-local egress),
-the `claude-dev` profile, and firewall rules blocking instance → host. All rules
+bridge (sibling-name resolution off, resolver pinned to public upstreams —
+`BOX_DNS` overrides), the `claude-isolate` ACL (drops all RFC1918/CGNAT/
+link-local egress), the `claude-dev` profile (port-isolated NICs — boxes can't
+reach each other), and firewall rules blocking instance → host. All rules
 re-apply at boot via `claudebox-firewall.service` — no post-reboot ritual. If
 the host lacks `dnsmasq-base` (Debian cloud images skip Recommends):
 `sudo apt-get install -y dnsmasq-base`.
@@ -122,12 +124,51 @@ command surface is a table.
 
 ## Isolation
 
-Dedicated NAT bridge `claudenet` + Incus `claude-isolate` ACL dropping all
-private-range egress, plus host-firewall rules that block instance → host
-(including the host's public IPs). The box reaches the public internet and
-nothing else. Entry is `incus exec` over the local socket only — **no inbound
-path exists.** The VM is the trust boundary: Claude can run arbitrary code inside
-and touch nothing you care about.
+The contract: **a box reaches the public internet and nothing else.** Not the
+host, not your LAN, not another box, not even another box's *name*. What
+enforces it, layer by layer:
+
+- **Dedicated NAT bridge** `claudenet`, IPv6 off. Every rule below is
+  IPv4-only, so IPv6 would be an uncovered path — off is part of the
+  contract, not a default.
+- **`claude-isolate` ACL** — drops all egress to private space (RFC1918,
+  CGNAT, link-local), with a single carve-out to the gateway so DNS works.
+- **Sibling isolation, at L2** — two boxes on one bridge are *switched*,
+  never routed, so no L3 rule can separate them (learned the hard way; see
+  below). `security.port_isolation` on every box NIC plus an nft
+  bridge-family drop mean box A cannot exchange frames with box B at all.
+- **No name-level reconnaissance** — `dns.mode=none` stops the gateway
+  resolving sibling names, and the bridge's resolver is pinned to public
+  upstreams (`no-resolv`), so tailnet names and split-DNS zones from a
+  host-level VPN don't resolve inside a box either.
+- **Host firewall** — instance → host is dropped except DNS/DHCP, including
+  the host's public IPs. Entry is `incus exec` over the local socket only —
+  **no inbound path exists.**
+
+The VM is the trust boundary: Claude can run arbitrary code inside and touch
+nothing you care about.
+
+### Measured, not claimed
+
+Every clause above is probed live by an end-to-end drill, because the one time
+this contract was reasoned about instead of measured, the reasoning was wrong:
+box→box traffic was "covered" by an L3 drop that L2-switched frames never
+meet — a hole found by probing, not by reading the rules. On a bare host the
+drill installs the whole stack, mints a box cold, snapshots and clones it,
+probes every boundary from inside the boxes, and removes what it minted —
+currently **47 checks, 47 passing**. [drill/RUNS.md](drill/RUNS.md) is the full
+history, including every trap that fooled a run into a wrong verdict.
+
+```sh
+bash drill/doctor.sh    # read-only: is this host healthy and the stack live?
+bash drill/drill.sh     # FULL end-to-end — mutates the host; use a machine you own
+```
+
+The doctor reads ground truth, not config claims — the kernel's `isolated on`
+flag per bridge port, the process table, the resolver actually in use — and
+diagnoses the host faults that have actually happened: a wedged Incus daemon,
+a dnsmasq that silently isn't serving, a VPN resolver that boxes would
+inherit.
 
 ## Recipes: the `.claudebox/` convention
 
