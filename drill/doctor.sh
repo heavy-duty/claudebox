@@ -41,12 +41,15 @@ timeout 10 incus list >/dev/null 2>&1 || {
 
 head_ "Network — claudenet"
 if incus network show claudenet >/dev/null 2>&1; then
+  # dns.mode=none is SHIPPED — it is what stops a box enumerating its siblings
+  # through the gateway's dnsmasq. Its ABSENCE is the problem, not its presence.
   dns="$(incus network get claudenet dns.mode 2>/dev/null)"
-  if [ -z "$dns" ] || [ "$dns" = managed ]; then
-    ok "dns.mode = ${dns:-<unset, i.e. managed>}"
+  if [ "$dns" = none ]; then
+    ok "dns.mode = none — a box cannot enumerate its siblings by name"
   else
-    no "dns.mode = $dns  ← the drill's phase D left this behind. Boxes minted now get NO working DNS."
-    [ "$FIX" = 1 ] && { incus network unset claudenet dns.mode && inf "reverted: dns.mode unset"; }
+    no "dns.mode = ${dns:-<unset>} — a box can RESOLVE its siblings' names and addresses"
+    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
+    [ "$FIX" = 1 ] && { incus network set claudenet dns.mode=none && inf "set: dns.mode=none"; }
   fi
   inf "ipv4.address = $(incus network get claudenet ipv4.address 2>/dev/null)"
   # Incus reports the network as "Created" whether or not anything is actually
@@ -79,7 +82,7 @@ else
 fi
 
 head_ "Firewall — the box-to-box drop"
-if nft list table bridge claudebox >/dev/null 2>&1 || sudo -n nft list table bridge claudebox >/dev/null 2>&1; then
+if sudo nft list table bridge claudebox >/dev/null 2>&1; then
   ok "nft bridge table 'claudebox' is present — boxes cannot reach each other"
 else
   no "the box-to-box drop is MISSING — boxes can reach each other"
@@ -132,8 +135,12 @@ fi
 # tap — and then boxes reach each other while every config says they cannot.
 # Ask the kernel.
 head_ "Bridge ports — the KERNEL's view (config is a claim; this is the fact)"
-if command -v bridge >/dev/null 2>&1; then
-  ports="$(sudo bridge -d link show 2>/dev/null | grep -A1 'master claudenet')"
+BRIDGE=""
+for c in bridge /usr/sbin/bridge /sbin/bridge; do
+  sudo "$c" -V >/dev/null 2>&1 && { BRIDGE="$c"; break; }
+done
+if [ -n "$BRIDGE" ]; then
+  ports="$(sudo "$BRIDGE" -d link show 2>/dev/null | grep -A1 'master claudenet')"
   if [ -z "$ports" ]; then
     inf "no instance is attached to claudenet right now (mint a box to check the taps)"
   else
@@ -148,7 +155,7 @@ if command -v bridge >/dev/null 2>&1; then
     fi
   fi
 else
-  inf "'bridge' (iproute2) not installed — cannot read the kernel's view"
+  inf "'bridge' (iproute2) not found — cannot read the kernel's view"
 fi
 
 head_ "Instances"
@@ -194,10 +201,9 @@ if [ "$PIN" = 1 ]; then
 fi
 
 head_ "Can a box actually resolve DNS?"
-probe=""
-for b in drill archive peer clone; do
-  incus config show "$b" >/dev/null 2>&1 && { probe="$b"; break; }
-done
+# Any box will do — the drill's names are not the only boxes on a host.
+probe="$(incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null \
+         | awk -F, '$2 == "RUNNING" { print $1; exit }')"
 if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
   inf "probing inside '$probe' — this separates DNS from routing, which is the whole question:"
   inf "its resolv.conf: $(timeout 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' 2>/dev/null | tr '\n' ' ')"
