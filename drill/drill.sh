@@ -137,6 +137,20 @@ box_pings() {   # box_pings <box> <ip> → 0 if it answers ICMP
   timeout -k 5 20 incus exec "$1" -- ping -c1 -W2 "$2" >/dev/null 2>&1 </dev/null
 }
 
+# Mint with a heartbeat. box new's own narration lands in the log; a dot every
+# 5s on the drill's terminal proves the run is ALIVE — a silent multi-minute
+# mint is indistinguishable from a wedge, and that ambiguity has cost whole
+# evenings. The log line says where to watch the real progress.
+mint_box() {   # mint_box <log> <box-new args...> → box new's exit code
+  local log="$1"; shift
+  inf "watch it live in another terminal:  tail -f $log"
+  box new "$@" >"$log" 2>&1 </dev/null &
+  local pid=$!
+  while kill -0 "$pid" 2>/dev/null; do printf '.'; sleep 5; done
+  printf '\n'
+  wait "$pid"
+}
+
 # --- stage 1: consent, install, then re-enter inside the incus-admin group ---
 if [ "${IN_GROUP:-0}" != 1 ]; then
   if [ "$YES" -ne 1 ]; then
@@ -387,7 +401,7 @@ rm -rf "$badt"
 
 printf '\n  minting a blank box (the DEFAULT template — no tooling, fast)…\n'
 t0=$SECONDS
-if box new --name tpl >/tmp/tpl.log 2>&1; then
+if mint_box /tmp/tpl.log --name tpl; then
   ok "box new --name tpl, no --template  ($((SECONDS - t0))s)"
   tt="$(incus config get tpl user.box.template 2>/dev/null)"
   [ "$tt" = blank ] && ok "the default template is blank (user.box.template=blank)" \
@@ -415,7 +429,7 @@ fi
 
 printf '\n  minting a claude box (cold, ~10 min)…\n'
 t0=$SECONDS
-if box new --name drill --template claude >/tmp/new.log 2>&1; then
+if mint_box /tmp/new.log --name drill --template claude; then
   ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
 else
   no "box new FAILED — tail: $(tail -3 /tmp/new.log | tr '\n' ' ')"
@@ -472,7 +486,7 @@ box info archive | grep -q authed && ok "the snapshot followed the rename" || no
 
 # --- clone from a snapshot of a renamed box --------------------------------
 printf '\n  cloning from the snapshot…\n'
-if box new --name clone --from archive/authed >/tmp/clone.log 2>&1; then
+if mint_box /tmp/clone.log --name clone --from archive/authed; then
   ok "new --from archive/authed (clone of a snapshot of a renamed box)"
   box exec clone -- true >/dev/null 2>&1 && ok "the clone is alive and enterable" || no "the clone is not enterable"
 else
@@ -503,7 +517,7 @@ wait_box archive && ok "archive is back up (agent answering)" \
 
 # Sibling isolation needs a sibling. Clone from the snapshot — fast, no cold mint.
 printf '\n  cloning a peer for the sibling probes…\n'
-if box new --name peer --from archive/authed >/tmp/peer.log 2>&1 && wait_box peer; then
+if mint_box /tmp/peer.log --name peer --from archive/authed && wait_box peer; then
   ok "peer minted from archive/authed and answering"
 else
   no "peer clone failed or never answered — tail: $(tail -3 /tmp/peer.log | tr '\n' ' ')"
