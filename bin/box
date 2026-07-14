@@ -468,12 +468,22 @@ pick_mode() {
   fi
 }
 
+# Five minutes, not three: the first VM launch on a fresh pool unpacks the
+# image into a pool volume and takes the coldest possible boot — measured
+# live, an agent can need past the 3-minute mark exactly once per pool while
+# every later boot answers in seconds. And when it still fails, ship the
+# forensics: the VM's console says why, and the box is torn down by whoever
+# called us before anyone can read it.
 wait_agent() {
   local n="$1" i
   echo "box: waiting for instance agent..."
-  for i in $(seq 1 90); do
+  for i in $(seq 1 150); do
     if incus exec "$n" -- true </dev/null >/dev/null 2>&1; then return; fi
-    [ "$i" -eq 90 ] && die "instance agent never came up (incus console $n to inspect)"
+    if [ "$i" -eq 150 ]; then
+      echo "box: instance agent never came up. The VM's console log:" >&2
+      timeout -k 5 15 incus console "$n" --show-log 2>/dev/null | tail -15 | sed 's/^/  /' >&2
+      die "agent unreachable after 5 minutes (incus console $n to inspect live)"
+    fi
     sleep 2
   done
 }
