@@ -78,8 +78,28 @@ else
   inf "claudenet does not exist (a fresh host — setup-host.sh will create it)"
 fi
 
+head_ "Firewall — the box-to-box drop"
+if nft list table bridge claudebox >/dev/null 2>&1 || sudo -n nft list table bridge claudebox >/dev/null 2>&1; then
+  ok "nft bridge table 'claudebox' is present — boxes cannot reach each other"
+else
+  no "the box-to-box drop is MISSING — boxes can reach each other"
+  inf "an L3 ACL never sees frames switched between two ports of one bridge;"
+  inf "the drop is an nft BRIDGE-family rule, and without it siblings are wide open."
+  inf "fix:  sudo /usr/local/sbin/claudebox-firewall"
+  inf "      (or: sudo systemctl restart claudebox-firewall.service)"
+fi
+
 head_ "Profile — claude-dev (the NIC is the isolation contract)"
 if incus profile show claude-dev >/dev/null 2>&1; then
+  iso="$(incus profile device get claude-dev eth0 security.port_isolation 2>/dev/null)"
+  if [ "$iso" = "true" ]; then
+    ok "security.port_isolation = true — boxes cannot reach each other at L2"
+  else
+    no "security.port_isolation is NOT set — BOXES CAN REACH EACH OTHER"
+    inf "an L3 ACL cannot do this: two boxes on one bridge are on the same L2"
+    inf "segment, so their frames are switched, never routed past the ACL."
+    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
+  fi
   for k in security.mac_filtering security.ipv4_filtering; do
     v="$(incus profile device get claude-dev eth0 "$k" 2>/dev/null)"
     if [ -z "$v" ]; then

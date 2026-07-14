@@ -204,18 +204,16 @@ KEEP="${KEEP:-0}"
 # clean-ish slate and setup-host is the no-op it should be.
 # A host still carrying a previous run's phase-D mutations mints boxes with no
 # DNS, and then reports the resulting breakage as a finding. Refuse to run.
+# NOTE: dns.mode=none is now part of the SHIPPED stack (it closes the sibling
+# DNS-enumeration leak), so it is no longer "dirt" from a rehearsal — do not
+# revert it. Only the vetoed NIC filtering counts as leftover.
 dirty=""
-[ -n "$(incus network get claudenet dns.mode 2>/dev/null)" ] && dirty="dns.mode"
 [ -n "$(incus profile device get claude-dev eth0 security.ipv4_filtering 2>/dev/null)" ] && dirty="$dirty ipv4_filtering"
 [ -n "$(incus profile device get claude-dev eth0 security.mac_filtering 2>/dev/null)" ] && dirty="$dirty mac_filtering"
 if [ -n "$dirty" ]; then
-  note "this host still carries a previous run's phase-D mutations:$dirty — reverting them now"
-  incus network unset claudenet dns.mode >/dev/null 2>&1
+  note "this host carries the VETOED NIC filtering from an old rehearsal:$dirty — reverting"
   incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
   incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
-  incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
-  still="$(incus network get claudenet dns.mode 2>/dev/null)"
-  [ -n "$still" ] && { echo "drill: could not revert dns.mode ('$still'). run: bash drill/doctor.sh --fix" >&2; exit 1; }
 fi
 
 inf "clearing anything a previous run left behind…"
