@@ -599,6 +599,7 @@ cmd_new() {
       "${extra[@]}"
     wait_agent "$instance"
     echo "box: waiting for phase-1 (cloud-init)..."
+    echo "box: (its full narration, live:  incus exec $name -- tail -f /var/log/cloud-init-output.log)"
     # A failed cloud-init used to print a screen of dots and the word "error",
     # with nothing to act on — the box's own log holds the reason, and nobody
     # was told it existed. Show it, and leave the box up to inspect.
@@ -607,7 +608,11 @@ cmd_new() {
     # drill), the session can wedge open after the remote command has exited,
     # blocking forever on a websocket that will never close. Caught live: a
     # mint stuck at 'status: done'. Only shell/exec/tmux may own the terminal.
-    if ! incus exec "$instance" -- cloud-init status --wait </dev/null; then
+    # PYTHONUNBUFFERED: cloud-init's progress dots are block-buffered the
+    # moment stdout is not a tty — a redirected mint (a script, the drill)
+    # shows NOTHING for the whole install and then one burst at the end,
+    # which reads exactly like a hang. Unbuffered, the dots arrive as dots.
+    if ! incus exec "$instance" -- env PYTHONUNBUFFERED=1 cloud-init status --wait </dev/null; then
       echo >&2
       echo "box: cloud-init FAILED in $name. What it says:" >&2
       incus exec "$instance" -- cloud-init status --long </dev/null 2>&1 | sed 's/^/  /' >&2

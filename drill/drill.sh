@@ -401,7 +401,7 @@ rm -rf "$badt"
 
 printf '\n  minting a blank box (the DEFAULT template — no tooling, fast)…\n'
 t0=$SECONDS
-if mint_box /tmp/tpl.log --name tpl; then
+if mint_box /tmp/mint-tpl.log --name tpl; then
   ok "box new --name tpl, no --template  ($((SECONDS - t0))s)"
   tt="$(incus config get tpl user.box.template 2>/dev/null)"
   [ "$tt" = blank ] && ok "the default template is blank (user.box.template=blank)" \
@@ -424,15 +424,15 @@ if mint_box /tmp/tpl.log --name tpl; then
     || no "blank box cannot resolve — DNS parity broken"
   box rm tpl --force >/dev/null 2>&1 && ok "blank box removed" || no "could not remove the blank box"
 else
-  no "blank mint FAILED — tail: $(tail -3 /tmp/tpl.log | tr '\n' ' ')"
+  no "blank mint FAILED — tail: $(tail -3 /tmp/mint-tpl.log | tr '\n' ' ')"
 fi
 
 printf '\n  minting a claude box (cold, ~10 min)…\n'
 t0=$SECONDS
-if mint_box /tmp/new.log --name drill --template claude; then
+if mint_box /tmp/mint-drill.log --name drill --template claude; then
   ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
 else
-  no "box new FAILED — tail: $(tail -3 /tmp/new.log | tr '\n' ' ')"
+  no "box new FAILED — tail: $(tail -3 /tmp/mint-drill.log | tr '\n' ' ')"
   echo; echo "── cannot continue without a box"; printf '  %s\n' "${findings[@]}"; exit 1
 fi
 
@@ -486,11 +486,11 @@ box info archive | grep -q authed && ok "the snapshot followed the rename" || no
 
 # --- clone from a snapshot of a renamed box --------------------------------
 printf '\n  cloning from the snapshot…\n'
-if mint_box /tmp/clone.log --name clone --from archive/authed; then
+if mint_box /tmp/mint-clone.log --name clone --from archive/authed; then
   ok "new --from archive/authed (clone of a snapshot of a renamed box)"
   box exec clone -- true >/dev/null 2>&1 && ok "the clone is alive and enterable" || no "the clone is not enterable"
 else
-  no "clone FAILED — tail: $(tail -3 /tmp/clone.log | tr '\n' ' ')"
+  no "clone FAILED — tail: $(tail -3 /tmp/mint-clone.log | tr '\n' ' ')"
 fi
 
 # --- the escape hatch ------------------------------------------------------
@@ -517,10 +517,10 @@ wait_box archive && ok "archive is back up (agent answering)" \
 
 # Sibling isolation needs a sibling. Clone from the snapshot — fast, no cold mint.
 printf '\n  cloning a peer for the sibling probes…\n'
-if mint_box /tmp/peer.log --name peer --from archive/authed && wait_box peer; then
+if mint_box /tmp/mint-peer.log --name peer --from archive/authed && wait_box peer; then
   ok "peer minted from archive/authed and answering"
 else
-  no "peer clone failed or never answered — tail: $(tail -3 /tmp/peer.log | tr '\n' ' ')"
+  no "peer clone failed or never answered — tail: $(tail -3 /tmp/mint-peer.log | tr '\n' ' ')"
 fi
 
 # C1 — public egress (#15 A1; resolving the hostname also proves A5, gateway DNS)
