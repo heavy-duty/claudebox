@@ -42,6 +42,7 @@ CMDS=(
   "info^<box> [--json]^box^One box: state, type, IP, and its snapshot labels^fn:cmd_info^"
   "shell^<box>^box^Open a shell in a box, as the claude user^fn:cmd_shell^"
   "exec^<box> -- <cmd...>^box^Run a command inside a box^fn:cmd_exec^"
+  "tmux^<box> [<session>]^box^Attach or create a tmux session in a box — survives disconnects^fn:cmd_tmux^"
   "snapshot^<box> [<label>]^box^Checkpoint a box (label defaults to manual-<epoch>)^fn:cmd_snapshot^"
   "restore^<box> <snapshot>^box,arg2^Roll a box back to one of its snapshots^incus:restore^restored {} to {1}"
   "rename^<box> <new-name>^box,arg2,stopped^Rename a box (it must be stopped first)^incus:rename^renamed {} to {1}"
@@ -226,6 +227,23 @@ flags as its own.
 
   claudebox exec work -- git -C project pull
   claudebox exec work -- claude --version
+EOF
+;;
+    tmux) cat <<'EOF'
+A shell that survives you. 'shell' is a child of the exec connection — if your
+terminal or SSH session drops, everything running in it is SIGHUP'd, and a
+long Claude run dies with it. This attaches a tmux session instead
+(new-session -A): created if new, reattached if it exists — so starting work
+and resuming after a disconnect are the same command, with no state to
+remember.
+
+The session name (default: main) buys parallel streams in one box:
+
+  claudebox tmux work            # attach or create 'main'
+  claudebox tmux work run-1      # a second, independent stream, same box
+
+Detach with Ctrl-b d; 'exit' ends the session. For a plain shell with none of
+tmux's semantics, 'claudebox shell' is unchanged.
 EOF
 ;;
     snapshot) cat <<'EOF'
@@ -571,6 +589,19 @@ cmd_info() {
 
 cmd_shell() { incus exec "$inst" -- sudo -u claude -i; }
 cmd_exec()  { incus exec "$inst" -- sudo -u claude -i "${args[@]:1}"; }
+
+# A shell is a child of the exec connection: drop the terminal and everything
+# in it is SIGHUP'd — a long Claude run dies with it. tmux 'new-session -A'
+# attaches when the session exists and creates it when it doesn't, so starting
+# work and reattaching after a disconnect are the same command. 'shell' stays
+# bare on purpose — two verbs, two contracts.
+cmd_tmux() {
+  local session="${args[1]:-main}"
+  case "$session" in
+    *[!A-Za-z0-9_-]*) usage_error "session names are letters, digits, '-' and '_' — got '$session'" ;;
+  esac
+  incus exec "$inst" -- sudo -u claude -i tmux new-session -A -s "$session"
+}
 
 cmd_snapshot() {
   local label="${args[1]:-manual-$(date +%s)}"

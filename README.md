@@ -82,6 +82,7 @@ claudebox list                     # list your boxes
 claudebox info <box>               # one box: state, IP, snapshot labels
 claudebox shell <box>              # enter as the claude user
 claudebox exec <box> -- <cmd...>   # run a command in the box
+claudebox tmux <box> [session]     # attach/create a tmux session — survives disconnects
 claudebox snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
 claudebox restore <box> <snap>     # roll back to a snapshot
 claudebox rename <box> <new>       # rename a box (stop it first)
