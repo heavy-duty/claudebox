@@ -5,7 +5,11 @@ how to diagnose the next stall without starting from zero. Append a section per
 run; keep the traps table current — it is the part that saves time.
 
 The audit this fed, [#15](https://github.com/heavy-duty/claudebox/issues/15), is
-**complete** (run 10, 48/49).
+**complete** (run 10, 48/49) — and its headline finding is **fixed and
+re-measured**: sibling isolation shipped in #37/#38, and runs 11–13 hold at
+**zero failures**, run 13 from a bare host (full teardown → rebuild → drill,
+47/47). [#16](https://github.com/heavy-duty/claudebox/issues/16) closed on that
+evidence.
 
 ## The audit's answer
 
@@ -14,8 +18,8 @@ The audit this fed, [#15](https://github.com/heavy-duty/claudebox/issues/15), is
 | A1/A5 egress + gateway DNS | PASS |
 | A2 box → host | dropped |
 | A2 box → RFC1918 | dropped |
-| **A3 sibling isolation** | 🔴 **FAIL — tcp REFUSED, i.e. the packet ARRIVED.** Boxes reach each other. #12's central claim was wrong; **#16 is a fix, not a formalization** |
-| A4 DNS enumeration | LEAKS — a box resolves its sibling by name and address |
+| **A3 sibling isolation** | run 10: 🔴 **FAIL — tcp REFUSED, i.e. the packet ARRIVED.** #12's central claim was wrong; #16 became a fix, not a formalization. **Fixed** (`security.port_isolation` + nft bridge drop, #37/#38); runs 11–13: **BLOCKED — tcp dropped + no icmp reply** |
+| A4 DNS enumeration | run 10: LEAKS. **Fixed** (`dns.mode=none` shipped); runs 11–13: **blocked** — and the resolver is pinned so tailnet/split-DNS names don't resolve either (#33/#45) |
 | A6 IPv6 off | `none` ✓ |
 | A7 inbound host → box | dropped |
 | B1 `@internal` on a bridge ACL | REJECTED — `Unsupported nftables subject` ⇒ #16 derives the subnet |
@@ -24,8 +28,10 @@ The audit this fed, [#15](https://github.com/heavy-duty/claudebox/issues/15), is
 | B4 `config get` unset key | empty + exit 0 ⇒ #17 must use `${var:-}` |
 | B5 L2 filtering | 🔴 `ipv4_filtering` **BREAKS the box** — design veto (measured on a healthy baseline) |
 
-**The headline:** the tool's contract — *"a box reaches the public internet and
-nothing else"* — is **false today**. It also reaches every other box on the host.
+**The headline, then:** the tool's contract — *"a box reaches the public
+internet and nothing else"* — was **false**: a box also reached every other box
+on the host. **The headline, now:** the contract holds, and it is *measured* —
+47/47 from a bare host (run 13), every layer probed from inside the boxes.
 
 ## Findings in claudebox (not in the drill)
 
@@ -121,6 +127,33 @@ Read this before adding a probe. Every one of these cost a run.
     instant; an unreachable host burns the timeout. This is the same disease as
     every other trap here — trusting a proxy for the fact instead of the fact.
 
+13. **A TTY on stdin makes `incus exec` interactive — and then `timeout`
+    cannot kill it.** The doctor's probes ran bare `timeout N incus exec …`
+    with the operator's terminal as stdin: exec attached it in raw mode, the
+    20s TERM never took (no `-k` escalation), and **Ctrl-C was forwarded into
+    the box as a keystroke** — a 15-minute hang the operator could only end by
+    killing the shell. The drill had already learned this in #22 (`exec_in`
+    pins stdin, escalates with `-k 5`); the doctor's probe section was added
+    later and never inherited the cure. Every `incus exec` in a script gets
+    `</dev/null` and `timeout -k` — no exceptions, including the ones that
+    "obviously exit immediately" (#42).
+14. **The gateway does not answer ping — by design, so pinging it proves
+    nothing.** `claudebox-firewall.sh` drops everything box→host except
+    DNS/DHCP; ICMP to `10.87.0.1` dies in that trailing drop on every healthy
+    host. The doctor used exactly that ping as its *routing* probe, and
+    declared a host "NOT fit to drill" while the very next line resolved
+    `deb.debian.org` **through the gateway it had just called unreachable**.
+    A probe whose failure is the designed state measures the firewall doing
+    its job and calls it a fault. Routing is probed the way the contract
+    states it: the public internet, by address (#43).
+15. **Do not demand an empty host — assert *your* boxes, not *no* boxes.**
+    Run 11's only two FAILs were pre-existing operator boxes (`t1`, `t2`):
+    the empty-host message check can't pass on a shared host, and the
+    teardown check demanded global emptiness right after an rm loop that
+    deliberately removes only the drill's own names. A check that contradicts
+    the multi-tenant discipline of the code above it teaches operators to
+    "clean up" boxes the tool refuses to touch (#44).
+
 ## Diagnosing a stall
 
 **Start here: `bash drill/doctor.sh`** — it answers "what state is this host
@@ -168,6 +201,9 @@ No listener is needed, and none should be started: see trap 3.
 | 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
 | 5 | stalled in host setup | trap 6 — silence through apt/sudo |
 | 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup. Recovering the host exposed **two real claudebox bugs**: `setup-host` deadlocks the incus daemon when re-run with boxes up (#26), and clones inherit their source's machine-id → same DHCP lease → **two boxes, one IP** (#27) |
+| **13** | **47/0 — the contract, from zero** | full `teardown-host.sh` → rebuild → drill on a bare host: setup-host built the entire stack from scratch — including the pinned resolver (#45) on a Tailscale host, cold mint resolving through it — and the empty-host check finally got to run. Every layer measured, nothing inherited |
+| 12 | 46/0 | first zero-failure run. #44's shared-host fixes verified live (tenant note where the false FAIL was; teardown asserts its own names) |
+| 11 | 45/2 | **A3 re-answered with the fixed probe (#41): BLOCKED — tcp dropped + no icmp reply.** #16's hardening measured end-to-end; both FAILs were trap 15 (the drill demanding an empty host, #44). Before the run, the doctor hung unkillably twice (trap 13 → #42) and cried wolf a fifth time (trap 14 → #43) |
 | **10** | **48/49 — the audit is complete** | 🔴 **A3 answered: sibling isolation DOES NOT HOLD** (tcp refused = the packet arrived). B5's `ipv4_filtering` veto confirmed on a *healthy* baseline. B3 cleared. Every #15 probe answered |
 | 9 | aborted: cold mint failed, twice | **not** the drill and **not** the host's mutations (doctor was green): `claudenet` had **no dnsmasq** — it never respawned after the SIGKILL in run 6's recovery. Boxes got no DHCP lease at all. Trap 11 |
 | 8 | aborted: cold mint failed | `cloud-init status: error` — **the box had no DNS at all**. Run 7's phase-D `dns.mode=none` survived the run and poisoned the host. Trap 10, and the reason `doctor.sh` exists |
@@ -179,6 +215,12 @@ paid for itself many times over — every one of those seven failures was a real
 defect, and the audit's headline finding overturned the premise it was written
 to confirm. But the lesson stands: **if a probe can be answered by hand, answer
 it by hand** rather than paying for another full run.
+
+Runs 11–13 close the arc: every remaining failure was the instrument's own
+false alarm (traps 13–15, all in the doctor or the drill, none in the tool),
+and the last run measured the whole contract from a bare host with zero. The
+instrument is finally quieter than the thing it measures — which is the only
+state in which its green means anything.
 
 ### The B3 flip — a lesson worth keeping
 
