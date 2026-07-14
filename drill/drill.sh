@@ -428,9 +428,15 @@ else
 fi
 
 # C1 — public egress (#15 A1; resolving the hostname also proves A5, gateway DNS)
-[ "$(box_curl archive https://api.github.com 20)" = 0 ] \
-  && { ok "box reaches the public internet (and gateway DNS resolves public names)"; aud "A1/A5 egress + public DNS: PASS"; } \
-  || { no "box cannot reach the internet (a box that can't is useless)"; aud "A1/A5 egress: FAIL"; }
+BASELINE_OK=1
+if [ "$(box_curl archive https://api.github.com 20)" = 0 ]; then
+  ok "box reaches the public internet (and gateway DNS resolves public names)"
+  aud "A1/A5 egress + public DNS: PASS"
+else
+  BASELINE_OK=0
+  no "box cannot reach the internet (a box that can't is useless)"
+  aud "A1/A5 egress: FAIL"
+fi
 
 # C2 — box → host (#15 A2). The host DOES listen on the gateway: dnsmasq is on
 # :53 by design (that carve-out is what makes egress DNS work). So probe a port
@@ -541,13 +547,25 @@ phase "D. Hardening rehearsal — #16's changes, applied live (#15 section B)"
 # ===========================================================================
 # The host is disposable, so rehearse the exact changes #16 proposes and watch
 # what breaks. A FAIL here vetoes a piece of #16's design before it is written.
+#
+# But ONLY if the box was healthy to begin with. On run 7 the baseline was
+# broken (a clone/source IP collision took the box's networking down), and phase
+# D dutifully reported "L2 filtering BREAKS the box — design veto". It did not.
+# A verdict measured on a broken box is not a verdict, it is a slander; #16
+# would have been redesigned around a fiction. Refuse to judge instead.
+if [ "$BASELINE_OK" -ne 1 ]; then
+  note "SKIPPING phase D — the box could not reach the internet BEFORE any hardening was applied"
+  inf  "a design verdict measured on a broken baseline is worthless; fix the baseline and re-run"
+  aud  "B1/B3/B5: NOT MEASURED — baseline egress was already broken (see A1)"
+fi
+if [ "$BASELINE_OK" -eq 1 ]; then
 
 # D1 — dns.mode=none (#15 B3): must kill sibling resolution, must NOT kill egress.
 # Runs 2 and 3 DISAGREED on the egress half (broken, then intact) — a verdict
 # that flips is a verdict you cannot design on. Setting dns.mode restarts the
 # network's dnsmasq, so a probe fired immediately can catch it mid-restart.
 # Distinguish TRANSIENT (recovers) from BROKEN (still dead after 30s), and say so.
-if incus network set claudenet dns.mode=none 2>/dev/null; then
+if incus network set claudenet dns.mode=none 2>/tmp/dnsmode.err; then
   sleep 2
   [ -n "$(in_box archive getent hosts peer.incus)" ] \
     && { no "dns.mode=none did not stop sibling resolution"; aud "B3 dns.mode=none: does NOT close the leak"; } \
@@ -571,8 +589,8 @@ if incus network set claudenet dns.mode=none 2>/dev/null; then
     fi
   fi
 else
-  no "incus rejected dns.mode=none on claudenet"
-  aud "B3 dns.mode=none: REJECTED by incus — #16 needs another mechanism"
+  no "incus rejected dns.mode=none on claudenet: $(head -1 /tmp/dnsmode.err 2>/dev/null)"
+  aud "B3 dns.mode=none: REJECTED by incus — $(head -1 /tmp/dnsmode.err 2>/dev/null) — #16 needs another mechanism"
 fi
 
 # D2 — L2 filtering (#15 B5): the box must keep working with it on.
@@ -613,6 +631,8 @@ else
   note "@internal rejected on a bridge ACL ($(head -1 /tmp/ai.err 2>/dev/null | cut -c1-60))"
   aud "B1 @internal: rejected ⇒ #16 derives the subnet in setup-host.sh (mask the gateway CIDR)"
 fi
+
+fi   # end of the BASELINE_OK guard around phase D
 
 # ===========================================================================
 if [ "$KEEP" = 1 ]; then
