@@ -70,12 +70,28 @@ fi
 sudo install -m 755 "$here/host/claudebox-firewall.sh" /usr/local/sbin/claudebox-firewall
 sudo install -m 644 "$here/host/claudebox-firewall.service" /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now claudebox-firewall.service
+sudo systemctl enable claudebox-firewall.service
+# RESTART, not 'enable --now'. The unit is RemainAfterExit, so once it has run
+# it stays "active" forever — and 'enable --now' does nothing to an active unit.
+# Re-running setup-host after upgrading claudebox therefore installed the new
+# rules to /usr/local/sbin and never applied them: the host kept the old
+# firewall, silently, and the box→box hole stayed open through a release that
+# claimed to close it. Restart re-runs the script, which is idempotent by design.
+sudo systemctl restart claudebox-firewall.service
 
 # Profile
 if ! incus profile show claude-dev >/dev/null 2>&1; then
   incus profile create claude-dev
 fi
 incus profile edit claude-dev < "$here/profiles/claude-dev.yaml"
+
+# The sibling drop is the one rule whose absence is invisible: everything keeps
+# working, and boxes can simply reach each other. Assert it landed.
+if nft list table bridge claudebox >/dev/null 2>&1; then
+  echo "Isolation: box-to-box drop is live (nft bridge table 'claudebox')."
+else
+  echo "WARNING: the box-to-box drop is NOT active — boxes can reach each other." >&2
+  echo "         check: sudo /usr/local/sbin/claudebox-firewall ; sudo nft list table bridge claudebox" >&2
+fi
 
 echo "Host ready. Launch with: claudebox new --name <box>"
