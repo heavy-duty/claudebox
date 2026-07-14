@@ -4,28 +4,28 @@ What the drill has actually found, what has broken *in the drill itself*, and
 how to diagnose the next stall without starting from zero. Append a section per
 run; keep the traps table current — it is the part that saves time.
 
-The audit this feeds is [#15](https://github.com/heavy-duty/claudebox/issues/15).
+The audit this fed, [#15](https://github.com/heavy-duty/claudebox/issues/15), is
+**complete** (run 10, 48/49).
 
-## Where the audit stands
+## The audit's answer
 
-| Probe | Answer | Run |
-| --- | --- | --- |
-| A1/A5 egress + gateway DNS | **PASS** | 2, 3, 4 |
-| A2 box → host | **dropped** | 2, 3, 4 |
-| A2 box → RFC1918 | **dropped** | 2, 3, 4 |
-| **A3 sibling isolation** | ⏳ **still unanswered** — blocked by a drill bug in every run so far | — |
-| A4 DNS enumeration | **LEAKS** — a box resolves its sibling by name (as #12 predicted) | 2, 3, 4 |
-| A6 IPv6 off | `none` ✓ | 2, 3, 4 |
-| A7 inbound host → box | **dropped** | 3, 4 |
-| B1 `@internal` on a bridge ACL | **REJECTED** — `Unsupported nftables subject` ⇒ #16 derives the subnet | 2, 3 |
-| B2 `incus copy` preserves `user.*` | **YES** ⇒ #17's metadata design holds | 2, 3, 4 |
-| B3 `dns.mode=none` | closes the leak; **egress verdict FLIPPED between runs** (see below) | 2, 3 |
-| B4 `config get` on unset key | **empty + exit 0** ⇒ #17 must use `${var:-}`, never `\|\|` | 2, 3, 4 |
-| B5 L2 filtering | box networking **intact**; in-box docker unverified | 2, 3 |
+| Probe | Answer |
+| --- | --- |
+| A1/A5 egress + gateway DNS | PASS |
+| A2 box → host | dropped |
+| A2 box → RFC1918 | dropped |
+| **A3 sibling isolation** | 🔴 **FAIL — tcp REFUSED, i.e. the packet ARRIVED.** Boxes reach each other. #12's central claim was wrong; **#16 is a fix, not a formalization** |
+| A4 DNS enumeration | LEAKS — a box resolves its sibling by name and address |
+| A6 IPv6 off | `none` ✓ |
+| A7 inbound host → box | dropped |
+| B1 `@internal` on a bridge ACL | REJECTED — `Unsupported nftables subject` ⇒ #16 derives the subnet |
+| B2 `incus copy` preserves `user.*` | YES ⇒ #17's metadata design holds |
+| B3 `dns.mode=none` | VIABLE — closes the leak, egress survives, no outage window |
+| B4 `config get` unset key | empty + exit 0 ⇒ #17 must use `${var:-}` |
+| B5 L2 filtering | 🔴 `ipv4_filtering` **BREAKS the box** — design veto (measured on a healthy baseline) |
 
-**A3 is the whole point and it has never fired.** It is the one claim #12 could
-not verify from a code reading. Until it is answered, #16 does not know whether
-it is writing a *formalization* or a *fix*.
+**The headline:** the tool's contract — *"a box reaches the public internet and
+nothing else"* — is **false today**. It also reaches every other box on the host.
 
 ## Findings in claudebox (not in the drill)
 
@@ -158,14 +158,17 @@ No listener is needed, and none should be started: see trap 3.
 | 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
 | 5 | stalled in host setup | trap 6 — silence through apt/sudo |
 | 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup. Recovering the host exposed **two real claudebox bugs**: `setup-host` deadlocks the incus daemon when re-run with boxes up (#26), and clones inherit their source's machine-id → same DHCP lease → **two boxes, one IP** (#27) |
+| **10** | **48/49 — the audit is complete** | 🔴 **A3 answered: sibling isolation DOES NOT HOLD** (tcp refused = the packet arrived). B5's `ipv4_filtering` veto confirmed on a *healthy* baseline. B3 cleared. Every #15 probe answered |
 | 9 | aborted: cold mint failed, twice | **not** the drill and **not** the host's mutations (doctor was green): `claudenet` had **no dnsmasq** — it never respawned after the SIGKILL in run 6's recovery. Boxes got no DHCP lease at all. Trap 11 |
 | 8 | aborted: cold mint failed | `cloud-init status: error` — **the box had no DNS at all**. Run 7's phase-D `dns.mode=none` survived the run and poisoned the host. Trap 10, and the reason `doctor.sh` exists |
 | 7 | 41/49 | the clone-identity fix could not reboot (systemd needs a valid machine-id to shut down cleanly), so it never took effect → the IP collision persisted → the box lost networking → **phase D reported a false design veto against #16**. Trap 9. Also found: `dir` storage makes every clone a full disk copy (#29) |
 
-**The instrument has been less reliable than the thing it measures.** Four of
-five runs died on drill plumbing, not on claudebox. That is worth stating
-plainly: if a probe can be answered by hand (see above), answer it by hand and
-move on rather than paying for another full run.
+**The instrument was less reliable than the thing it measured.** Of ten runs,
+four died on drill plumbing and three on bugs in claudebox or the host. It still
+paid for itself many times over — every one of those seven failures was a real
+defect, and the audit's headline finding overturned the premise it was written
+to confirm. But the lesson stands: **if a probe can be answered by hand, answer
+it by hand** rather than paying for another full run.
 
 ### The B3 flip — a lesson worth keeping
 
