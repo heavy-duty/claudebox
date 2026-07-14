@@ -27,6 +27,32 @@ else
   fi
 fi
 
+# --- Sibling isolation: a box must not reach another box --------------------
+#
+# This is the ONE rule that makes "isolated even from each other" true, and it
+# is not the one anyone expected. The Incus ACL drops egress to 10.0.0.0/8, and
+# claudenet's 10.87.0.0/24 sits inside it — so on paper box→box was already
+# blocked twice over (the ingress default is drop as well). It was not: a live
+# probe found box A's SYN arriving at box B and B answering with a RST.
+#
+# Why: two boxes on one bridge are on the same L2 segment. Their frames are
+# SWITCHED between bridge ports, never routed — so they never traverse the
+# netfilter path where an L3 ACL lives. The ACL is not wrong, it simply never
+# sees this traffic.
+#
+# The bridge family DOES see it. Its forward hook fires exactly when a frame is
+# passed from one bridge port to another — which, on claudenet, means box→box
+# and nothing else: frames addressed to the gateway are delivered locally (the
+# INPUT hook), and so is anything being routed out to the internet. So dropping
+# every forwarded frame on this bridge isolates the boxes from one another and
+# costs them nothing else. DHCP and ARP still work: they are broadcast, and the
+# local delivery to dnsmasq happens on INPUT, not FORWARD.
+if ! nft list table bridge claudebox >/dev/null 2>&1; then
+  nft add table bridge claudebox
+  nft "add chain bridge claudebox forward { type filter hook forward priority -200 ; policy accept ; }"
+  nft add rule bridge claudebox forward meta ibrname "$NET" meta obrname "$NET" drop
+fi
+
 # Docker rewrites FORWARD policy to DROP; DOCKER-USER is its escape hatch.
 if command -v docker >/dev/null && iptables -L DOCKER-USER -n >/dev/null 2>&1; then
   iptables -C DOCKER-USER -i "$NET" -j ACCEPT 2>/dev/null || iptables -I DOCKER-USER -i "$NET" -j ACCEPT
