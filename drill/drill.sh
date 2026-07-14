@@ -779,7 +779,8 @@ else
   # old stack, wearing the old tag. This is what migrate has to move.
   printf '\n  minting a faithful legacy box on the old stack…\n'
   if mint_legacy=$(incus launch images:debian/13/cloud legacybox --profile claude-dev \
-       --config user.claudebox=1 --vm --device root,size=20GiB 2>&1); then
+       --config user.claudebox=1 --vm --device root,size=20GiB \
+       --config security.secureboot=false 2>&1); then
     wait_box legacybox && ok "legacy box up on the old stack (claudenet, user.claudebox=1)" \
                        || no "legacy box never came up — cannot drill migration"
     box list 2>/dev/null | grep -q '^legacybox' \

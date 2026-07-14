@@ -630,7 +630,14 @@ cmd_new() {
     load_template "$t"
     m="$(pick_mode)"
     # shellcheck disable=SC2054 # "root,size=..." is a single incus argument
-    if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK"); else extra+=(--config security.nesting=true); fi
+    # security.secureboot=false: Incus defaults VMs to secureboot ON, and a
+    # Debian cloud image whose shim is signed with a key the host's OVMF does
+    # not trust dies with "bad shim signature / prohibited by secure boot
+    # policy" and drops to the GRUB menu forever — the kernel never loads. It
+    # is not part of a throwaway box's threat model (the VM boundary is), and
+    # turning it off boots reliably across image rebuilds. Container mode has
+    # no firmware, so it does not apply there.
+    if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK" --config security.secureboot=false); else extra+=(--config security.nesting=true); fi
     # The template's identity is stamped ONTO the instance: which template,
     # which user. 'incus copy' preserves user.* keys (audit B2), so a clone
     # knows what it is without ever consulting the template again.
