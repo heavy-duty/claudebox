@@ -111,6 +111,16 @@ Read this before adding a probe. Every one of these cost a run.
     cover this; the process table does. `doctor.sh` now checks it, because two
     cold mints and an hour went into learning it the other way.
 
+12. **A `curl` exit code cannot tell you whether the packet arrived.** Exit 7 is
+    "failed to connect", and it means *both* `Connection refused` (a RST came
+    back — **reachable**) and `Could not connect` / `No route to host` (nothing
+    came back — **isolated**). Opposite conclusions, one number. The drill
+    mapped 7 → "it arrived" and reported a **working** boundary as a broken one
+    for two full runs after the fix had landed, while the kernel had `isolated
+    on` on the bridge ports the whole time. **Read the message.** A refusal is
+    instant; an unreachable host burns the timeout. This is the same disease as
+    every other trap here — trusting a proxy for the fact instead of the fact.
+
 ## Diagnosing a stall
 
 **Start here: `bash drill/doctor.sh`** — it answers "what state is this host
