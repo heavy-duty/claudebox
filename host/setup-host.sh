@@ -46,6 +46,20 @@ incus network set claudenet security.acls=claude-isolate \
 # forwarding for public names is unaffected (verified live).
 incus network set claudenet dns.mode=none
 
+# A box's resolver must not be a function of the host's VPN posture (#33).
+# The bridge's dnsmasq forwards to whatever sits in the HOST's /etc/resolv.conf
+# at that moment. On a Tailscale/VPN host that is MagicDNS: box DNS flaps with
+# the tailnet (this is what killed cold mints), and tailnet peer names and
+# split-DNS zones RESOLVE from inside a box — name-level reconnaissance of a
+# private network, the same shape as the sibling enumeration closed above.
+# no-resolv detaches dnsmasq from the host's resolver entirely; server= pins a
+# stable public upstream (override: BOX_DNS="ip ip…"). raw.dnsmasq is the
+# lever — the bridge has no first-class upstream key. Verified live on the
+# drill host: pin applied, box resolves, cold mint survives.
+BOX_DNS="${BOX_DNS:-1.1.1.1 8.8.8.8}"
+incus network set claudenet raw.dnsmasq \
+  "$(printf 'no-resolv\n'; for s in $BOX_DNS; do printf 'server=%s\n' "$s"; done)"
+
 # Sibling isolation itself is NOT an ACL rule — an L3 ACL never sees frames
 # switched between two ports of one bridge. It lives in claudebox-firewall.sh
 # as an nftables bridge-family rule. See the comment there; it is the reason
