@@ -714,7 +714,8 @@ if incus file push "$srv" archive/tmp/srv.js >/dev/null 2>&1; then
   # nothing holds its stdout (trap 2/3). The listener outlives the exec.
   timeout -k 5 20 incus exec archive -- sh -c 'setsid node /tmp/srv.js >/tmp/srv.log 2>&1 </dev/null &' </dev/null
   sleep 3
-  if box expose archive "$EP" "$EHP" >/dev/null 2>&1; then
+  xlog="$(mktemp)"
+  if box expose archive "$EP" "$EHP" >"$xlog" 2>&1; then
     ok "box expose archive $EP $EHP — the device was added"
     box expose archive --list 2>/dev/null | grep -q "$EP" \
       && ok "expose --list shows the open door" || no "expose --list does not show the exposure"
@@ -741,9 +742,12 @@ if incus file push "$srv" archive/tmp/srv.js >/dev/null 2>&1; then
       && no "the host still reaches the box after --remove — the door did not shut" \
       || ok "after --remove, 127.0.0.1:$EHP is dead — the door shut"
   else
-    no "box expose failed to add the device — tail: $(box expose archive "$EP" "$EHP" 2>&1 | tail -1)"
+    no "box expose failed to add the device"
+    inf "what box and incus actually said:"
+    sed 's/^/          /' "$xlog" 2>/dev/null
     rm -f "$srv" 2>/dev/null
   fi
+  rm -f "$xlog" 2>/dev/null
   timeout -k 5 15 incus exec archive -- pkill -f srv.js </dev/null >/dev/null 2>&1
 else
   rm -f "$srv"
@@ -807,9 +811,14 @@ else
   # A minimal legacy box: no template payload, just boots and networks on the
   # old stack, wearing the old tag. This is what migrate has to move.
   printf '\n  minting a faithful legacy box on the old stack…\n'
+  # The legacy box must carry a 'claude' user, because that is what a real
+  # pre-0.4.0 box had — and box_user() maps the legacy tag to it. Without the
+  # user, 'box exec' (sudo -u claude) can never answer and wait_box fails
+  # forever on a box that is perfectly healthy. Run 17/18 lost a FAIL to this.
   if mint_legacy=$(incus launch images:debian/13/cloud legacybox --profile claude-dev \
        --config user.claudebox=1 --vm --device root,size=20GiB \
-       --config security.secureboot=false 2>&1); then
+       --config security.secureboot=false \
+       --config cloud-init.user-data="$(printf '#cloud-config\nusers:\n  - name: claude\n    shell: /bin/bash\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    lock_passwd: true\n')" 2>&1); then
     wait_box legacybox && ok "legacy box up on the old stack (claudenet, user.claudebox=1)" \
                        || no "legacy box never came up — cannot drill migration"
     box list 2>/dev/null | grep -q '^legacybox' \
