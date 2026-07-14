@@ -999,6 +999,11 @@ cmd_expose() {
     local ip; ip="$(box_net_ip "$inst" || true)"
     [ -n "$ip" ] && incus network acl rule remove box-isolate ingress \
       action=allow "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+    # If that was the last door, unpin the static address it required. Only
+    # then — other exposures still lean on the pin. Best-effort, like the ACL.
+    if ! incus config device list "$inst" 2>/dev/null | grep -q '^expose-'; then
+      incus config device unset "$inst" eth0 ipv4.address >/dev/null 2>&1
+    fi
     return 0
   fi
 
@@ -1025,16 +1030,31 @@ cmd_expose() {
   # container thing). NAT mode DNATs host:port → instance:port in netfilter, and
   # it needs the host to be the instance's gateway, which boxnet makes true.
   #
-  # It does NOT need a static address: with no static IP, Incus reads the box's
-  # current address off the bridge's neighbour table and keeps the NAT rules in
-  # step. The first cut of this pinned the lease with a device override anyway —
-  # unnecessary, and it is what made expose fail before it ever reached the
-  # proxy. Ask for less; the docs said so.
+  # And NAT mode needs a STATIC address. Incus resolves connect=0.0.0.0 to the
+  # NIC's ipv4.address — the device config, not the lease — and refuses when it
+  # is unset: `Instance has no static IPv4 address assigned to be used as the
+  # connect IP` (the 0.5.0 drill). The first cut pinned an address but the
+  # WRONG one (box_ipv4's docker0 decoy); the second cut removed the pin
+  # instead of correcting it. Third cut: pin the box's current BOXNET lease.
+  # Same address the box already holds, so nothing about its networking moves —
+  # the lease just becomes official. Left in place across exposures; unpinned
+  # when the last door closes.
   local err; err="$(mktemp)"
-  # connect=0.0.0.0 is deliberate: in NAT mode Incus resolves the instance's
-  # OWN current address off the bridge's neighbour table. Naming an address
-  # here instead makes Incus demand it be a *static* one — and the address we
-  # would have named was docker0's. Let it find the box; it knows where it is.
+  if [ -z "$(incus config device get "$inst" eth0 ipv4.address 2>/dev/null)" ]; then
+    # override copies the profile NIC into the instance with the key set; if a
+    # local eth0 already exists, override refuses and set is the right verb.
+    if ! incus config device override "$inst" eth0 "ipv4.address=$ip" >/dev/null 2>"$err" \
+       && ! incus config device set "$inst" eth0 "ipv4.address=$ip" >/dev/null 2>"$err"; then
+      echo "box: could not pin $box's boxnet address ($ip) as static — the NAT proxy requires one:" >&2
+      sed 's/^/  /' "$err" >&2; rm -f "$err"
+      incus network acl rule remove box-isolate ingress action=allow \
+        "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+      die "expose failed"
+    fi
+  fi
+  # connect=0.0.0.0 is deliberate: Incus resolves it to the instance's static
+  # IPv4 (the pin above). Naming an address here would work too, but 0.0.0.0
+  # cannot repeat the docker0 mistake — there is nothing to get wrong.
   if incus config device add "$inst" "$dev" proxy \
        "listen=tcp:127.0.0.1:$hport" "connect=tcp:0.0.0.0:$port" \
        bind=host nat=true >/dev/null 2>"$err"; then
