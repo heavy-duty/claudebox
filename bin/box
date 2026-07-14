@@ -50,6 +50,7 @@ CMDS=(
   "down^<box>^box^Stop a box, keeping its state ('start' resumes it)^incus:stop^stopped {}"
   "start^<box>^box^Start a stopped box^incus:start^started {}"
   "rm^<box> [--force]^box,confirm^Delete a box and its snapshots — irreversible, and it asks first^incus:delete -f^removed {}"
+  "expose^<box> <port> [<host-port>] | --list | --remove <port>^box^Forward a box port to the host's loopback — see a dev server^fn:cmd_expose^"
   "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
   "doctor^[--fix | --pin-dns]^^Is this host fit to mint boxes? Diagnose the daemon, network, DNS, isolation^fn:cmd_doctor^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
@@ -311,6 +312,28 @@ confirmation first; --force (-f) skips the prompt. With no TTY to confirm on
   box rm work --force
 EOF
 ;;
+    expose) cat <<'EOF'
+Open a deliberate, loopback-only door to a port inside a box — for when you
+are coding in a box and want to see its dev server in your browser.
+
+  box expose <box> <port> [<host-port>]   # forward 127.0.0.1:<host-port> → box:<port>
+  box expose <box> --list                 # what doors are open
+  box expose <box> --remove <port>        # close one
+
+The host side ALWAYS listens on 127.0.0.1 — no other machine can reach the
+box, only this host's loopback. There is no flag to widen that; if you need
+LAN exposure you are leaving the tool's threat model, and 'box incus' is the
+door (with its warning).
+
+The in-box server must listen on 0.0.0.0:<port>, not only its own loopback —
+a VM's forwarder connects to the box over the network. Inside an isolated box
+that is safe: nothing but this proxy can reach the port.
+
+  box new --name web --template claude
+  box shell web        # inside: run a dev server on 0.0.0.0:3000
+  box expose web 3000  # then open http://127.0.0.1:3000 in your browser
+EOF
+;;
     incus) cat <<'EOF'
 The door out. box wraps the box lifecycle and the isolation model, not
 all of Incus — so when you need something it doesn't wrap, run Incus through
@@ -399,6 +422,8 @@ while [ $# -gt 0 ]; do
     -*)
       # doctor's flags belong to the doctor script, not to box
       if [ "$cmd" = doctor ]; then args+=("$1"); shift; continue; fi
+      # expose's own flags (--list, --remove) are positional to it, not box's
+      if [ "$cmd" = expose ]; then args+=("$1"); shift; continue; fi
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
@@ -816,6 +841,92 @@ cmd_incus() {
   warn_isolation "${out[@]}"
   echo "box: incus ${out[*]}" >&2   # no magic: show what runs
   incus "${out[@]}"
+}
+
+# A deliberate, loopback-only door to a box's port — for the one workflow the
+# "no inbound path" contract is too absolute for: you are coding in a box and
+# want to open its dev server in your browser.
+#
+# Two decisions, both load-bearing:
+#   · The listen side is ALWAYS 127.0.0.1. The network-facing contract stays
+#     true — no other machine can reach the box; only THIS host's loopback gets
+#     a door. There is no flag to widen it; that is the escape hatch's job, with
+#     its warning.
+#   · Each exposure is a named proxy device (expose-<port>), so 'box info' and
+#     --list can see it and --remove can undo it. A box with a hole says so.
+#
+# Mechanism (VMs): an Incus 'proxy' device forwards host 127.0.0.1:<hostport>
+# to the box's <ip>:<port>. Because a VM's forkproxy connects over the network
+# to the guest, the in-box server must listen on 0.0.0.0 (not just its own
+# loopback) — inside an isolated box that is safe: boxnet + port-isolation +
+# the ingress drop mean only this proxy can reach it. And that ingress drop is
+# exactly what would eat the forkproxy's connection, so expose adds a SCOPED
+# ACL allow (this box's ip + this port only) beside the device. Whether the
+# proxy needs that allow, or bypasses the ACL, is settled by the drill, not
+# here — the allow is scoped and harmless if redundant.
+exposure_dev() { echo "expose-$1"; }   # device name for a port
+
+cmd_expose() {
+  local box="${args[0]}" a2="${args[1]:-}" a3="${args[2]:-}"
+
+  # --list
+  if [ "$a2" = "--list" ]; then
+    local found=0 d listen connect
+    while IFS= read -r d; do
+      case "$d" in expose-*) : ;; *) continue ;; esac
+      listen="$(incus config device get "$inst" "$d" listen 2>/dev/null)"
+      connect="$(incus config device get "$inst" "$d" connect 2>/dev/null)"
+      [ "$found" = 0 ] && echo "EXPOSURES for $box"
+      found=1
+      printf '  %-14s %s → %s\n' "${d#expose-}" "$listen" "$connect"
+    done < <(incus config device list "$inst" 2>/dev/null)
+    [ "$found" = 0 ] && echo "box: $box has no exposed ports"
+    return 0
+  fi
+
+  # --remove <port>
+  if [ "$a2" = "--remove" ]; then
+    local port="$a3"; [ -n "$port" ] || usage_error "usage: box expose $box --remove <port>"
+    local dev; dev="$(exposure_dev "$port")"
+    incus config device get "$inst" "$dev" listen >/dev/null 2>&1 \
+      || die "$box has no exposure on port $port (see 'box expose $box --list')"
+    incus config device remove "$inst" "$dev" >/dev/null \
+      && echo "box: closed the door on port $port"
+    # Remove the scoped ACL allow, if one was added. Best-effort: its absence
+    # is not an error (the drill may show the allow was never needed).
+    local ip; ip="$(box_ipv4 "$inst")"
+    [ "$ip" != "-" ] && incus network acl rule remove box-isolate ingress \
+      action=allow "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+    return 0
+  fi
+
+  # expose <port> [<host-port>]
+  local port="$a2" hport="${a3:-$a2}"
+  [ -n "$port" ] || usage_error "usage: $(synopsis_of expose)"
+  case "$port$hport" in *[!0-9]*) usage_error "ports must be numbers — got port='$port' host-port='$hport'" ;; esac
+
+  local ip; ip="$(box_ipv4 "$inst")"
+  [ "$ip" != "-" ] || die "$box has no IP yet — is it running? (box info $box)"
+
+  local dev; dev="$(exposure_dev "$port")"
+  if incus config device get "$inst" "$dev" listen >/dev/null 2>&1; then
+    die "$box already exposes port $port (change or remove it: box expose $box --remove $port)"
+  fi
+
+  # The scoped ACL allow FIRST, so the door is open by the time the proxy uses
+  # it. Scoped to this box's IP and this port — it does not widen any other box.
+  incus network acl rule add box-isolate ingress action=allow \
+    "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1 || true
+
+  if incus config device add "$inst" "$dev" proxy \
+       "listen=tcp:127.0.0.1:$hport" "connect=tcp:$ip:$port" bind=host >/dev/null; then
+    echo "box: 127.0.0.1:$hport → $box:$port"
+    echo "box: (the in-box server must listen on 0.0.0.0:$port, not only its own loopback)"
+  else
+    incus network acl rule remove box-isolate ingress action=allow \
+      "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+    die "could not add the proxy device"
+  fi
 }
 
 # --- dispatch: driven by the table, not by a hand-written case --------------

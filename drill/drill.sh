@@ -639,6 +639,59 @@ else
 fi
 
 # ===========================================================================
+phase "E. box expose — a deliberate loopback door (#55)"
+# ===========================================================================
+# archive is a running claude box (node is installed). Start a DETACHED
+# listener on 0.0.0.0 inside it, expose the port, and prove the door works
+# from the HOST's loopback. Then prove removing it closes the door, and that a
+# NON-exposed port still obeys the ingress drop — the feature must not
+# globally weaken A7.
+EP=8091; EHP=18091
+srv="$(mktemp)"
+printf 'require("http").createServer((q,r)=>r.end("box-expose-ok")).listen(%s,"0.0.0.0")\n' "$EP" >"$srv"
+if incus file push "$srv" archive/tmp/srv.js >/dev/null 2>&1; then
+  rm -f "$srv"
+  # Detached: setsid + all fds redirected so 'incus exec' returns at once and
+  # nothing holds its stdout (trap 2/3). The listener outlives the exec.
+  timeout -k 5 20 incus exec archive -- sh -c 'setsid node /tmp/srv.js >/tmp/srv.log 2>&1 </dev/null &' </dev/null
+  sleep 3
+  if box expose archive "$EP" "$EHP" >/dev/null 2>&1; then
+    ok "box expose archive $EP $EHP — the device was added"
+    box expose archive --list 2>/dev/null | grep -q "$EP" \
+      && ok "expose --list shows the open door" || no "expose --list does not show the exposure"
+    box info archive 2>/dev/null | grep -qi "$EP" \
+      && ok "box info surfaces the exposure (a box with a hole says so)" || note "box info does not mention the exposure (nice-to-have)"
+    # THE test: does the host's loopback reach the box's server?
+    sleep 2
+    if curl -sS -m 6 "http://127.0.0.1:$EHP" 2>/dev/null | grep -q box-expose-ok; then
+      ok "127.0.0.1:$EHP reaches the box's server — the door WORKS"
+    else
+      no "127.0.0.1:$EHP does NOT reach the box — the proxy/ACL mechanism needs work (#55)"
+      inf "srv.log inside the box: $(in_box archive cat /tmp/srv.log 2>/dev/null | tail -2 | tr '\n' ' ')"
+    fi
+    # A NON-exposed port must still be dropped — the feature is per-port, not a
+    # global ingress opening.
+    nemsg="$(curl -sS -m 5 -o /dev/null "http://$ARCH_IP:9099" 2>&1)"
+    printf '%s' "$nemsg" | grep -q 'Connection refused' \
+      && no "a non-exposed port answered on the box — expose opened ingress too wide" \
+      || ok "a non-exposed port is still dropped — expose is per-port, A7 survives"
+    # Close it, and confirm the door shuts.
+    box expose archive --remove "$EP" >/dev/null 2>&1 && ok "box expose --remove closed the device" || no "expose --remove failed"
+    sleep 2
+    curl -sS -m 5 -o /dev/null "http://127.0.0.1:$EHP" 2>/dev/null \
+      && no "the host still reaches the box after --remove — the door did not shut" \
+      || ok "after --remove, 127.0.0.1:$EHP is dead — the door shut"
+  else
+    no "box expose failed to add the device — tail: $(box expose archive "$EP" "$EHP" 2>&1 | tail -1)"
+    rm -f "$srv" 2>/dev/null
+  fi
+  timeout -k 5 15 incus exec archive -- pkill -f srv.js </dev/null >/dev/null 2>&1
+else
+  rm -f "$srv"
+  no "could not push the test server into archive — expose phase did not run"
+fi
+
+# ===========================================================================
 phase "D. The isolation contract, stated"
 # ===========================================================================
 # Phase D used to REHEARSE the hardening on a throwaway host, because nobody
