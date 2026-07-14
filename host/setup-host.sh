@@ -16,8 +16,44 @@ if ! id -nG "$USER" | grep -qw incus-admin; then
   exit 0
 fi
 
-# Storage pool + base config (safe to re-run; init is a no-op if configured)
-incus storage show default >/dev/null 2>&1 || incus admin init --minimal
+# Storage pool + base config (safe to re-run: skipped once the pool exists).
+# NOT 'incus admin init --minimal': minimal picks the 'dir' backend, which has
+# no copy-on-write — every snapshot and clone is a FULL copy of the box's root,
+# several GB and minutes apiece once a box is provisioned, against a workflow
+# whose whole point is "log in once, snapshot, clone forever" (#29). btrfs on
+# a loop device gives CoW (near-instant, near-free clones) with no
+# partitioning. The preseed mirrors exactly what --minimal creates (pool,
+# incusbr0, default profile) with only the driver deliberate; dir remains the
+# fallback so a host that cannot do btrfs still works — just slowly, and it
+# says so.
+if ! incus storage show default >/dev/null 2>&1; then
+  driver=btrfs
+  command -v mkfs.btrfs >/dev/null 2>&1 || sudo apt-get install -y btrfs-progs || driver=dir
+  if ! incus admin init --preseed <<PRESEED
+storage_pools:
+- name: default
+  driver: $driver
+networks:
+- name: incusbr0
+  type: bridge
+profiles:
+- name: default
+  devices:
+    root:
+      path: /
+      pool: default
+      type: disk
+    eth0:
+      name: eth0
+      network: incusbr0
+      type: nic
+PRESEED
+  then
+    echo "storage: $driver preseed failed — falling back to --minimal (dir: every clone is a full disk copy)" >&2
+    incus admin init --minimal
+  fi
+  echo "storage: pool 'default' driver = $(incus storage show default | awk '/^driver:/ {print $2}')"
+fi
 
 # Isolated NAT network. IPv6 off: one less egress path to reason about.
 incus network show claudenet >/dev/null 2>&1 || incus network create claudenet \
