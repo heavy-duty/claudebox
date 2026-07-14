@@ -472,7 +472,7 @@ wait_agent() {
   local n="$1" i
   echo "box: waiting for instance agent..."
   for i in $(seq 1 90); do
-    if incus exec "$n" -- true >/dev/null 2>&1; then return; fi
+    if incus exec "$n" -- true </dev/null >/dev/null 2>&1; then return; fi
     [ "$i" -eq 90 ] && die "instance agent never came up (incus console $n to inspect)"
     sleep 2
   done
@@ -500,7 +500,7 @@ reset_identity() {
     systemd-machine-id-setup >/dev/null 2>&1 || dbus-uuidgen > /etc/machine-id
     ln -sf /etc/machine-id /var/lib/dbus/machine-id
     test -s /etc/machine-id
-  ' || die "could not reset the clone's machine-id"
+  ' </dev/null || die "could not reset the clone's machine-id"
   # The new id only takes effect at boot. Ask nicely, then insist — a clone that
   # keeps its source's DHCP lease is worse than an unclean stop of a box that
   # booted 30 seconds ago.
@@ -592,15 +592,20 @@ cmd_new() {
     # A failed cloud-init used to print a screen of dots and the word "error",
     # with nothing to act on — the box's own log holds the reason, and nobody
     # was told it existed. Show it, and leave the box up to inspect.
-    if ! incus exec "$instance" -- cloud-init status --wait; then
+    # Every non-interactive exec pins stdin. With a TTY on stdin, 'incus exec'
+    # goes interactive — and when box's own output is redirected (a script, the
+    # drill), the session can wedge open after the remote command has exited,
+    # blocking forever on a websocket that will never close. Caught live: a
+    # mint stuck at 'status: done'. Only shell/exec/tmux may own the terminal.
+    if ! incus exec "$instance" -- cloud-init status --wait </dev/null; then
       echo >&2
       echo "box: cloud-init FAILED in $name. What it says:" >&2
-      incus exec "$instance" -- cloud-init status --long 2>&1 | sed 's/^/  /' >&2
+      incus exec "$instance" -- cloud-init status --long </dev/null 2>&1 | sed 's/^/  /' >&2
       echo >&2
       echo "box: the errors, from the box's log:" >&2
       incus exec "$instance" -- sh -c \
         "grep -iE '^(E:|Err:)|Temporary failure|Could not resolve|Unable to fetch' /var/log/cloud-init-output.log | tail -8" \
-        2>/dev/null | sed 's/^/  /' >&2
+        </dev/null 2>/dev/null | sed 's/^/  /' >&2
       echo >&2
       echo "box: '$name' is still up — inspect it, then delete it:" >&2
       echo "  box incus $name -- exec {} -- tail -50 /var/log/cloud-init-output.log" >&2

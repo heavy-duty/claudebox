@@ -3,11 +3,13 @@
 # pre-0.4.0 claudebox, so the next drill run starts from a truly bare host and
 # its verdict means something.
 #
-#   bash drill/wipe.sh                   # asks first
+#   bash drill/wipe.sh                   # asks first; KEEPS cached images (an
+#                                        # image is upstream's artifact — wiping
+#                                        # it buys nothing but a re-download)
 #   bash drill/wipe.sh --yes             # no prompt
-#   bash drill/wipe.sh --purge-storage   # also delete cached images AND the
-#                                        # 'default' storage pool, so setup-host
-#                                        # exercises its pool bootstrap (#29)
+#   bash drill/wipe.sh --purge-storage   # also delete the 'default' storage
+#                                        # pool (and the images inside it), so
+#                                        # setup-host exercises its bootstrap (#29)
 #
 # What teardown-host.sh does NOT cover, this does: instances the drill names
 # but never tagged, instances of either tag generation, cached images, and
@@ -40,8 +42,8 @@ This wipes EVERY trace of box/claudebox from this host ($(hostname)):
   · networks boxnet + claudenet, ACLs box-isolate + claude-isolate
   · profiles box-net + claude-dev
   · firewall units, scripts and nft tables of BOTH name generations
-  · every cached Incus image (the next mint re-downloads)
-$( [ "$PURGE_STORAGE" = 1 ] && echo "  · the 'default' storage pool (--purge-storage)" )
+$( [ "$PURGE_STORAGE" = 1 ] && echo "  · the 'default' storage pool AND its cached images (--purge-storage)" \
+                            || echo "  · (cached images are KEPT — the next mint stays fast; --purge-storage removes them with the pool)" )
 Uncommitted work inside any box is LOST. Only do this on a drill host.
 EOF
   [ -t 0 ] || { echo "wipe: no TTY to confirm on — pass --yes if you mean it." >&2; exit 2; }
@@ -79,13 +81,16 @@ if command -v incus >/dev/null; then
     incus network acl delete "$acl" >/dev/null 2>&1 && say "deleted ACL $acl"
   done
 
-  # --- cached images: the pool's other tenants -------------------------------
-  for f in $(incus image list -f csv -c f 2>/dev/null); do
-    incus image delete "$f" >/dev/null 2>&1 && say "deleted image $f"
-  done
-
-  # --- the pool itself (opt-in): lets setup-host's bootstrap run for real ----
+  # --- cached images: NOT wiped by default -----------------------------------
+  # An image is upstream's artifact, content-addressed by fingerprint — not a
+  # drill artifact. Deleting it buys zero cleanliness and costs the next mint
+  # a full re-download. It only goes when the pool it lives in goes.
   if [ "$PURGE_STORAGE" = 1 ]; then
+    # --- the pool (opt-in): lets setup-host's bootstrap run for real ---------
+    # Images live in the pool and block its deletion — they go first.
+    for f in $(incus image list -f csv -c f 2>/dev/null); do
+      incus image delete "$f" >/dev/null 2>&1 && say "deleted image $f"
+    done
     incus profile device remove default root >/dev/null 2>&1 && say "removed default profile's root device"
     if incus storage delete default >/dev/null 2>&1; then
       say "deleted storage pool 'default' — setup-host will rebuild it (btrfs where it can)"
