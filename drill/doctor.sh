@@ -205,20 +205,24 @@ head_ "Can a box actually resolve DNS?"
 probe="$(incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null \
          | awk -F, '$2 == "RUNNING" { print $1; exit }')"
 if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
+  # Stdin MUST be pinned to /dev/null: with a TTY on stdin, 'incus exec' goes
+  # interactive and puts the terminal in raw mode — the probe hangs forever,
+  # timeout's TERM never takes (hence -k), and ^C is forwarded INTO the box
+  # instead of killing the script. The drill learned this in #22; same rule here.
   inf "probing inside '$probe' — this separates DNS from routing, which is the whole question:"
-  inf "its resolv.conf: $(timeout 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' 2>/dev/null | tr '\n' ' ')"
+  inf "its resolv.conf: $(timeout -k 5 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' </dev/null 2>/dev/null | tr '\n' ' ')"
 
-  timeout 20 incus exec "$probe" -- ping -c1 -W2 10.87.0.1 >/dev/null 2>&1 \
+  timeout -k 5 20 incus exec "$probe" -- ping -c1 -W2 10.87.0.1 </dev/null >/dev/null 2>&1 \
     && ok "reaches the gateway (10.87.0.1) — routing is fine" \
     || no "cannot even reach the gateway — this is routing, not DNS"
 
-  if timeout 25 incus exec "$probe" -- getent hosts deb.debian.org >/dev/null 2>&1; then
+  if timeout -k 5 25 incus exec "$probe" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1; then
     ok "resolves deb.debian.org — DNS works"
   else
     no "CANNOT resolve deb.debian.org — this is exactly what kills cloud-init on every cold mint"
     # Does the box reach the internet at all WITHOUT DNS? If yes, the fault is
     # purely name resolution — i.e. the forwarder, i.e. issue #33.
-    if timeout 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 2>/dev/null; then
+    if timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null; then
       inf "…but it CAN reach 1.1.1.1 by address. So egress works and only NAME RESOLUTION is broken:"
       inf "the fault is the forwarder the box inherits from the host — issue #33."
       inf "test the fix:  bash drill/doctor.sh --pin-dns   then re-run the drill"
