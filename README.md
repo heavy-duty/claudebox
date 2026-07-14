@@ -89,6 +89,7 @@ claudebox down <box>               # stop (state kept; `start` resumes)
 claudebox start <box>              # start a stopped box
 claudebox rm <box> [--force]       # delete the box + its snapshots (asks first)
 claudebox incus <box> -- <args...> # escape hatch: any incus command, box resolved
+claudebox doctor [--fix|--pin-dns] # is this host fit to mint boxes? diagnose from ground truth
 claudebox status                   # deprecated alias for `list`
 claudebox help [<command>]         # full help, or one command's page
 ```

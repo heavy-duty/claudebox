@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# doctor.sh — is this host in a fit state to drill, and if not, what is wrong?
+# doctor.sh — is this host fit to mint boxes (and to drill), and if not, what
+# is wrong? Users reach it as 'claudebox doctor'; the drill runs it directly.
 #
 #   bash drill/doctor.sh          # report
 #   bash drill/doctor.sh --fix    # report, then revert what the drill left behind
@@ -243,10 +244,10 @@ fi
 
 head_ "Verdict"
 if [ "$bad" -eq 0 ]; then
-  printf '  \033[32mclean\033[0m — this host is fit to drill.\n\n'
+  printf '  \033[32mclean\033[0m — this host is fit to mint boxes (and to drill).\n\n'
   exit 0
 fi
-printf '  \033[31m%s problem(s)\033[0m — this host is NOT fit to drill.\n' "$bad"
+printf '  \033[31m%s problem(s)\033[0m — this host is NOT fit to mint boxes (or to drill).\n' "$bad"
 if [ "$FIX" = 1 ]; then
   printf '  reverted what could be reverted; re-run doctor to confirm.\n\n'
 else
