@@ -348,8 +348,17 @@ expected="$(cat "$HOME/.local/share/claudebox/VERSION" 2>/dev/null || echo '?')"
 v="$(claudebox --version 2>&1)"
 case "$v" in *"$expected"*) ok "claudebox --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
 
-claudebox list >/dev/null 2>&1 && claudebox list 2>&1 | grep -q 'no boxes yet' \
-  && ok "empty host: 'no boxes yet', exit 0" || no "empty-host message wrong"
+# The drill must not require an empty host: operator boxes tagged
+# user.claudebox=1 are legitimate tenants, and the teardown below deliberately
+# refuses to touch them. The empty-host message is only TESTABLE when the host
+# is actually empty — on a shared host, skip it instead of failing it.
+tenants="$(incus list user.claudebox=1 --format csv --columns n 2>/dev/null | tr '\n' ' ')"
+if [ -n "${tenants% }" ]; then
+  inf "host already has claudebox boxes (${tenants% }) — the empty-host message cannot be tested this run"
+else
+  claudebox list >/dev/null 2>&1 && claudebox list 2>&1 | grep -q 'no boxes yet' \
+    && ok "empty host: 'no boxes yet', exit 0" || no "empty-host message wrong"
+fi
 
 printf '\n  minting a box (cold, ~10 min)…\n'
 t0=$SECONDS
@@ -603,7 +612,12 @@ if [ "$KEEP" = 1 ]; then
 else
   # every name the drill can have left, whatever branch a partial run took
   for n in drill clone archive peer; do claudebox rm "$n" --force >/dev/null 2>&1; done
-  claudebox list 2>&1 | grep -q 'no boxes yet' && ok "teardown: no boxes left" || no "a box survived teardown"
+  # Assert OUR boxes are gone — not that the host is empty. The rm loop above
+  # already embodies the discipline (only names the drill minted); demanding
+  # 'no boxes yet' here would flag any pre-existing operator box as a failure.
+  leftover="$(claudebox list 2>/dev/null | grep -E '^(drill|clone|archive|peer)([[:space:]]|$)' || true)"
+  [ -z "$leftover" ] && ok "teardown: every box the drill minted is gone" \
+                     || no "a drill box survived teardown: $(printf '%s' "$leftover" | awk '{print $1}' | tr '\n' ' ')"
 fi
 
 phase "Summary"
