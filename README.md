@@ -138,6 +138,7 @@ box rename <box> <new>       # rename a box (stop it first)
 box down <box>               # stop (state kept; `start` resumes)
 box start <box>              # start a stopped box
 box rm <box> [--force]       # delete the box + its snapshots (asks first)
+box expose <box> <port>      # forward a box port to host loopback — see a dev server
 box incus <box> -- <args...> # escape hatch: any incus command, box resolved
 box doctor [--fix|--pin-dns] # is this host fit to mint boxes? diagnose from ground truth
 box status                   # deprecated alias for `list`
@@ -195,7 +196,9 @@ enforces it, layer by layer:
   host-level VPN don't resolve inside a box either.
 - **Host firewall** — instance → host is dropped except DNS/DHCP, including
   the host's public IPs. Entry is `incus exec` over the local socket only —
-  **no inbound path exists.**
+  **no inbound path exists** — unless you punch one with `box expose`, and
+  that door only ever opens onto the host's own loopback (`127.0.0.1`), never
+  the network.
 
 The VM is the trust boundary: whatever runs inside — Claude, or anything a
 template ships — can run arbitrary code and touch nothing you care about.
