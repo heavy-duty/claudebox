@@ -175,6 +175,23 @@ EOF
     || { echo "install failed"; exit 1; }
   export PATH="$HOME/.local/bin:$PATH"
 
+  # ASSERT WHAT LANDED — never trust that the install obeyed us.
+  # This has bitten twice: once on a lagged CDN tarball, once when a STALE local
+  # drill.sh passed the retired CLAUDEBOX_* env vars to a 0.5.0 install.sh that
+  # reads BOX_* — the vars were ignored, main was installed, and the run drilled
+  # the wrong tree while reporting success. A drill that silently drills the
+  # wrong code is worse than one that fails.
+  got="$(cat "$HOME/.local/share/box/INSTALLED_FROM" 2>/dev/null || echo '<unknown>')"
+  if [ "$got" != "$REPO@$REF" ]; then
+    echo "drill: FATAL — asked to install $REPO@$REF, but the tree says '$got'." >&2
+    echo "  Your local drill.sh is probably STALE (pre-0.5.0 it passed CLAUDEBOX_*," >&2
+    echo "  which today's install.sh ignores, so it fell back to main). Fix:" >&2
+    echo "    git fetch origin && git checkout <the branch you mean> && git pull" >&2
+    echo "  then re-run this drill." >&2
+    exit 1
+  fi
+  inf "installed tree confirms: $got"
+
   phase "Host setup (Incus, boxnet, ACL, profile, firewall)"
   # setup-host.sh installs nftables itself when neither nft nor UFW exists
   # (a stock Debian 13 cloud image ships neither). This guard is a tripwire:

@@ -85,4 +85,10 @@ if ! command -v incus >/dev/null 2>&1; then
   warn "  run the one-time host setup: $DEST/host/setup-host.sh"
 fi
 
-log "done — try: box new --name test"
+# Record WHAT was installed, so a caller can assert it got what it asked for.
+# Without this, an installer invoked with stale env vars (the CLAUDEBOX_* names
+# retired in 0.5.0) silently falls back to the defaults and installs main —
+# and the caller drills the wrong tree, believing it drilled its branch.
+printf '%s@%s\n' "$REPO" "$REF" > "$DEST/INSTALLED_FROM"
+
+log "done ($REPO@$REF) — try: box new --name test"
