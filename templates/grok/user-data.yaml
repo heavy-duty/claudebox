@@ -17,7 +17,7 @@ write_files:
 
       - **Creds-free by default.** The box starts with no xAI and no git
         credentials. If you need to authenticate, the operator runs
-        `grok-build login` interactively (SuperGrok / X Premium+). For git, the
+        `grok login` interactively (SuperGrok / X Premium+). For git, the
         operator adds their own credentials (a PAT or `gh auth login`). Never
         assume credentials are present; never ask for or store secrets on disk
         beyond what the operator sets up.
@@ -46,35 +46,30 @@ packages:
 runcmd:
   - curl -fsSL https://get.docker.com | sh
   - usermod -aG docker grok
-  # Grok Build's official installer (verified upstream: x.ai/cli). It drops the
-  # binary under the invoking user's home, so run it AS grok, not root.
-  - sudo -u grok bash -lc 'curl -fsSL https://x.ai/cli/install.sh | bash'
-  # 'box exec <b> -- grok-build …' runs a NON-interactive shell that reads no
-  # rc files, so whatever the installer dropped must be symlinked onto the
-  # system PATH — the same fix the claude template needed (#15).
+  # The OFFICIAL installer, read at https://x.ai/cli/install.sh rather than
+  # guessed at. What it actually does:
+  #   · installs the CLI as `grok` (with an `agent` alias) — NOT `grok-build`
+  #   · BIN_DIR defaults to $HOME/.grok/bin, and what it puts there is a
+  #     SYMLINK into its versioned download dir (so `find -type f` misses it)
+  #   · GROK_BIN_DIR overrides that directory
   #
-  # The FIRST cut of this hunted only for a regular file named exactly
-  # 'grok-build' under /home/grok, and found nothing: the drill's grok box
-  # minted fine and then failed '--version'. Two lessons, both applied here:
-  # an installer's drop may be a SYMLINK (so -type f alone misses it), and its
-  # binary name is upstream's to choose (so try the plausible names, and any
-  # 'grok*' executable, before giving up). Then SAY what was found — a silent
-  # miss is what cost the last run.
+  # Run it AS grok, not root: the binary symlink points into the invoking
+  # user's download dir, and root's home is 0700 — a symlink into it would be
+  # unreadable to the grok user, giving a CLI that exists and cannot run.
+  - sudo -u grok bash -lc 'curl -fsSL https://x.ai/cli/install.sh | bash'
+  # 'box exec <b> -- grok …' is a NON-interactive shell: it reads no rc files,
+  # so ~/.grok/bin is never on its PATH. Symlink onto the system PATH — the
+  # same fix the claude template needed (#15). Assert the result: a CLI that
+  # silently is not on PATH is what cost the last drill run.
   - |
-    bin=""
-    for cand in grok-build grok; do
-      for d in /home/grok/.local/bin /home/grok/.grok/bin /home/grok/bin /usr/local/bin /opt; do
-        [ -x "$d/$cand" ] && { bin="$d/$cand"; break 2; }
-      done
-    done
-    [ -n "$bin" ] || bin="$(find /home/grok /opt -maxdepth 5 \( -type f -o -type l \) -iname 'grok*' -perm -u+x 2>/dev/null | head -1)"
-    if [ -n "$bin" ]; then
-      ln -sf "$bin" /usr/local/bin/grok-build
-      ln -sf "$bin" /usr/local/bin/grok
-      echo "grok: linked $bin -> /usr/local/bin/{grok-build,grok}"
+    if [ -e /home/grok/.grok/bin/grok ]; then
+      ln -sf /home/grok/.grok/bin/grok /usr/local/bin/grok
+      echo "grok: linked /usr/local/bin/grok -> /home/grok/.grok/bin/grok"
+      /usr/local/bin/grok --version >/dev/null 2>&1 \
+        && echo "grok: 'grok --version' answers from the system PATH" \
+        || echo "grok: WARNING - linked, but 'grok --version' does not answer" >&2
     else
-      echo "grok: NO BINARY FOUND after x.ai/cli/install.sh — the box is up but the CLI is not on PATH." >&2
-      echo "grok: what the installer left under /home/grok:" >&2
+      echo "grok: installer produced no ~/.grok/bin/grok - upstream layout changed?" >&2
       find /home/grok -maxdepth 4 \( -type f -o -type l \) -perm -u+x 2>/dev/null | head -20 >&2
     fi
-  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/grok/.bashrc
+  - echo 'export PATH="$HOME/.grok/bin:$PATH"' >> /home/grok/.bashrc

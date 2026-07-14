@@ -82,7 +82,7 @@ The claude box is one template among several. What ships today:
 | `blank`  | Bare Debian 13 — same isolation, no tooling. The default. |
 | `claude` | Claude Code, creds-free (the original claudebox) |
 | `codex`  | OpenAI Codex CLI, creds-free |
-| `grok`   | xAI Grok Build CLI, creds-free |
+| `grok`   | xAI Grok CLI, creds-free |
 
 A template is a directory under `templates/`: a `box.env` (image, user,
 resources — parsed against a strict allowlist, never sourced) and a

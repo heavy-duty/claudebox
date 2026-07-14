@@ -457,7 +457,7 @@ fi
 # still has to prove is its own payload: the CLI installs, lands on the
 # non-interactive exec PATH, and answers --version. One mint each.
 for t in codex grok; do
-  case "$t" in codex) bin=codex; user=codex ;; grok) bin=grok-build; user=grok ;; esac
+  case "$t" in codex) bin=codex; user=codex ;; grok) bin=grok; user=grok ;; esac
   printf '\n  minting a %s box (cold — validates the template install)…\n' "$t"
   if mint_box "/tmp/mint-$t.log" --name "$t" --template "$t"; then
     [ "$(incus config get "$t" user.box.user 2>/dev/null)" = "$user" ] \
