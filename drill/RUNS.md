@@ -83,6 +83,15 @@ Read this before adding a probe. Every one of these cost a run.
    filtering) in place, so setup converges against a moving target. Delete the
    boxes and revert the mutations **first**.
 
+9. **Never render a verdict on a broken baseline.** Run 7's box had no network
+   (a clone/source IP collision), and phase D dutifully reported *"L2 filtering
+   BREAKS the box — design veto"*. It did not; the box was already broken. A
+   measurement taken on a broken instrument is not evidence, and #16 would have
+   been redesigned around a fiction. Phase D is now gated on baseline egress
+   passing, and refuses to judge otherwise. This is the same failure as the B3
+   flip, in a different costume: **check that the thing you are measuring with
+   still works before you trust what it tells you.**
+
 ## Diagnosing a stall
 
 The drill narrates every long step. If it goes quiet, open a second terminal:
@@ -125,7 +134,8 @@ No listener is needed, and none should be started: see trap 3.
 | 3 | 48/49 | trap 4 — `eth0_ip` never matched, so A3 again unprobed. B3 now read *intact*, contradicting run 2 |
 | 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
 | 5 | stalled in host setup | trap 6 — silence through apt/sudo |
-| 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup, so setup reconfigured claudenet's ACLs while run 4's boxes were still attached to it |
+| 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup. Recovering the host exposed **two real claudebox bugs**: `setup-host` deadlocks the incus daemon when re-run with boxes up (#26), and clones inherit their source's machine-id → same DHCP lease → **two boxes, one IP** (#27) |
+| 7 | 41/49 | the clone-identity fix could not reboot (systemd needs a valid machine-id to shut down cleanly), so it never took effect → the IP collision persisted → the box lost networking → **phase D reported a false design veto against #16**. Trap 9. Also found: `dir` storage makes every clone a full disk copy (#29) |
 
 **The instrument has been less reliable than the thing it measures.** Four of
 five runs died on drill plumbing, not on claudebox. That is worth stating
