@@ -9,7 +9,7 @@ config: {}
 devices:
   eth0:
     type: nic
-    network: claudenet
+    network: boxnet
     name: eth0
     # Boxes must not reach each other. This is the mechanism that actually does
     # it: the kernel bridge's port-isolation flag, which stops two isolated
@@ -18,7 +18,7 @@ devices:
     # It is not an ACL rule, and it cannot be. Incus ACLs are L3/L4, and two
     # boxes on one bridge are on the same L2 segment — their frames are switched
     # between ports and never traverse the netfilter path an ACL lives on. That
-    # is why the ACL's drop on 10.0.0.0/8 (which contains claudenet) and its
+    # is why the ACL's drop on 10.0.0.0/8 (which contains boxnet) and its
     # default ingress drop BOTH looked airtight while box→box was wide open: a
     # live probe found box A's SYN arriving at box B and B answering with a RST.
     security.port_isolation: "true"
