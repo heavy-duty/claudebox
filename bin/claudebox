@@ -457,7 +457,26 @@ cmd_new() {
       "${extra[@]}"
     wait_agent "$instance"
     echo "claudebox: waiting for phase-1 (cloud-init)..."
-    incus exec "$instance" -- cloud-init status --wait
+    # A failed cloud-init used to print a screen of dots and the word "error",
+    # with nothing to act on — the box's own log holds the reason, and nobody
+    # was told it existed. Show it, and leave the box up to inspect.
+    if ! incus exec "$instance" -- cloud-init status --wait; then
+      echo >&2
+      echo "claudebox: cloud-init FAILED in $name. What it says:" >&2
+      incus exec "$instance" -- cloud-init status --long 2>&1 | sed 's/^/  /' >&2
+      echo >&2
+      echo "claudebox: the errors, from the box's log:" >&2
+      incus exec "$instance" -- sh -c \
+        "grep -iE '^(E:|Err:)|Temporary failure|Could not resolve|Unable to fetch' /var/log/cloud-init-output.log | tail -8" \
+        2>/dev/null | sed 's/^/  /' >&2
+      echo >&2
+      echo "claudebox: '$name' is still up — inspect it, then delete it:" >&2
+      echo "  claudebox incus $name -- exec {} -- tail -50 /var/log/cloud-init-output.log" >&2
+      echo "  claudebox rm $name" >&2
+      echo "claudebox: a box that cannot resolve DNS is usually the HOST's resolver" >&2
+      echo "  (a VPN/Tailscale resolver the box inherits — see issue #33)." >&2
+      die "cloud-init failed — the box is incomplete, so refusing to hand it over"
+    fi
   fi
   echo "claudebox: ready — 'claudebox shell $name'. Log into Claude inside: run 'claude' then /login."
 }

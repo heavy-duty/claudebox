@@ -15,8 +15,13 @@
 # question that kept getting answered by hand.
 set -u
 
-FIX=0
-[ "${1:-}" = "--fix" ] && FIX=1
+FIX=0; PIN=0
+case "${1:-}" in
+  --fix)     FIX=1 ;;
+  --pin-dns) PIN=1 ;;
+  "")        ;;
+  *) echo "usage: doctor.sh [--fix | --pin-dns]"; exit 2 ;;
+esac
 
 bad=0
 ok()   { printf '  \033[32mOK\033[0m    %s\n' "$*"; }
@@ -90,22 +95,65 @@ for b in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
   fi
 done
 
+# --- the box's DNS comes from the HOST's resolver. See issue #33. -----------
+head_ "Host resolver — a box's DNS is forwarded through this"
+hostns="$(grep -E '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | tr '\n' ' ')"
+inf "/etc/resolv.conf: ${hostns:-<none>}"
+raw="$(incus network get claudenet raw.dnsmasq 2>/dev/null | tr '\n' ';')"
+if [ -n "$raw" ]; then
+  ok "claudenet has a pinned resolver (raw.dnsmasq: $raw)"
+  inf "boxes do NOT inherit the host's resolver — good (issue #33)"
+else
+  # 100.64.0.0/10 is CGNAT — which is exactly Tailscale's range.
+  if printf '%s' "$hostns" | grep -qE '(^| )100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'; then
+    no "the host resolves via a CGNAT/Tailscale resolver ($hostns), and boxes INHERIT it — see issue #33"
+    inf "· box DNS breaks whenever the tailnet's resolver does (this is what kills cold mints)"
+    inf "· and tailnet names RESOLVE from inside a box, though its ACL blocks connecting to them"
+    inf "fix + test:  bash drill/doctor.sh --pin-dns"
+  else
+    inf "boxes inherit the host's resolver (unpinned). Fine while it is stable; see issue #33."
+  fi
+fi
+
+if [ "$PIN" = 1 ]; then
+  head_ "Pinning claudenet's resolver (issue #33)"
+  if incus network set claudenet raw.dnsmasq "$(printf 'no-resolv\nserver=1.1.1.1\nserver=8.8.8.8\n')" 2>/tmp/pin.err; then
+    ok "set raw.dnsmasq: no-resolv + 1.1.1.1 + 8.8.8.8 — dnsmasq now ignores /etc/resolv.conf"
+    inf "a box's DNS no longer depends on the host's VPN state, and MagicDNS is out of the path"
+    inf "re-run the drill; if the cold mint now succeeds, issue #33 is confirmed and the fix belongs in setup-host.sh"
+  else
+    no "incus rejected raw.dnsmasq: $(head -1 /tmp/pin.err 2>/dev/null)"
+    inf "then raw.dnsmasq is the wrong lever and #33 needs a different mechanism — say so on the issue"
+  fi
+fi
+
 head_ "Can a box actually resolve DNS?"
 probe=""
 for b in drill archive peer clone; do
   incus config show "$b" >/dev/null 2>&1 && { probe="$b"; break; }
 done
 if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
-  inf "probing inside '$probe' (the cheapest test of a poisoned network):"
-  inf "resolv.conf: $(timeout 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' 2>/dev/null | tr '\n' ' ')"
-  if timeout 25 incus exec "$probe" -- getent hosts deb.debian.org >/dev/null 2>&1; then
-    ok "$probe resolves deb.debian.org"
-  else
-    no "$probe CANNOT resolve deb.debian.org — this is what breaks cloud-init on every new box"
-  fi
+  inf "probing inside '$probe' — this separates DNS from routing, which is the whole question:"
+  inf "its resolv.conf: $(timeout 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' 2>/dev/null | tr '\n' ' ')"
+
   timeout 20 incus exec "$probe" -- ping -c1 -W2 10.87.0.1 >/dev/null 2>&1 \
-    && ok "$probe reaches the gateway (10.87.0.1) — so it is DNS, not routing" \
-    || no "$probe cannot even reach the gateway"
+    && ok "reaches the gateway (10.87.0.1) — routing is fine" \
+    || no "cannot even reach the gateway — this is routing, not DNS"
+
+  if timeout 25 incus exec "$probe" -- getent hosts deb.debian.org >/dev/null 2>&1; then
+    ok "resolves deb.debian.org — DNS works"
+  else
+    no "CANNOT resolve deb.debian.org — this is exactly what kills cloud-init on every cold mint"
+    # Does the box reach the internet at all WITHOUT DNS? If yes, the fault is
+    # purely name resolution — i.e. the forwarder, i.e. issue #33.
+    if timeout 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 2>/dev/null; then
+      inf "…but it CAN reach 1.1.1.1 by address. So egress works and only NAME RESOLUTION is broken:"
+      inf "the fault is the forwarder the box inherits from the host — issue #33."
+      inf "test the fix:  bash drill/doctor.sh --pin-dns   then re-run the drill"
+    else
+      inf "…and it cannot reach 1.1.1.1 by address either — so egress itself is broken, not just DNS."
+    fi
+  fi
 else
   inf "no box to probe with (mint one, or run without --fix after a run)"
 fi
