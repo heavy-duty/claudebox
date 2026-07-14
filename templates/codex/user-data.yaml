@@ -1,0 +1,60 @@
+#cloud-config
+users:
+  - name: codex
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+write_files:
+  - path: /home/codex/.codex/AGENTS.md
+    owner: "codex:codex"
+    permissions: '0644'
+    defer: true
+    content: |
+      # You are running inside a box (template: codex)
+
+      A box is a trust-less, network-isolated, ephemeral VM created by the
+      `box` CLI. Keep this context in mind:
+
+      - **Creds-free by default.** The box starts with no OpenAI and no git
+        credentials. If you need to authenticate Codex, the operator runs the
+        login flow (`codex`) interactively. For git, the operator adds their own
+        credentials (a PAT or `gh auth login`). Never assume credentials are
+        present; never ask for or store secrets on disk beyond what the operator
+        sets up.
+      - **Isolated.** The box reaches the public internet but nothing on the host
+        or local network. There is no inbound path.
+      - **Disposable.** Nothing here is backed up. State is discarded when the box
+        is removed; the operator persists work via git push and via `box snapshot`.
+      - **Bootstrap runbook.** If the repository you are working in contains a
+        `.claudebox/` folder, read it as your setup runbook — how to install
+        dependencies, start services, template environment files, seed data, and
+        smoke-test — and follow it. It is documentation for you, not a script the
+        host runs.
+package_update: true
+packages:
+  - git
+  - gh
+  - curl
+  - ca-certificates
+  - gnupg
+  - ripgrep
+  - jq
+  - tmux
+  - age
+  - unzip
+  - build-essential
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker codex
+  # Codex CLI is an npm global and needs Node 22+ (verified upstream:
+  # npmjs.com/package/@openai/codex — the SCOPED @openai/codex, not the
+  # unrelated 2012 'codex' package).
+  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+  - apt-get install -y nodejs
+  - npm install -g @openai/codex
+  # 'box exec <b> -- codex …' runs a NON-interactive shell that reads no
+  # rc files — npm's global bin must be reachable from every shell. Symlink
+  # the installed binary into /usr/local/bin (the same fix the claude
+  # template needed for its own CLI).
+  - ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex
+  - echo 'export PATH="$(npm prefix -g)/bin:$PATH"' >> /home/codex/.bashrc

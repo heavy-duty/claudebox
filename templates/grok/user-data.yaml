@@ -1,0 +1,59 @@
+#cloud-config
+users:
+  - name: grok
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+write_files:
+  - path: /home/grok/.grok/AGENTS.md
+    owner: "grok:grok"
+    permissions: '0644'
+    defer: true
+    content: |
+      # You are running inside a box (template: grok)
+
+      A box is a trust-less, network-isolated, ephemeral VM created by the
+      `box` CLI. Keep this context in mind:
+
+      - **Creds-free by default.** The box starts with no xAI and no git
+        credentials. If you need to authenticate, the operator runs
+        `grok-build login` interactively (SuperGrok / X Premium+). For git, the
+        operator adds their own credentials (a PAT or `gh auth login`). Never
+        assume credentials are present; never ask for or store secrets on disk
+        beyond what the operator sets up.
+      - **Isolated.** The box reaches the public internet but nothing on the host
+        or local network. There is no inbound path.
+      - **Disposable.** Nothing here is backed up. State is discarded when the box
+        is removed; the operator persists work via git push and via `box snapshot`.
+      - **Bootstrap runbook.** If the repository you are working in contains a
+        `.claudebox/` folder, read it as your setup runbook — how to install
+        dependencies, start services, template environment files, seed data, and
+        smoke-test — and follow it. It is documentation for you, not a script the
+        host runs.
+package_update: true
+packages:
+  - git
+  - gh
+  - curl
+  - ca-certificates
+  - gnupg
+  - ripgrep
+  - jq
+  - tmux
+  - age
+  - unzip
+  - build-essential
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker grok
+  # Grok Build's official installer (verified upstream: x.ai/cli). It drops the
+  # binary under the invoking user's home, so run it AS grok, not root.
+  - sudo -u grok bash -lc 'curl -fsSL https://x.ai/cli/install.sh | bash'
+  # 'box exec <b> -- grok-build …' runs a NON-interactive shell that reads no
+  # rc files. Find whatever the installer dropped and symlink it onto the
+  # system PATH — the same fix the claude template needed. If the installer's
+  # binary name changes upstream, this glob is the one line to update.
+  - |
+    bin="$(find /home/grok -maxdepth 4 -type f -name 'grok-build' 2>/dev/null | head -1)"
+    [ -n "$bin" ] && ln -sf "$bin" /usr/local/bin/grok-build || echo "grok-build binary not found post-install — check x.ai/cli install layout" >&2
+  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/grok/.bashrc

@@ -75,10 +75,20 @@ claude                           # if the repo has .claudebox/, Claude reads it 
 
 ## Templates
 
-The claude box is one template among several. A template is a directory under
-`templates/`: a `box.env` (image, user, resources — parsed against a strict
-allowlist, never sourced) and a `user-data.yaml` (cloud-init, passed to Incus
-verbatim).
+The claude box is one template among several. What ships today:
+
+| Template | What's in it |
+| --- | --- |
+| `blank`  | Bare Debian 13 — same isolation, no tooling. The default. |
+| `claude` | Claude Code, creds-free (the original claudebox) |
+| `codex`  | OpenAI Codex CLI, creds-free |
+| `grok`   | xAI Grok Build CLI, creds-free |
+
+A template is a directory under `templates/`: a `box.env` (image, user,
+resources — parsed against a strict allowlist, never sourced) and a
+`user-data.yaml` (cloud-init, passed to Incus verbatim). The coding-CLI
+templates are all the same shape — install the CLI, put it on PATH, drop an
+agent-context file; none of them carry credentials.
 
 ```sh
 box templates                    # list what this install can mint

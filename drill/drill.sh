@@ -159,7 +159,7 @@ This will, ON THIS HOST ($(hostname)):
   · install Incus and a systemd unit
   · create a network (boxnet), an ACL, and a profile
   · rewrite firewall rules (nft or UFW, and Docker's DOCKER-USER chain)
-  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl
+  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl, codex, grok
   · mutate the network and profile mid-run to rehearse the #16 hardening
 Only do this on a machine you can format.
 EOF
@@ -243,7 +243,7 @@ fi
 inf "clearing anything a previous run left behind…"
 # One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
 # which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
-for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl; do
+for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl codex grok; do
   timeout -k 5 60 incus delete -f "$n" >/dev/null 2>&1
 done
 if incus network show boxnet >/dev/null 2>&1; then
@@ -385,8 +385,12 @@ else
 fi
 
 # --- templates: the mint surface is itself a surface to test ----------------
-box templates 2>/dev/null | grep -q '^  blank' && box templates 2>/dev/null | grep -q '^  claude' \
-  && ok "templates: lists blank and claude" || no "templates listing is missing a shipped template"
+tpl_missing=""
+for t in blank claude codex grok; do
+  box templates 2>/dev/null | grep -q "^  $t" || tpl_missing="$tpl_missing $t"
+done
+[ -z "$tpl_missing" ] && ok "templates: lists blank, claude, codex, grok" \
+                      || no "templates listing is missing:$tpl_missing"
 box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
   && ok "unknown template refused, points at 'box templates'" || no "an unknown template was not refused"
 # The one rule that keeps templates honest: no key can name a network. Plant a
@@ -426,6 +430,28 @@ if mint_box /tmp/mint-tpl.log --name tpl; then
 else
   no "blank mint FAILED — tail: $(tail -3 /tmp/mint-tpl.log | tr '\n' ' ')"
 fi
+
+# The generic mechanic (metadata, placement, user, isolation parity) is proven
+# once by blank+claude and needs no per-template repeat. What a NEW template
+# still has to prove is its own payload: the CLI installs, lands on the
+# non-interactive exec PATH, and answers --version. One mint each.
+for t in codex grok; do
+  case "$t" in codex) bin=codex; user=codex ;; grok) bin=grok-build; user=grok ;; esac
+  printf '\n  minting a %s box (cold — validates the template install)…\n' "$t"
+  if mint_box "/tmp/mint-$t.log" --name "$t" --template "$t"; then
+    [ "$(incus config get "$t" user.box.user 2>/dev/null)" = "$user" ] \
+      && ok "$t: template user stamped ($user)" || no "$t: user.box.user not $user"
+    if timeout -k 5 30 box exec "$t" -- "$bin" --version </dev/null >/dev/null 2>&1; then
+      ok "$t: '$bin --version' answers via box exec — installed and on the non-interactive PATH"
+    else
+      no "$t: '$bin --version' FAILED via exec — not installed, or not on exec's PATH (the claude template's #15 bug)"
+      inf "PATH as exec sees it: $(timeout -k 5 20 box exec "$t" -- printenv PATH </dev/null 2>/dev/null)"
+    fi
+    box rm "$t" --force >/dev/null 2>&1 && ok "$t box removed" || no "$t: could not remove"
+  else
+    no "$t mint FAILED — tail: $(tail -3 "/tmp/mint-$t.log" | tr '\n' ' ')"
+  fi
+done
 
 printf '\n  minting a claude box (cold, ~10 min)…\n'
 t0=$SECONDS
@@ -678,11 +704,11 @@ if [ "$KEEP" = 1 ]; then
   inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
   # every name the drill can have left, whatever branch a partial run took
-  for n in drill clone archive peer tpl; do box rm "$n" --force >/dev/null 2>&1; done
+  for n in drill clone archive peer tpl codex grok; do box rm "$n" --force >/dev/null 2>&1; done
   # Assert OUR boxes are gone — not that the host is empty. The rm loop above
   # already embodies the discipline (only names the drill minted); demanding
   # 'no boxes yet' here would flag any pre-existing operator box as a failure.
-  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer|tpl)([[:space:]]|$)' || true)"
+  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer|tpl|codex|grok)([[:space:]]|$)' || true)"
   [ -z "$leftover" ] && ok "teardown: every box the drill minted is gone" \
                      || no "a drill box survived teardown: $(printf '%s' "$leftover" | awk '{print $1}' | tr '\n' ' ')"
 fi
