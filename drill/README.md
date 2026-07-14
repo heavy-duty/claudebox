@@ -25,6 +25,12 @@ and profile mutations stay applied with them).
 
 Exit 0 means every check passed. Roughly 20 minutes, most of it the cold box.
 
+**Something wrong with the host?** `bash drill/doctor.sh` — it reports whether
+the host is fit to drill (network, profile, ACL, leftover boxes, whether a box
+can still resolve DNS), and `--fix` reverts what an aborted run left behind.
+The drill mutates the host in phase D; an aborted run can leave a network that
+mints boxes with **no DNS**.
+
 **Iterating on the drill?** Read [RUNS.md](RUNS.md) first — it is the run log:
 what the audit has answered so far, the bugs the drill has found in claudebox,
 the traps this script has already fallen into (every one cost a run), how to
