@@ -18,16 +18,25 @@ if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active
   fi
 else
   # No UFW: protect the host's own sockets with a dedicated nft table.
-  # Guard on the CHAIN, not the table — the expose-snat section below also
-  # lives in this table, and on a UFW host it creates the table first; a later
-  # run without UFW must still install the input drop.
-  if ! nft list chain inet box input >/dev/null 2>&1; then
-    nft add table inet box
-    nft 'add chain inet box input { type filter hook input priority -5 ; }'
-    nft add rule inet box input iifname "$NET" udp dport '{ 53, 67 }' accept
-    nft add rule inet box input iifname "$NET" tcp dport 53 accept
-    nft add rule inet box input iifname "$NET" drop
-  fi
+  # Flush + rebuild rather than skip-if-present: a guard that only checks
+  # existence pins every host to the rule set of the release that FIRST ran
+  # here, and an upgraded rule never lands. 'add chain' with the same spec is
+  # a no-op, so this converges.
+  #
+  # The established,related accept is load-bearing for 'box expose' (#55): the
+  # door's traffic reaches the box masqueraded as the gateway, so the box's
+  # REPLY arrives here as input on boxnet — a stateless drop eats it and the
+  # door times out (drill-found). Boxes still cannot INITIATE toward the host:
+  # a box-originated SYN is a NEW flow, and NEW is what the drop is for.
+  # (UFW hosts get the same semantics from ufw's built-in RELATED,ESTABLISHED
+  # accept in before.rules — this branch must match it.)
+  nft add table inet box
+  nft 'add chain inet box input { type filter hook input priority -5 ; }'
+  nft flush chain inet box input
+  nft add rule inet box input iifname "$NET" ct state established,related accept
+  nft add rule inet box input iifname "$NET" udp dport '{ 53, 67 }' accept
+  nft add rule inet box input iifname "$NET" tcp dport 53 accept
+  nft add rule inet box input iifname "$NET" drop
 fi
 
 # --- Sibling isolation: a box must not reach another box --------------------
@@ -83,11 +92,10 @@ if [ -e "/proc/sys/net/ipv4/conf/$NET/route_localnet" ]; then
 else
   echo "box-firewall: $NET does not exist yet — route_localnet not set; expose's loopback door stays dead until this script runs again" >&2
 fi
-if ! nft list chain inet box expose-snat >/dev/null 2>&1; then
-  nft add table inet box
-  nft "add chain inet box expose-snat { type nat hook postrouting priority 110 ; }"
-  nft add rule inet box expose-snat oifname "$NET" ip saddr 127.0.0.0/8 masquerade
-fi
+nft add table inet box
+nft "add chain inet box expose-snat { type nat hook postrouting priority 110 ; }"
+nft flush chain inet box expose-snat
+nft add rule inet box expose-snat oifname "$NET" ip saddr 127.0.0.0/8 masquerade
 
 # Docker rewrites FORWARD policy to DROP; DOCKER-USER is its escape hatch.
 if command -v docker >/dev/null && iptables -L DOCKER-USER -n >/dev/null 2>&1; then
