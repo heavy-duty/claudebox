@@ -127,6 +127,30 @@ else
   inf "claude-isolate does not exist (a fresh host)"
 fi
 
+# Config is a claim; the bridge port is the fact. Incus can accept
+# security.port_isolation and the kernel can still have 'isolated off' on the
+# tap — and then boxes reach each other while every config says they cannot.
+# Ask the kernel.
+head_ "Bridge ports — the KERNEL's view (config is a claim; this is the fact)"
+if command -v bridge >/dev/null 2>&1; then
+  ports="$(sudo bridge -d link show 2>/dev/null | grep -A1 'master claudenet')"
+  if [ -z "$ports" ]; then
+    inf "no instance is attached to claudenet right now (mint a box to check the taps)"
+  else
+    printf '%s\n' "$ports" | sed 's/^/        /'
+    if printf '%s' "$ports" | grep -q 'isolated on'; then
+      ok "the bridge ports are ISOLATED — boxes cannot exchange frames at L2"
+    else
+      no "the bridge ports are NOT isolated ('isolated off') — BOXES CAN REACH EACH OTHER"
+      inf "security.port_isolation in the profile is a claim; this line is the fact."
+      inf "if the profile says true and the kernel says off, the flag is not being"
+      inf "applied to VM taps and the isolation needs a different mechanism."
+    fi
+  fi
+else
+  inf "'bridge' (iproute2) not installed — cannot read the kernel's view"
+fi
+
 head_ "Instances"
 left="$(incus list --format csv --columns ns 2>/dev/null)"
 [ -z "$left" ] && inf "(none)" || printf '        %s\n' "$left"

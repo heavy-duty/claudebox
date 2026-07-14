@@ -87,7 +87,7 @@ incus profile edit claude-dev < "$here/profiles/claude-dev.yaml"
 
 # The sibling drop is the one rule whose absence is invisible: everything keeps
 # working, and boxes can simply reach each other. Assert it landed.
-if nft list table bridge claudebox >/dev/null 2>&1; then
+if sudo nft list table bridge claudebox >/dev/null 2>&1; then
   echo "Isolation: box-to-box drop is live (nft bridge table 'claudebox')."
 else
   echo "WARNING: the box-to-box drop is NOT active — boxes can reach each other." >&2
