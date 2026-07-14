@@ -38,6 +38,23 @@ incus network set claudenet security.acls=claude-isolate \
   security.acls.default.egress.action=allow \
   security.acls.default.ingress.action=drop
 
+# A box must not be able to ENUMERATE its siblings, either. dnsmasq on the
+# gateway serves DNS (that carve-out is what makes egress resolution work) and
+# it holds a record for every instance on the network — so 'getent hosts <box>'
+# from inside one box resolved another's name and address. Connection blocked,
+# reconnaissance wide open. dns.mode=none stops it registering instance records;
+# forwarding for public names is unaffected (verified live).
+incus network set claudenet dns.mode=none
+
+# Sibling isolation itself is NOT an ACL rule — an L3 ACL never sees frames
+# switched between two ports of one bridge. It lives in claudebox-firewall.sh
+# as an nftables bridge-family rule. See the comment there; it is the reason
+# boxes cannot reach each other.
+
+# IPv6 stays off (ipv6.address=none, above). Every rule in the ACL and every
+# rule in the firewall is IPv4-only, so IPv6 would be an uncovered path, not a
+# feature. That is a contract, not a default.
+
 # --- Firewall coexistence ---------------------------------------------------
 # Hosts running UFW (INPUT drop) and/or Docker (FORWARD drop) silently eat
 # claudenet traffic. Punch minimal, ordered holes; the Incus ACL still layers

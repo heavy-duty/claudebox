@@ -519,16 +519,16 @@ else
   aud "A3 sibling: NOT PROBED (no 10.87.x address on peer)"
 fi
 
-# C5 — DNS enumeration (#15 A4): #12 predicts this LEAKS today. Either way it
-# is audit data, not a code failure — #16's dns.mode=none is the fix.
+# C5 — DNS enumeration (#15 A4). Now a CONTRACT, not an observation: setup-host
+# sets dns.mode=none precisely so a box cannot enumerate its siblings.
 e1="$(in_box archive getent hosts peer)"
 e2="$(in_box archive getent hosts peer.incus)"
 if [ -n "$e1$e2" ]; then
-  note "DNS enumeration leaks, as #12 predicted: a box resolves its sibling ($(printf '%s' "$e1$e2" | head -1 | cut -c1-50))"
-  aud "A4 dns enumeration: LEAKS (bare='${e1:+yes}' fqdn='${e2:+yes}') — #16's dns.mode=none earns its place"
+  no "a box can still RESOLVE its sibling ($(printf '%s' "$e1$e2" | head -1 | cut -c1-40)) — dns.mode=none is not holding"
+  aud "A4 dns enumeration: LEAKS — the fix is not in effect"
 else
-  note "DNS enumeration did NOT leak — #16's dns.mode item shrinks to an assertion"
-  aud "A4 dns enumeration: no leak observed"
+  ok "a box cannot resolve its sibling's name (no DNS enumeration)"
+  aud "A4 dns enumeration: blocked (dns.mode=none)"
 fi
 
 # C6 — IPv6 off (#15 A6): every ACL rule is IPv4-only; off is the only cover.
@@ -558,123 +558,37 @@ else
   aud "A7 inbound host→box: NOT PROBED"
 fi
 
-# The mutations below OUTLIVE the run if it dies: dns.mode=none leaves every
-# box minted afterwards with NO DNS at all (cloud-init then fails with
-# "Temporary failure resolving deb.debian.org"), and NIC filtering can stop a
-# box getting on the network. A poisoned host does not fail the NEXT run
-# honestly — it produces confident, wrong answers, which is how a false design
-# veto against #16 got posted. So arm the revert BEFORE making the first
-# mutation, and let it fire on any exit, including Ctrl-C.
-revert_phase_d() {
-  incus network unset claudenet dns.mode >/dev/null 2>&1
-  incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
-  incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
-  incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
-}
-trap 'revert_phase_d' EXIT INT TERM
-
 # ===========================================================================
-phase "D. Hardening rehearsal — #16's changes, applied live (#15 section B)"
+phase "D. The isolation contract, stated"
 # ===========================================================================
-# The host is disposable, so rehearse the exact changes #16 proposes and watch
-# what breaks. A FAIL here vetoes a piece of #16's design before it is written.
+# Phase D used to REHEARSE the hardening on a throwaway host, because nobody
+# knew whether it would work. That question is settled: the hardening now ships
+# in setup-host.sh and claudebox-firewall.sh, so phase C tests the real thing
+# and there is nothing left to rehearse. What the rehearsal established, kept
+# here so it is not re-litigated:
 #
-# But ONLY if the box was healthy to begin with. On run 7 the baseline was
-# broken (a clone/source IP collision took the box's networking down), and phase
-# D dutifully reported "L2 filtering BREAKS the box — design veto". It did not.
-# A verdict measured on a broken box is not a verdict, it is a slander; #16
-# would have been redesigned around a fiction. Refuse to judge instead.
+#   · @internal is REJECTED as an ACL destination on a bridge network
+#     ("Unsupported nftables subject") — so the sibling drop is an nftables
+#     bridge-family rule, not an ACL rule. It has to be: an L3 ACL never sees
+#     frames switched between two ports of one bridge, which is why box→box was
+#     wide open while the ACL looked airtight.
+#   · dns.mode=none closes the enumeration leak and public egress survives it.
+#   · security.ipv4_filtering BREAKS the box's networking (dockerd comes up but
+#     cannot pull or run a container). VETOED — it is not in the shipped stack.
+#
+inf "@internal: unsupported on bridge ACLs ⇒ the sibling drop is an nft bridge rule"
+inf "dns.mode=none: shipped (closes DNS enumeration, egress unaffected)"
+inf "security.ipv4_filtering: VETOED — it breaks the box. Not shipped."
+inf "the contract is now tested in phase C against the real stack, not rehearsed"
+
+# The lesson that cost the most: a verdict measured on a broken box is not a
+# verdict. Run 7 reported "L2 filtering BREAKS the box" from a box whose network
+# was already dead, and #16 was nearly redesigned around it. If the baseline
+# failed, say plainly that phase C's isolation results cannot be trusted.
 if [ "$BASELINE_OK" -ne 1 ]; then
-  note "SKIPPING phase D — the box could not reach the internet BEFORE any hardening was applied"
-  inf  "a design verdict measured on a broken baseline is worthless; fix the baseline and re-run"
-  aud  "B1/B3/B5: NOT MEASURED — baseline egress was already broken (see A1)"
-fi
-if [ "$BASELINE_OK" -eq 1 ]; then
-
-# D1 — dns.mode=none (#15 B3): must kill sibling resolution, must NOT kill egress.
-# Runs 2 and 3 DISAGREED on the egress half (broken, then intact) — a verdict
-# that flips is a verdict you cannot design on. Setting dns.mode restarts the
-# network's dnsmasq, so a probe fired immediately can catch it mid-restart.
-# Distinguish TRANSIENT (recovers) from BROKEN (still dead after 30s), and say so.
-if incus network set claudenet dns.mode=none 2>/tmp/dnsmode.err; then
-  sleep 2
-  [ -n "$(in_box archive getent hosts peer.incus)" ] \
-    && { no "dns.mode=none did not stop sibling resolution"; aud "B3 dns.mode=none: does NOT close the leak"; } \
-    || { ok "dns.mode=none: sibling names no longer resolve"; aud "B3 dns.mode=none: closes the enumeration leak"; }
-
-  if [ "$(box_curl archive https://api.github.com 20)" = 0 ]; then
-    ok "dns.mode=none: public egress still works, immediately"
-    aud "B3 egress under dns.mode=none: intact, no outage window"
-  else
-    settled=0
-    for _i in $(seq 1 6); do
-      sleep 5
-      [ "$(box_curl archive https://api.github.com 20)" = 0 ] && { settled=1; break; }
-    done
-    if [ "$settled" = 1 ]; then
-      note "dns.mode=none caused a TRANSIENT DNS outage (dnsmasq restart), recovered within 30s"
-      aud "B3 egress under dns.mode=none: recovers after a brief outage — shippable, but #16 must not probe DNS mid-restart (this is what made runs 2/3 disagree)"
-    else
-      no "dns.mode=none BROKE public DNS and it did not recover in 30s — #16 cannot ship it as-is"
-      aud "B3 egress under dns.mode=none: BROKEN, no recovery — design veto"
-    fi
-  fi
-else
-  no "incus rejected dns.mode=none on claudenet: $(head -1 /tmp/dnsmode.err 2>/dev/null)"
-  aud "B3 dns.mode=none: REJECTED by incus — $(head -1 /tmp/dnsmode.err 2>/dev/null) — #16 needs another mechanism"
-fi
-
-# D2 — L2 filtering (#15 B5): the box must keep working with it on.
-# Filtering binds at NIC attach, so the boxes restart here.
-if incus profile device set claude-dev eth0 security.mac_filtering=true security.ipv4_filtering=true 2>/dev/null; then
-  incus restart -f archive peer >/dev/null 2>&1
-  wait_box archive || note "archive slow to return after the filtering restart"
-  [ "$(box_curl archive https://api.github.com 20)" = 0 ] \
-    && { ok "mac+ipv4 filtering on: the box still reaches the internet"; aud "B5 L2 filtering: box networking intact — safe for the claude workload"; } \
-    || { no "mac+ipv4 filtering BROKE the box's networking"; aud "B5 L2 filtering: BREAKS the box — design veto"; }
-  # 'docker info' as the claude user needs the docker group, which a fresh exec
-  # session may not have picked up; sudo is the honest probe of the DAEMON.
-  if in_box archive docker run --rm alpine:latest true >/dev/null 2>&1; then
-    ok "…and in-box Docker still pulls and runs a container under ipv4_filtering"
-    aud "B5 in-box docker under filtering: WORKS — pulls + runs (NAT hides behind eth0, as #12 argued)"
-  elif in_box archive docker info >/dev/null 2>&1; then
-    note "dockerd is up under filtering but could not pull/run a container — check egress from docker0"
-    aud "B5 in-box docker under filtering: daemon up, container run FAILED — #16 must check docker0 egress"
-  else
-    note "in-box Docker daemon is not running at all (so filtering is not what broke it)"
-    aud "B5 in-box docker under filtering: UNVERIFIED — dockerd not running ($(timeout 30 claudebox incus archive -- exec {} -- systemctl is-active docker 2>&1 | grep -v '^claudebox:' | tail -1))"
-  fi
-else
-  no "incus rejected security filtering on the profile NIC"
-  aud "B5 L2 filtering: REJECTED on a profile NIC"
-fi
-
-# D3 — @internal as an ACL destination on a bridge network (#15 B1). If it
-# holds AND egress survives (the gateway carve-out must win the ordering),
-# #16's sibling drop is renumber-proof by construction.
-if incus network acl rule add claude-isolate egress action=drop destination=@internal 2>/tmp/ai.err; then
-  ok "@internal accepted as an ACL destination on a bridge network"
-  [ "$(box_curl archive https://api.github.com 20)" = 0 ] \
-    && { ok "…and public egress survives the @internal drop (the carve-out wins)"; aud "B1 @internal: accepted, egress survives ⇒ #16 uses @internal"; } \
-    || { no "the @internal drop killed egress/DNS — ordering does not protect the carve-out"; aud "B1 @internal: accepted but kills DNS ⇒ #16 derives the subnet instead"; }
-  incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
-else
-  note "@internal rejected on a bridge ACL ($(head -1 /tmp/ai.err 2>/dev/null | cut -c1-60))"
-  aud "B1 @internal: rejected ⇒ #16 derives the subnet in setup-host.sh (mask the gateway CIDR)"
-fi
-
-fi   # end of the BASELINE_OK guard around phase D
-
-# Revert now, and CHECK it — the old code fired these into /dev/null and moved
-# on, so a failed unset was indistinguishable from a successful one.
-revert_phase_d
-d="$(incus network get claudenet dns.mode 2>/dev/null)"
-f="$(incus profile device get claude-dev eth0 security.ipv4_filtering 2>/dev/null)"
-if [ -z "$d" ] && [ -z "$f" ]; then
-  ok "phase D reverted: dns.mode and NIC filtering are back to shipped defaults"
-else
-  no "PHASE D DID NOT REVERT (dns.mode='$d' ipv4_filtering='$f') — this host will poison the next run"
-  inf "fix it with: bash drill/doctor.sh --fix"
+  no "the box could not reach the internet AT ALL — every isolation result above is suspect, not a pass"
+  inf "a boundary that 'holds' on a box with no network holds nothing. fix the baseline, re-run."
+  inf "start with:  bash drill/doctor.sh"
 fi
 
 # ===========================================================================

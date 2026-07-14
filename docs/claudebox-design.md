@@ -90,12 +90,39 @@ you cannot aim it at an instance claudebox didn't mint. If the command can move
 the box off the isolation stack (profile, network, device, `security.*`), it
 warns and proceeds — from there the trust boundary is yours to keep.
 
-## Isolation (unchanged)
+## Isolation
 
 Dedicated NAT bridge `claudenet` + Incus `claude-isolate` ACL dropping all
 RFC1918/CGNAT/link-local egress, plus host-firewall rules blocking instance →
-host. The instance reaches the internet and nothing else. Entry is `incus exec`
-over the local socket — no inbound path. The VM is the trust boundary.
+host. Entry is `incus exec` over the local socket — no inbound path. The VM is
+the trust boundary.
+
+**A box reaches the public internet and nothing else — including no other box.**
+That last clause is the one that was assumed and turned out to be false, so it
+is spelled out here with the mechanism, and `drill/` tests it on every run.
+
+- **Box → host, LAN, RFC1918, CGNAT, link-local:** the `claude-isolate` ACL.
+- **Box → box: an nftables *bridge-family* rule** (`host/claudebox-firewall.sh`).
+  It cannot be an ACL rule. Two boxes on one bridge share an L2 segment, so
+  their frames are *switched* between bridge ports and never traverse the
+  netfilter path an L3 ACL lives on — the ACL looked airtight (it drops
+  `10.0.0.0/8`, which contains `claudenet`) while box→box was in fact wide open.
+  A live probe found box A's SYN arriving at box B. The bridge family's forward
+  hook fires exactly on port-to-port frames, which on this bridge means box→box
+  and nothing else: gateway traffic and routed egress are delivered locally, not
+  forwarded. Dropping every forwarded frame therefore isolates the boxes and
+  costs them nothing.
+- **Box → box by NAME:** `dns.mode=none`. dnsmasq on the gateway held a record
+  for every instance, so a box could enumerate its siblings even where it could
+  not reach them. Blocked connections with open reconnaissance is not isolation.
+- **IPv6:** off (`ipv6.address=none`), and that is a *contract*, not a default —
+  every rule above is IPv4-only, so IPv6 would be an uncovered path.
+- **`security.ipv4_filtering`: deliberately NOT used.** It breaks the box's
+  networking (in-box Docker cannot pull or run a container). Tested, vetoed.
+
+The rule that keeps this honest: **isolation claims are tested, never reasoned
+about.** The box→box hole existed because a plausible code reading said it could
+not. See `drill/RUNS.md`.
 
 ## Non-goals
 
