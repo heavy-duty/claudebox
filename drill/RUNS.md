@@ -102,6 +102,15 @@ Read this before adding a probe. Every one of these cost a run.
     `/dev/null`-ed) unset, the refusal to start on a dirty host, and
     `doctor.sh`.
 
+11. **A network Incus calls `Created` may have nothing serving it.** After an
+    unclean daemon death (a wedge, a SIGKILL, an OOM), Incus can come back
+    without respawning a network's **dnsmasq**. The bridge is up, `incus
+    network show` is perfect, `status: Created` — and no DHCP server exists, so
+    every box minted afterwards gets **no lease, no gateway, no DNS**, and dies
+    deep in cloud-init blaming Debian's mirrors. Incus's own status does not
+    cover this; the process table does. `doctor.sh` now checks it, because two
+    cold mints and an hour went into learning it the other way.
+
 ## Diagnosing a stall
 
 **Start here: `bash drill/doctor.sh`** — it answers "what state is this host
@@ -149,6 +158,7 @@ No listener is needed, and none should be started: see trap 3.
 | 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
 | 5 | stalled in host setup | trap 6 — silence through apt/sudo |
 | 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup. Recovering the host exposed **two real claudebox bugs**: `setup-host` deadlocks the incus daemon when re-run with boxes up (#26), and clones inherit their source's machine-id → same DHCP lease → **two boxes, one IP** (#27) |
+| 9 | aborted: cold mint failed, twice | **not** the drill and **not** the host's mutations (doctor was green): `claudenet` had **no dnsmasq** — it never respawned after the SIGKILL in run 6's recovery. Boxes got no DHCP lease at all. Trap 11 |
 | 8 | aborted: cold mint failed | `cloud-init status: error` — **the box had no DNS at all**. Run 7's phase-D `dns.mode=none` survived the run and poisoned the host. Trap 10, and the reason `doctor.sh` exists |
 | 7 | 41/49 | the clone-identity fix could not reboot (systemd needs a valid machine-id to shut down cleanly), so it never took effect → the IP collision persisted → the box lost networking → **phase D reported a false design veto against #16**. Trap 9. Also found: `dir` storage makes every clone a full disk copy (#29) |
 

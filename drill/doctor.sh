@@ -49,6 +49,28 @@ if incus network show claudenet >/dev/null 2>&1; then
     [ "$FIX" = 1 ] && { incus network unset claudenet dns.mode && inf "reverted: dns.mode unset"; }
   fi
   inf "ipv4.address = $(incus network get claudenet ipv4.address 2>/dev/null)"
+  # Incus reports the network as "Created" whether or not anything is actually
+  # SERVING it. Kill the daemon uncleanly (a wedge, an OOM, a SIGKILL) and it
+  # can come back without respawning this network's dnsmasq — the bridge is up,
+  # the config is perfect, and every box minted afterwards gets NO DHCP lease,
+  # so it dies deep inside cloud-init with "Temporary failure resolving
+  # deb.debian.org". Two cold mints and an hour of hunting went into learning
+  # that Incus's own status does not cover this. Ask the process table instead.
+  if pgrep -af 'dnsmasq.*--interface=claudenet' >/dev/null 2>&1; then
+    ok "a dnsmasq is serving claudenet (DHCP + DNS)"
+  else
+    no "NO dnsmasq is serving claudenet — the bridge is up and incus says 'Created', but nothing hands out leases"
+    inf "every box minted now gets no address, no DNS, and dies in cloud-init"
+    inf "fix:  timeout 60 incus delete -f <any boxes>; sudo systemctl restart incus"
+    inf "      (if it does not come back: teardown-host.sh, then re-run the drill)"
+    [ "$FIX" = 1 ] && {
+      inf "restarting incus to respawn it…"
+      sudo systemctl restart incus && sleep 5
+      pgrep -af 'dnsmasq.*--interface=claudenet' >/dev/null 2>&1 \
+        && inf "reverted: dnsmasq is serving claudenet again" \
+        || inf "STILL missing — run teardown-host.sh and let the drill rebuild the network"
+    }
+  fi
   ipv6="$(incus network get claudenet ipv6.address 2>/dev/null)"
   [ "$ipv6" = none ] && ok "ipv6.address = none (the isolation contract — every ACL rule is IPv4-only)" \
                      || no "ipv6.address = $ipv6 — IPv6 is on and NOT covered by any ACL rule"
