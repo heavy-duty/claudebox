@@ -23,13 +23,16 @@ runbook that Claude Code reads and acts on — there is no `install` step and no
 host-run setup. See [docs/box-design.md](docs/box-design.md) for the
 design rationale.
 
-> **0.4.0 is a clean cut**: the CLI is `box` (no `claudebox` shim), the host
-> stack is `boxnet`/`box-isolate`/`box-firewall` on 10.88.0.0/24, and the
-> default template is `blank`. Existing boxes minted by any earlier version
-> keep working under every verb — their legacy tag is honored forever, and
-> their old `claudenet` (10.87) is left standing beside the new bridge. To
-> strip a host of both generations at once: `host/teardown-host.sh`, or
-> `drill/wipe.sh` for the scorched-earth version.
+> **0.5.0**: two new templates (`codex`, `grok`), `box expose` — a
+> loopback-only door to a box port, for seeing a dev server — and the host
+> lifecycle as first-class verbs: `box setup-host`, `box teardown-host`, and
+> `box migrate-host`, which re-homes pre-0.4.0 boxes onto the current stack
+> and retires the legacy bridge.
+>
+> **0.4.0's clean cut stands**: the CLI is `box` (no `claudebox` shim), the
+> host stack is `boxnet`/`box-isolate`/`box-firewall` on 10.88.0.0/24, and
+> the default template is `blank`. Boxes minted by any earlier version keep
+> working under every verb — their legacy tag is honored forever.
 
 ## Install
 
@@ -55,6 +58,11 @@ reach each other), and firewall rules blocking instance → host. All rules
 re-apply at boot via `box-firewall.service` — no post-reboot ritual. If
 the host lacks `dnsmasq-base` (Debian cloud images skip Recommends):
 `sudo apt-get install -y dnsmasq-base`.
+
+A host still carrying the pre-0.4.0 stack: `box migrate-host --all-boxes`
+re-homes each legacy box onto `boxnet` (authed state preserved), and
+`box migrate-host --retire-legacy` removes the old bridge and profile once no
+legacy box remains.
 
 ## Quick start
 
@@ -122,13 +130,33 @@ a box's live state, or roll a box back with `box restore work authed`.
 Forgotten what you called a checkpoint? `box info work` prints the box's
 snapshot labels and the `--from` line to clone one.
 
+## See a dev server: `box expose`
+
+The isolation contract says no inbound path exists — which is one "no" too
+many when you're coding in a box and want its dev server in your browser.
+`box expose` is the deliberate exception:
+
+```sh
+box expose work 3000             # http://127.0.0.1:3000 → work:3000
+box expose work 3000 8080        # or pick the host port: 127.0.0.1:8080 → work:3000
+box expose work --list           # what doors are open
+box expose work --remove 3000    # close one
+```
+
+The listen side is **always the host's own loopback** — never the network, no
+flag to widen it — so no other machine gains a path to the box. The in-box
+server must listen on `0.0.0.0`, not its own loopback (safe inside the
+isolation stack: only this door can reach it). A box with a hole says so:
+`box info` lists open exposures. Everything else on the box stays dropped —
+the door is per-port, punched and removable at runtime.
+
 ## Commands
 
 ```
-box new --name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container] [--remote r]
+box new --name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container]
 box templates                # list the templates this install can mint
 box list                     # list your boxes
-box info <box>               # one box: state, IP, snapshot labels
+box info <box>               # one box: state, IP, exposures, snapshot labels
 box shell <box>              # enter as the template's user
 box exec <box> -- <cmd...>   # run a command in the box
 box tmux <box> [session]     # attach/create a tmux session — survives disconnects
@@ -138,9 +166,14 @@ box rename <box> <new>       # rename a box (stop it first)
 box down <box>               # stop (state kept; `start` resumes)
 box start <box>              # start a stopped box
 box rm <box> [--force]       # delete the box + its snapshots (asks first)
-box expose <box> <port>      # forward a box port to host loopback — see a dev server
+box expose <box> <port> [<host-port>] | --list | --remove <port>
+                             # forward a box port to host loopback — see a dev server
 box incus <box> -- <args...> # escape hatch: any incus command, box resolved
 box doctor [--fix|--pin-dns] # is this host fit to mint boxes? diagnose from ground truth
+box setup-host               # one-time host setup: Incus, the boxnet stack, the firewall
+box teardown-host [--purge-incus]   # remove the host stack (both name generations)
+box migrate-host --box <n> | --all-boxes | --retire-legacy
+                             # move a pre-0.4.0 host onto the box stack
 box status                   # deprecated alias for `list`
 box help [<command>]         # full help, or one command's page
 ```
@@ -149,7 +182,7 @@ Every command takes `--help`, and options come after the command
 (`box list --json`). Exit status: `0` ok, `1` it went wrong, `2` you asked
 wrong.
 
-`new` fresh-launches from a template (default: `claude`), or with `--from`
+`new` fresh-launches from a template (default: `blank`), or with `--from`
 clones an existing box or snapshot. VM mode (`--vm`, the default where
 `/dev/kvm` exists) is the trust-less target; container mode (auto-fallback,
 `security.nesting=true`) is for hosts without nested virt — weaker isolation,
@@ -210,9 +243,11 @@ Every clause above is probed live by an end-to-end drill, because the one time
 this contract was reasoned about instead of measured, the reasoning was wrong:
 box→box traffic was "covered" by an L3 drop that L2-switched frames never
 meet — a hole found by probing, not by reading the rules. On a bare host the
-drill installs the whole stack, mints a box cold, snapshots and clones it,
-probes every boundary from inside the boxes, and removes what it minted —
-currently **47 checks, 47 passing**. [drill/RUNS.md](drill/RUNS.md) is the full
+drill installs the whole stack, mints every template cold, snapshots and
+clones, probes every boundary from inside the boxes, opens and shuts the
+`expose` door (and checks the contract survives it), re-homes a faithful
+pre-0.4.0 box through `migrate-host`, and removes what it minted —
+currently **81 checks, 81 passing**. [drill/RUNS.md](drill/RUNS.md) is the full
 history, including every trap that fooled a run into a wrong verdict.
 
 ```sh
