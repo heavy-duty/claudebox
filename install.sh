@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# claudebox installer — intended for: curl -fsSL .../install.sh | bash
+# box installer — intended for: curl -fsSL .../install.sh | bash
 #
-# Downloads the claudebox repo tarball, installs the whole tree under
-# $DEST, and puts a `box` symlink on PATH via $BINDIR.
+# Downloads the box source tarball from its GitHub repo (heavy-duty/claudebox —
+# the repo keeps the old name; only the tool is 'box'), installs the whole tree
+# under $DEST, and puts a `box` symlink on PATH via $BINDIR.
 
-REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
-REF="${CLAUDEBOX_REF:-main}"
-DEST="${CLAUDEBOX_HOME:-$HOME/.local/share/claudebox}"
-BINDIR="${CLAUDEBOX_BIN:-$HOME/.local/bin}"
+REPO="${BOX_REPO:-heavy-duty/claudebox}"
+REF="${BOX_REF:-main}"
+DEST="${BOX_HOME:-$HOME/.local/share/box}"
+BINDIR="${BOX_BIN:-$HOME/.local/bin}"
 
-log() { printf 'claudebox-install: %s\n' "$*"; }
-warn() { printf 'claudebox-install: WARNING: %s\n' "$*" >&2; }
-die() { printf 'claudebox-install: ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf 'box-install: %s\n' "$*"; }
+warn() { printf 'box-install: WARNING: %s\n' "$*" >&2; }
+die() { printf 'box-install: ERROR: %s\n' "$*" >&2; exit 1; }
 
 # --- prerequisites ---------------------------------------------------------
 command -v curl >/dev/null 2>&1 || die "curl is required but was not found. Please install curl and re-run."
@@ -26,18 +27,19 @@ trap cleanup EXIT
 
 URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
 
-log "installing box (the claudebox repo) ($REPO@$REF)"
+log "installing box from $REPO@$REF"
 log "downloading $URL"
-curl -fsSL "$URL" -o "$TMPDIR/claudebox.tar.gz" \
+curl -fsSL "$URL" -o "$TMPDIR/box.tar.gz" \
   || die "failed to download $URL"
 
 log "extracting archive"
-tar -xzf "$TMPDIR/claudebox.tar.gz" -C "$TMPDIR" \
+tar -xzf "$TMPDIR/box.tar.gz" -C "$TMPDIR" \
   || die "failed to extract archive"
 
-# GitHub archives extract to a single top-level dir like claudebox-<ref>/
+# GitHub names the archive's top dir after the REPO, which is still 'claudebox':
+# it extracts to claudebox-<ref>/. That is repo-derived, not a stray brand.
 EXTRACTED="$(find "$TMPDIR" -maxdepth 1 -type d -name 'claudebox-*' | head -n1)"
-[ -n "$EXTRACTED" ] || die "could not find extracted claudebox-* directory in archive"
+[ -n "$EXTRACTED" ] || die "could not find the extracted source directory in archive"
 [ -f "$EXTRACTED/bin/box" ] || die "archive does not contain bin/box — is $REPO@$REF correct?"
 
 # --- atomically replace $DEST ---------------------------------------------
@@ -58,6 +60,13 @@ log "linked $BINDIR/box -> $DEST/bin/box"
 if [ -L "$BINDIR/claudebox" ]; then
   rm -f "$BINDIR/claudebox"
   log "removed the old claudebox symlink — the command is 'box' now (your existing boxes keep working)"
+fi
+# 0.5.0 moved the install tree from ~/.local/share/claudebox to ~/.local/share/box.
+# Sweep the old tree so an upgrade does not leave a stale copy behind.
+OLD_DEST="$HOME/.local/share/claudebox"
+if [ -d "$OLD_DEST" ] && [ "$OLD_DEST" != "$DEST" ]; then
+  rm -rf "$OLD_DEST"
+  log "removed the old install tree at $OLD_DEST (it now lives at $DEST)"
 fi
 
 # --- PATH check ------------------------------------------------------------

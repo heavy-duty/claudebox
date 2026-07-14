@@ -18,9 +18,9 @@ live in a shared profile no template can touch, so `blank` is a box with
 nobody home — not a box with the safety off.
 
 **The tool knows nothing about your projects.** You just `git clone` inside a
-box. A repo can ship an optional [`.claudebox/`](docs/claudebox-recipe.md)
+box. A repo can ship an optional [`.claudebox/`](docs/box-recipe.md)
 runbook that Claude Code reads and acts on — there is no `install` step and no
-host-run setup. See [docs/claudebox-design.md](docs/claudebox-design.md) for the
+host-run setup. See [docs/box-design.md](docs/box-design.md) for the
 design rationale.
 
 > **0.4.0 is a clean cut**: the CLI is `box` (no `claudebox` shim), the host
@@ -37,14 +37,14 @@ design rationale.
 curl -fsSL https://raw.githubusercontent.com/heavy-duty/claudebox/main/install.sh | bash
 ```
 
-Installs the tree to `~/.local/share/claudebox` and links `box` onto your
+Installs the tree to `~/.local/share/box` and links `box` onto your
 `PATH`. Re-run any time to upgrade — upgrading from a pre-0.4.0 install also
 retires the old `claudebox` symlink. (No `git clone` needed.)
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
 ```sh
-~/.local/share/claudebox/host/setup-host.sh   # run twice if it adds you to incus-admin (re-login between)
+~/.local/share/box/host/setup-host.sh   # run twice if it adds you to incus-admin (re-login between)
 ```
 
 Idempotent. Installs Incus and creates the isolation stack: the `boxnet` NAT
@@ -172,7 +172,7 @@ The box is resolved and tag-checked; the rest is passed to `incus` verbatim, and
 the command is echoed before it runs. If it can move the box off the isolation
 stack (profile, network, device, `security.*`), box warns and proceeds —
 the trust boundary is then yours to keep. See
-[docs/claudebox-design.md](docs/claudebox-design.md) for the rule and why the
+[docs/box-design.md](docs/box-design.md) for the rule and why the
 command surface is a table.
 
 ## Isolation
@@ -232,14 +232,14 @@ inherit.
 A repo that wants to be easy to stand up in a box ships an optional `.claudebox/`
 folder — a runbook Claude reads and follows (install deps, start services,
 template env, seed data, smoke-test). It is agent-facing documentation, not a
-host-executed script. See [docs/claudebox-recipe.md](docs/claudebox-recipe.md).
+host-executed script. See [docs/box-recipe.md](docs/box-recipe.md).
 
 ## Uninstall
 
 ```sh
-~/.local/share/claudebox/host/teardown-host.sh               # boxes, network, ACL, profile, firewall
-~/.local/share/claudebox/host/teardown-host.sh --purge-incus # ...and Incus itself
-rm -rf ~/.local/share/claudebox ~/.local/bin/box             # the CLI
+~/.local/share/box/host/teardown-host.sh               # boxes, network, ACL, profile, firewall
+~/.local/share/box/host/teardown-host.sh --purge-incus # ...and Incus itself
+rm -rf ~/.local/share/box ~/.local/bin/box             # the CLI
 ```
 
 ## Non-goals

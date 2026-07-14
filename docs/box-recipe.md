@@ -1,7 +1,7 @@
 # The `.claudebox/` convention
 
-`claudebox` mints trust-less, creds-free, isolated VMs with Claude Code already
-installed (`claudebox new/shell/snapshot/restore/exec/down/start/rm/status`). The
+`box` mints trust-less, creds-free, isolated VMs with Claude Code already
+installed (`box new/shell/snapshot/restore/exec/down/start/rm/status`). The
 tool knows **nothing** about your project. There is no `install` step and no
 host-run setup script.
 
@@ -23,12 +23,12 @@ shell that the host executes.
 ## How it's consumed
 
 Every box ships a global `~/.claude/CLAUDE.md` telling Claude it is inside a
-claudebox and to treat a repo's `.claudebox/` folder as its bootstrap runbook.
+box and to treat a repo's `.claudebox/` folder as its bootstrap runbook.
 So the whole flow is:
 
 ```
-claudebox new           # get a box
-claudebox shell         # get in
+box new           # get a box
+box shell         # get in
 git clone <repo> && cd <repo>
 claude                  # Claude reads .claudebox/ and brings the project up
 ```

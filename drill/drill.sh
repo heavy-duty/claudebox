@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# drill.sh — end-to-end drill for box (the claudebox repo), against a real Incus.
+# drill.sh — end-to-end drill for box, against a real Incus.
 #
 #   ⚠ DESTRUCTIVE, AND MEANT TO BE. Run it on a THROWAWAY host you can format.
 #     It installs Incus, rewrites the host's firewall rules, installs a systemd
@@ -32,8 +32,8 @@
 # false FAILs on the first live run. The pipeline verdict must be grep's alone.
 set -u
 
-REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
-REF="${CLAUDEBOX_REF:-main}"
+REPO="${BOX_REPO:-heavy-duty/claudebox}"
+REF="${BOX_REF:-main}"
 YES=0; KEEP=0
 SELF="$(readlink -f "$0")"
 
@@ -170,7 +170,7 @@ EOF
   fi
 
   phase "Installing box ($REPO@$REF)"
-  CLAUDEBOX_REPO="$REPO" CLAUDEBOX_REF="$REF" \
+  BOX_REPO="$REPO" BOX_REF="$REF" \
     bash -c "$(curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install.sh")" \
     || { echo "install failed"; exit 1; }
   export PATH="$HOME/.local/bin:$PATH"
@@ -206,10 +206,10 @@ EOF
   fi
 
   inf "running setup-host.sh (first pass: may only add you to incus-admin)…"
-  ~/.local/share/claudebox/host/setup-host.sh || true
+  ~/.local/share/box/host/setup-host.sh || true
   # The group we were just added to isn't in this shell's credentials yet.
   inf "re-entering inside the incus-admin group…"
-  exec sg incus-admin -c "IN_GROUP=1 CLAUDEBOX_REPO='$REPO' CLAUDEBOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
+  exec sg incus-admin -c "IN_GROUP=1 BOX_REPO='$REPO' BOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -259,7 +259,7 @@ left="$(incus list --format csv --columns n 2>/dev/null | tr '\n' ' ')"
 [ -n "$left" ] && inf "instances still on this host (not ours, left alone): $left"
 
 inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
-if ! timeout -k 10 300 ~/.local/share/claudebox/host/setup-host.sh; then
+if ! timeout -k 10 300 ~/.local/share/box/host/setup-host.sh; then
   echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
   echo "  it should take seconds on a host that already has incus. usual causes:" >&2
   echo "    · instances still attached to boxnet while its ACLs are reconfigured" >&2
@@ -367,7 +367,7 @@ phase "B. The box surface"
 # ===========================================================================
 # Compare against the installed tree's VERSION file, not a hardcoded number —
 # a pinned literal here would fail the drill on every release.
-expected="$(cat "$HOME/.local/share/claudebox/VERSION" 2>/dev/null || echo '?')"
+expected="$(cat "$HOME/.local/share/box/VERSION" 2>/dev/null || echo '?')"
 v="$(box --version 2>&1)"
 case "$v" in *"$expected"*) ok "box --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
 
@@ -396,7 +396,7 @@ box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
 # The one rule that keeps templates honest: no key can name a network. Plant a
 # bad template in the installed tree (the drill owns this host), expect the
 # parser to reject it BY NAME, remove it.
-badt="$HOME/.local/share/claudebox/templates/cbdrill-bad"
+badt="$HOME/.local/share/box/templates/cbdrill-bad"
 mkdir -p "$badt" && printf 'BOX_IMAGE="x"\nBOX_USER="y"\nBOX_NETWORK="lan"\n' >"$badt/box.env" && : >"$badt/user-data.yaml"
 box new --name tpl --template cbdrill-bad 2>&1 | grep -q "unknown key 'BOX_NETWORK'" \
   && ok "a template cannot name a network — BOX_NETWORK rejected by name" \
@@ -762,7 +762,7 @@ phase "M. Migration — the pre-0.4.0 → box transition (host/migrate-host.sh)"
 # tag on the OLD network — exactly what a pre-0.4.0 host carries. Then prove
 # migrate-host.sh moves it onto the new stack with its identity intact, and
 # retires the legacy stack only once it is empty.
-MIG="$HOME/.local/share/claudebox/host/migrate-host.sh"
+MIG="$HOME/.local/share/box/host/migrate-host.sh"
 if [ ! -f "$MIG" ]; then
   no "migrate-host.sh not installed — cannot drill the transition"
 else
@@ -853,5 +853,5 @@ fi
 echo
 inf "this host still has Incus, boxnet, the ACL, the profile and the firewall rules"
 inf "(plus, unless re-run: dns.mode=none and NIC filtering from the D phase)."
-inf "to undo:  ~/.local/share/claudebox/host/teardown-host.sh [--purge-incus]"
+inf "to undo:  ~/.local/share/box/host/teardown-host.sh [--purge-incus]"
 [ "$fail" -eq 0 ]

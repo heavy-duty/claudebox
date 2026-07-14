@@ -1,6 +1,6 @@
-# claudebox design
+# box design
 
-`claudebox` is a CLI that mints and manages **trust-less, network-isolated VMs
+`box` is a CLI that mints and manages **trust-less, network-isolated VMs
 with Claude Code installed**. It is infrastructure, not a project provisioner.
 
 See issue #3 for the full reframe and rationale. This doc captures the durable
@@ -16,7 +16,7 @@ design decisions.
 
 ## Boxes are strictly creds-free
 
-`claudebox new --name <n>` launches a blank box: everything installed, **no**
+`box new --name <n>` launches a blank box: everything installed, **no**
 git credentials and **no** Claude credentials. The operator authenticates
 interactively *inside* the box:
 
@@ -33,18 +33,18 @@ multi-user problem: nothing shared, nothing committed.
 Re-authing every fresh box would be toil, so authenticated state is reused via
 snapshots, not a secrets store:
 
-- `claudebox snapshot <n> [label]` — checkpoint after login + clone.
-- `claudebox new --name <n2> --from <src>[/<snapshot>]` — clone an existing box
+- `box snapshot <n> [label]` — checkpoint after login + clone.
+- `box new --name <n2> --from <src>[/<snapshot>]` — clone an existing box
   or snapshot (authed state and all). Isolation is preserved: the clone keeps
   the `claude-dev` profile + `claudenet` + ACL.
-- `claudebox restore <n> <snapshot>` — roll a box back to a checkpoint.
+- `box restore <n> <snapshot>` — roll a box back to a checkpoint.
 
 Log in once → snapshot → spin up authed boxes from it.
 
 ## The box announces itself to the agent
 
 cloud-init installs a global `~/.claude/CLAUDE.md` in every box telling Claude it
-is running in a claudebox (trust-less, ephemeral, creds-free) and to treat a
+is running in a box (trust-less, ephemeral, creds-free) and to treat a
 repo's `.claudebox/` folder as its bootstrap runbook. No "tell it" step, no host
 execution.
 
@@ -54,13 +54,13 @@ Not host-executed shell. A repo that wants to be easy to stand up in a sandbox
 ships a runbook (prose + optional scripts the agent may run). A repo that does
 not, you set up by hand. The tool enforces no contract; there is no `install`.
 
-## What claudebox owns, and what it doesn't
+## What box owns, and what it doesn't
 
 Boxes are ordinary Incus instances, tagged `user.claudebox=1`. That makes every
 Incus verb a candidate feature request — `rename`, `info`, `file push`, on
 forever — and wrapping them one at a time grows a worse `incus`. The rule:
 
-> **claudebox owns a command when it must enforce an invariant Incus cannot see:**
+> **box owns a command when it must enforce an invariant Incus cannot see:**
 > the `user.claudebox=1` boundary (never touch an instance we didn't mint), the
 > isolation stack (`claude-dev` profile + `claudenet` + ACL), or the creds-free
 > snapshot→clone workflow. Everything else is Incus's job.
@@ -76,17 +76,17 @@ The rule cuts both ways, and that's the point:
 
 Two mechanisms keep this honest.
 
-**The command table** (`CMDS` in `bin/claudebox`) is the single source of truth
+**The command table** (`CMDS` in `bin/box`) is the single source of truth
 for what exists, its synopsis, its help line, its preconditions and what runs.
 Dispatch and help are both rendered from it, so the help cannot describe a
 command that doesn't exist — the failure that produced #8. A thin verb is one
 row; a verb that can't be expressed as a row and enforces no invariant of ours
 doesn't belong in the tool.
 
-**The escape hatch** — `claudebox incus <box> -- <args...>` — resolves and
+**The escape hatch** — `box incus <box> -- <args...>` — resolves and
 tag-checks the box, then hands the rest to Incus verbatim. It means "no" to a
 proxy request is not "you can't do that", and it keeps the one rail that matters:
-you cannot aim it at an instance claudebox didn't mint. If the command can move
+you cannot aim it at an instance box didn't mint. If the command can move
 the box off the isolation stack (profile, network, device, `security.*`), it
 warns and proceeds — from there the trust boundary is yours to keep.
 
@@ -102,7 +102,7 @@ That last clause is the one that was assumed and turned out to be false, so it
 is spelled out here with the mechanism, and `drill/` tests it on every run.
 
 - **Box → host, LAN, RFC1918, CGNAT, link-local:** the `claude-isolate` ACL.
-- **Box → box: an nftables *bridge-family* rule** (`host/claudebox-firewall.sh`).
+- **Box → box: an nftables *bridge-family* rule** (`host/box-firewall.sh`).
   It cannot be an ACL rule. Two boxes on one bridge share an L2 segment, so
   their frames are *switched* between bridge ports and never traverse the
   netfilter path an L3 ACL lives on — the ACL looked airtight (it drops
