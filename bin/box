@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# claudebox — trust-less, isolated Incus VMs with Claude Code, creds-free.
+# box — trust-less, isolated Incus VMs with Claude Code, creds-free.
 # The command surface is the CMDS table below: it is the single source of truth
 # for what exists, what it looks like, what the help says, and what runs. The
 # help cannot drift from the code, because it is rendered from the same rows.
 set -euo pipefail
 
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-remote=""; mode="auto"; name=""; from=""; force=0; json=0; want_help=0
+remote=""; mode="auto"; name=""; from=""; template=""; force=0; json=0; want_help=0
 inst=""   # the resolved Incus instance, set by the 'box' precondition
 
-die() { echo "claudebox: $*" >&2; exit 1; }         # 1 = it went wrong
-usage_error() { echo "claudebox: $*" >&2; echo "try 'claudebox help'." >&2; exit 2; }  # 2 = you asked wrong
-version() { echo "claudebox $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)"; }
+die() { echo "box: $*" >&2; exit 1; }         # 1 = it went wrong
+usage_error() { echo "box: $*" >&2; echo "try 'box help'." >&2; exit 2; }  # 2 = you asked wrong
+version() { echo "box $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)"; }
 
 # ---------------------------------------------------------------------------
 # The command table.
@@ -22,7 +22,7 @@ version() { echo "claudebox $(cat "$root/VERSION" 2>/dev/null || echo unknown) (
 #
 # preconditions (comma-separated):
 #   box      first positional is a box: resolve it, and REFUSE if the instance
-#            isn't tagged user.claudebox=1 — the boundary, enforced, not assumed
+#            isn't tagged user.box=1 (or the legacy user.claudebox=1) — the boundary, enforced, not assumed
 #   arg2     a second positional is required
 #   stopped  the box must not be running
 #   confirm  destructive: prompt unless --force
@@ -34,13 +34,14 @@ version() { echo "claudebox $(cat "$root/VERSION" 2>/dev/null || echo unknown) (
 # ok message: printed on success; {} = the box, {1} = the second positional.
 #
 # Adding a thin verb is one row. If a request can't be expressed as a row and
-# doesn't enforce a claudebox invariant, it is incus's job, not ours — that is
-# what `claudebox incus` is for.
+# doesn't enforce a box invariant, it is incus's job, not ours — that is
+# what `box incus` is for.
 CMDS=(
-  "new^--name <box> [--from <src>[/<snap>]] [--vm|--container]^^Mint a box: fresh from cloud-init, or --from an existing box/snapshot^fn:cmd_new^"
+  "new^--name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container]^^Mint a box from a template (default: claude), or --from an existing box/snapshot^fn:cmd_new^"
+  "templates^^^List the templates this install can mint^fn:cmd_templates^"
   "list^[--json]^^List your boxes^fn:cmd_list^"
   "info^<box> [--json]^box^One box: state, type, IP, and its snapshot labels^fn:cmd_info^"
-  "shell^<box>^box^Open a shell in a box, as the claude user^fn:cmd_shell^"
+  "shell^<box>^box^Open a shell in a box, as its template's user^fn:cmd_shell^"
   "exec^<box> -- <cmd...>^box^Run a command inside a box^fn:cmd_exec^"
   "tmux^<box> [<session>]^box^Attach or create a tmux session in a box — survives disconnects^fn:cmd_tmux^"
   "snapshot^<box> [<label>]^box^Checkpoint a box (label defaults to manual-<epoch>)^fn:cmd_snapshot^"
@@ -52,7 +53,7 @@ CMDS=(
   "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
   "doctor^[--fix | --pin-dns]^^Is this host fit to mint boxes? Diagnose the daemon, network, DNS, isolation^fn:cmd_doctor^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
-  "help^[<command>]^^This help, or 'claudebox help <command>' for one command^fn:cmd_help^"
+  "help^[<command>]^^This help, or 'box help <command>' for one command^fn:cmd_help^"
 )
 
 cmd_row() { local r; for r in "${CMDS[@]}"; do case "$r" in "$1^"*) echo "$r"; return 0 ;; esac; done; return 1; }
@@ -69,7 +70,7 @@ field() {
     act) echo "$f_act" ;; ok) echo "$f_ok" ;;
   esac
 }
-synopsis_of() { local s; s="$(field "$1" syn)"; echo "claudebox $1${s:+ $s}"; }
+synopsis_of() { local s; s="$(field "$1" syn)"; echo "box $1${s:+ $s}"; }
 
 # Nearest command by edit distance — a typo should point somewhere, not just fail.
 suggest() {
@@ -97,20 +98,20 @@ suggest() {
 unknown_command() {
   local hint; hint="$(suggest "$1")"
   if [ -n "$hint" ]; then
-    echo "claudebox: unknown command: $1 — did you mean '$hint'?" >&2
+    echo "box: unknown command: $1 — did you mean '$hint'?" >&2
   else
-    echo "claudebox: unknown command: $1" >&2
+    echo "box: unknown command: $1" >&2
   fi
-  echo "try 'claudebox help' for the command list." >&2
+  echo "try 'box help' for the command list." >&2
   exit 2
 }
 
 usage() {
   cat <<'EOF'
-claudebox — trust-less, network-isolated Incus VMs with Claude Code, creds-free.
+box — trust-less, network-isolated Incus VMs with Claude Code, creds-free.
 
 USAGE
-  claudebox <command> [<args>] [options]
+  box <command> [<args>] [options]
 
 COMMANDS
 EOF
@@ -123,6 +124,7 @@ EOF
 
 OPTIONS
   --name <box>          Name for the new box                          (new)
+  --template <t>        Template to mint from (default: claude)       (new)
   --from <src>[/<snap>] Clone from box <src>, or from its snapshot    (new)
   --vm                  Force VM mode: the trust-less target          (new)
   --container           Force container mode: weaker isolation,       (new)
@@ -131,28 +133,32 @@ OPTIONS
   --force, -f           Delete without the confirmation prompt        (rm)
   --remote <r>          Act on Incus remote <r>                       (any)
   --help, -h            Help; after a command, help for that command
-  --version, -V         Print the claudebox version
+  --version, -V         Print the box version
 
-  Options come after the command: 'claudebox list --json', not 'claudebox --json list'.
+  Options come after the command: 'box list --json', not 'box --json list'.
 
 EXAMPLES
   # mint a box and log in inside it — the tool never handles your token
-  claudebox new --name work
-  claudebox shell work                    # then: run 'claude', then /login
+  box new --name work
+  box shell work                    # then: run 'claude', then /login
 
   # log in once, reuse forever: checkpoint the authed box, clone from it
-  claudebox snapshot work authed
-  claudebox new --name feature --from work/authed
+  box snapshot work authed
+  box new --name feature --from work/authed
+
+  # a box with nobody home — same isolation, no Claude
+  box new --name scratch --template blank
+  box templates
 
   # what have I got, and what can I clone?
-  claudebox list
-  claudebox info work
+  box list
+  box info work
 
   # run something without opening a shell
-  claudebox exec work -- git -C project pull
+  box exec work -- git -C project pull
 
-  # anything claudebox doesn't wrap: boxes are plain Incus instances
-  claudebox incus work -- config show
+  # anything box doesn't wrap: boxes are plain Incus instances
+  box incus work -- config show
 
 EXIT STATUS
   0  ok
@@ -161,15 +167,15 @@ EXIT STATUS
 
 THE MODEL
   A box carries NO credentials. You authenticate interactively inside it
-  ('claude' then /login; 'gh auth login'); claudebox never stores or injects a
+  ('claude' then /login; 'gh auth login'); box never stores or injects a
   secret. A box reaches the public internet and nothing else — there is no
   inbound path. Destroying a box loses nothing you didn't push.
 
-  claudebox owns a command when it must enforce something Incus cannot see: the
-  user.claudebox=1 boundary, the isolation stack, or the creds-free snapshot
-  workflow. Everything else is Incus's job — and 'claudebox incus' is the door.
+  box owns a command when it must enforce something Incus cannot see: the
+  user.box=1 boundary, the isolation stack, or the creds-free snapshot
+  workflow. Everything else is Incus's job — and 'box incus' is the door.
 
-  Docs: https://github.com/heavy-duty/claudebox
+  Docs: https://github.com/heavy-duty/box
 EOF
 }
 
@@ -180,29 +186,50 @@ help_cmd() {
   echo
   case "$1" in
     new) cat <<'EOF'
-Mint a box. Without --from, launches a fresh Debian 13 box from cloud-init
-(~10 min cold) with Claude Code installed and NO credentials. With --from,
-clones an existing box or one of its snapshots — Claude login, git creds and
-clones carry over, isolation is preserved.
+Mint a box. Without --from, launches a fresh box from a template (default:
+claude — Debian 13 with Claude Code installed and NO credentials, ~10 min
+cold). With --from, clones an existing box or one of its snapshots — login
+state, git creds and clones carry over, isolation is preserved, and the
+clone knows its template's user without being told.
 
   --name <box>           Required. The box's name.
+  --template <t>         Template to mint from; 'box templates' lists them.
+                         A template sets image, user and resources — never
+                         the network: every template gets the same isolation.
   --from <src>[/<snap>]  Clone src's live state, or its snapshot <snap>.
   --vm | --container     Force the mode. VM is the trust boundary and the
                          default wherever /dev/kvm exists; container mode
                          (security.nesting=true) is the fallback for hosts
                          without nested virt — weaker isolation, dev/test only.
 
-  claudebox new --name work
-  claudebox new --name feature --from work/authed
+Resources come from the template's box.env; BOX_CPU / BOX_MEMORY / BOX_DISK
+environment variables override them at mint time (a small host shrinks a box
+without editing a template it doesn't own).
+
+  box new --name work
+  box new --name scratch --template blank
+  box new --name feature --from work/authed
+EOF
+;;
+    templates) cat <<'EOF'
+List the templates this install can mint, with their descriptions. A template
+is a directory under templates/: a box.env (image, user, resources — parsed
+against an allowlist, never sourced) and a user-data.yaml (cloud-init, passed
+to Incus verbatim). Templates cannot touch the network or security flags —
+the shared box-net profile is the placement contract, so every template gets
+the same isolation.
+
+  box templates
+  box new --name scratch --template blank
 EOF
 ;;
     list) cat <<'EOF'
-List the boxes claudebox minted on this host: name, state, type, snapshot count.
-Takes no box — for one box, that's 'claudebox info <box>'.
+List the boxes box minted on this host: name, state, type, snapshot count.
+Takes no box — for one box, that's 'box info <box>'.
 
   --json   Incus's JSON, straight through, for scripting.
 
-  claudebox list
+  box list
 EOF
 ;;
     info) cat <<'EOF'
@@ -211,23 +238,23 @@ labels of its snapshots, with the --from line to clone one.
 
   --json   Incus's JSON, straight through, for scripting.
 
-  claudebox info work
+  box info work
 EOF
 ;;
     shell) cat <<'EOF'
 Open an interactive shell in a running box as the 'claude' user. This is the
 only entry path — there is no SSH and no inbound route to a box.
 
-  claudebox shell work
+  box shell work
 EOF
 ;;
     exec) cat <<'EOF'
 Run a command inside a box as the 'claude' user. Everything after -- is passed
-through untouched; the -- is required, or claudebox will read your command's
+through untouched; the -- is required, or box will read your command's
 flags as its own.
 
-  claudebox exec work -- git -C project pull
-  claudebox exec work -- claude --version
+  box exec work -- git -C project pull
+  box exec work -- claude --version
 EOF
 ;;
     tmux) cat <<'EOF'
@@ -240,35 +267,35 @@ remember.
 
 The session name (default: main) buys parallel streams in one box:
 
-  claudebox tmux work            # attach or create 'main'
-  claudebox tmux work run-1      # a second, independent stream, same box
+  box tmux work            # attach or create 'main'
+  box tmux work run-1      # a second, independent stream, same box
 
 Detach with Ctrl-b d; 'exit' ends the session. For a plain shell with none of
-tmux's semantics, 'claudebox shell' is unchanged.
+tmux's semantics, 'box shell' is unchanged.
 EOF
 ;;
     snapshot) cat <<'EOF'
 Checkpoint a box. Snapshots are how an authenticated box is reused: log in
 once, snapshot, then 'new --from <box>/<label>' as often as you like. The
-label defaults to manual-<epoch>; 'claudebox info <box>' shows the labels you
+label defaults to manual-<epoch>; 'box info <box>' shows the labels you
 have.
 
-  claudebox snapshot work authed
+  box snapshot work authed
 EOF
 ;;
     restore) cat <<'EOF'
 Roll a box back to one of its snapshots, in place. Anything in the box since
-that snapshot is lost. 'claudebox info <box>' lists the labels.
+that snapshot is lost. 'box info <box>' lists the labels.
 
-  claudebox restore work authed
+  box restore work authed
 EOF
 ;;
     rename) cat <<'EOF'
 Rename a box. Incus cannot rename a running instance, so stop it first:
 
-  claudebox down work
-  claudebox rename work archive
-  claudebox start archive
+  box down work
+  box rename work archive
+  box start archive
 
 Snapshots and Claude auth follow the box; anything referring to the old name by
 hand (a --from line, a script) does not.
@@ -279,26 +306,26 @@ Delete a box and every snapshot it has. This cannot be undone, so it asks for
 confirmation first; --force (-f) skips the prompt. With no TTY to confirm on
 (a script, a pipe), it refuses unless --force is given.
 
-  claudebox rm work
-  claudebox rm work --force
+  box rm work
+  box rm work --force
 EOF
 ;;
     incus) cat <<'EOF'
-The door out. claudebox wraps the box lifecycle and the isolation model, not
+The door out. box wraps the box lifecycle and the isolation model, not
 all of Incus — so when you need something it doesn't wrap, run Incus through
 here and keep the safety rail that matters: the box name is resolved and
-checked against the user.claudebox=1 tag, so you cannot aim it at an instance
-claudebox didn't mint.
+checked against the user.box=1 tag (or its legacy spelling), so you cannot aim it at an instance
+box didn't mint.
 
 Everything after -- is passed to incus verbatim. A literal {} is replaced with
 the resolved instance name; with no {}, the instance is appended at the end.
 The command that will run is echoed before it runs.
 
-  claudebox incus work -- config show
-  claudebox incus work -- config device add {} extra disk source=/data path=/data
+  box incus work -- config show
+  box incus work -- config device add {} extra disk source=/data path=/data
 
 Changing the profile, the network, a device or a security.* key can take a box
-outside the isolation stack. claudebox warns and then does as you asked — from
+outside the isolation stack. box warns and then does as you asked — from
 there, the trust boundary is yours to keep.
 EOF
 ;;
@@ -314,15 +341,15 @@ cloud-init error that names none of them.
   --pin-dns  pin claudenet's resolver to public upstreams and re-test
              (setup-host.sh now pins by default; this is the quick test)
 
-  claudebox doctor
-  claudebox doctor --fix
+  box doctor
+  box doctor --fix
 
 Exit 0 = clean; 1 = problems found (each printed with its fix). Read-only
 unless --fix or --pin-dns is given.
 EOF
 ;;
     status) cat <<'EOF'
-Deprecated alias for 'claudebox list'. It ignored the <box> argument it
+Deprecated alias for 'box list'. It ignored the <box> argument it
 advertised, so it was split into 'list' (all boxes) and 'info <box>' (one). It
 still works, and forwards to 'list'.
 EOF
@@ -330,8 +357,8 @@ EOF
     help) cat <<'EOF'
 Print the general help, or the help for one command.
 
-  claudebox help
-  claudebox help rename
+  box help
+  box help rename
 EOF
 ;;
     *) field "$1" sum ;;   # no prose: the table's summary is the help
@@ -349,7 +376,7 @@ cmd="${1:-help}"; shift || true
 case "$cmd" in
   -h|--help)    usage; exit 0 ;;
   -V|--version) version; exit 0 ;;
-  -*)           usage_error "options come after the command — try 'claudebox <command> $cmd ...'" ;;
+  -*)           usage_error "options come after the command — try 'box <command> $cmd ...'" ;;
 esac
 
 args=()
@@ -357,6 +384,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --name) [ $# -ge 2 ] || usage_error "--name needs a value"; name="$2"; shift 2 ;;
     --from) [ $# -ge 2 ] || usage_error "--from needs a value"; from="$2"; shift 2 ;;
+    --template) [ $# -ge 2 ] || usage_error "--template needs a value"; template="$2"; shift 2 ;;
     --remote) [ $# -ge 2 ] || usage_error "--remote needs a value"; remote="$2:"; shift 2 ;;
     --vm) mode=vm; shift ;;
     --container) mode=container; shift ;;
@@ -368,12 +396,12 @@ while [ $# -gt 0 ]; do
     # An unrecognized flag used to be swallowed as a positional — so a typo'd
     # --labl silently became a snapshot's label. Say so instead.
     -*)
-      # doctor's flags belong to the doctor script, not to claudebox
+      # doctor's flags belong to the doctor script, not to box
       if [ "$cmd" = doctor ]; then args+=("$1"); shift; continue; fi
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
-      usage_error "unknown option: $1 (see 'claudebox help $cmd')" ;;
+      usage_error "unknown option: $1 (see 'box help $cmd')" ;;
     *) args+=("$1"); shift ;;
   esac
 done
@@ -385,12 +413,16 @@ if [ "$want_help" -eq 1 ]; then show_help "$cmd"; exit 0; fi
 iname_of() { echo "$remote$1"; }   # instance name = box name
 
 # The boundary, enforced: a box is an Incus instance WE tagged. Anything else is
-# somebody's VM, and claudebox will not stop, rename or delete it by accident.
+# somebody's VM, and box will not stop, rename or delete it by accident.
 resolve_box() {
   local box="$1" i tag
   i="$(iname_of "$box")"
-  tag="$(incus config get "$i" user.claudebox 2>/dev/null || true)"
-  [ "$tag" = "1" ] || die "no such box: $box (see 'claudebox list')"
+  tag="$(incus config get "$i" user.box 2>/dev/null || true)"
+  # A pre-rename box carries user.claudebox=1 and nothing else. Snapshots of
+  # old boxes outlive the release that minted them — the legacy tag is honored
+  # forever, or an old box stops being a box at all.
+  [ "$tag" = "1" ] || tag="$(incus config get "$i" user.claudebox 2>/dev/null || true)"
+  [ "$tag" = "1" ] || die "no such box: $box (see 'box list')"
   echo "$i"
 }
 
@@ -400,7 +432,7 @@ require_stopped() {
   local i="$1" box="$2" st; st="$(box_state "$i")"
   case "$st" in
     STOPPED|Stopped|stopped) return 0 ;;
-    *) die "box '$box' is ${st:-not stopped} — Incus needs it stopped for this. Stop it: claudebox down $box" ;;
+    *) die "box '$box' is ${st:-not stopped} — Incus needs it stopped for this. Stop it: box down $box" ;;
   esac
 }
 
@@ -420,7 +452,7 @@ confirm() {   # $1 = prompt. --force, or a TTY to ask on, or we refuse.
   if [ "$force" -eq 1 ]; then return 0; fi
   [ -t 0 ] || usage_error "refusing to $1 without --force (no terminal to confirm on)"
   local reply
-  printf 'claudebox: %s? this cannot be undone. [y/N] ' "$1"
+  printf 'box: %s? this cannot be undone. [y/N] ' "$1"
   read -r reply
   case "$reply" in y|Y|yes|YES|Yes) return 0 ;; *) die "aborted." ;; esac
 }
@@ -430,14 +462,14 @@ confirm() {   # $1 = prompt. --force, or a TTY to ask on, or we refuse.
 pick_mode() {
   if [ "$mode" != auto ]; then echo "$mode"; return; fi
   if [ -n "$remote" ] || [ -e /dev/kvm ]; then echo vm; else
-    echo "claudebox: no /dev/kvm — using container mode (weaker isolation, dev/test only)" >&2
+    echo "box: no /dev/kvm — using container mode (weaker isolation, dev/test only)" >&2
     echo container
   fi
 }
 
 wait_agent() {
   local n="$1" i
-  echo "claudebox: waiting for instance agent..."
+  echo "box: waiting for instance agent..."
   for i in $(seq 1 90); do
     if incus exec "$n" -- true >/dev/null 2>&1; then return; fi
     [ "$i" -eq 90 ] && die "instance agent never came up (incus console $n to inspect)"
@@ -449,14 +481,14 @@ wait_agent() {
 # rides along inside the disk — and systemd derives its DHCP client identifier
 # (DUID) from it. Same client-id, same dnsmasq lease: two boxes, one IP address,
 # to the second on the lease timer. Every box cloned from one snapshot collided
-# on the network, which is exactly the workflow claudebox exists for (log in
+# on the network, which is exactly the workflow box exists for (log in
 # once, snapshot, clone forever).
 #
 # Truncating /etc/machine-id makes systemd mint a fresh one on the next boot, so
 # the reset costs one reboot. Do it before handing the box over, never after.
 reset_identity() {
   local i="$1"
-  echo "claudebox: giving the clone its own identity (machine-id, DHCP lease)..."
+  echo "box: giving the clone its own identity (machine-id, DHCP lease)..."
   # Do NOT truncate machine-id and reboot: systemd needs a valid one to shut
   # down cleanly, so the graceful stop hangs and the reboot never happens —
   # leaving the clone on its source's identity, which is the bug we are here to
@@ -475,10 +507,60 @@ reset_identity() {
   wait_agent "$i"
 }
 
+# Templates set image, user, resources and cloud-init — NOTHING else. The
+# box.env file is parsed against this allowlist, never sourced: sourcing would
+# hand every template arbitrary bash execution on the HOST at mint time. And
+# there is deliberately no key for a network or a security flag — the shared
+# box-net profile is the placement contract, so no template can weaken
+# isolation. 'blank' is a box with nobody home, not a box with the safety off.
+load_template() {
+  local t="$1" dir line key val
+  dir="$root/templates/$t"
+  [ -d "$dir" ] || die "no such template: $t (see 'box templates')"
+  [ -f "$dir/box.env" ] || die "template '$t' has no box.env"
+  T_DESC=""; T_IMAGE=""; T_USER=""; T_CPU=""; T_MEMORY=""; T_DISK=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|\#*) continue ;; esac
+    case "$line" in
+      *=*) key="${line%%=*}"; val="${line#*=}" ;;
+      *) die "template '$t': not a KEY=\"value\" line: $line" ;;
+    esac
+    val="${val#\"}"; val="${val%\"}"
+    case "$key" in
+      BOX_DESCRIPTION) T_DESC="$val" ;;
+      BOX_IMAGE)       T_IMAGE="$val" ;;
+      BOX_USER)        T_USER="$val" ;;
+      BOX_CPU)         T_CPU="$val" ;;
+      BOX_MEMORY)      T_MEMORY="$val" ;;
+      BOX_DISK)        T_DISK="$val" ;;
+      *) die "template '$t': unknown key '$key' — a template sets image, user and resources, nothing else (there is no key for a network, on purpose)" ;;
+    esac
+  done <"$dir/box.env"
+  [ -n "$T_IMAGE" ] && [ -n "$T_USER" ] || die "template '$t': BOX_IMAGE and BOX_USER are required"
+  # Environment overrides beat the file — this is how a small host (or the
+  # drill) shrinks a box without editing a template it doesn't own.
+  T_CPU="${BOX_CPU:-${T_CPU:-4}}"
+  T_MEMORY="${BOX_MEMORY:-${T_MEMORY:-8GiB}}"
+  T_DISK="${BOX_DISK:-${T_DISK:-60GiB}}"
+}
+
+cmd_templates() {
+  local d t desc
+  echo "TEMPLATES"
+  for d in "$root/templates"/*/; do
+    t="$(basename "$d")"
+    desc="$(grep -m1 '^BOX_DESCRIPTION=' "$d/box.env" 2>/dev/null | cut -d= -f2- | tr -d '"')"
+    printf '  %-10s %s\n' "$t" "$desc"
+  done
+  echo
+  echo "mint one:  box new --name <box> --template <template>"
+}
+
 cmd_new() {
   [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
   local instance; instance="$(iname_of "$name")"
   if [ -n "$from" ]; then
+    [ -z "$template" ] || usage_error "--from clones an existing box; its template rides along (drop --template)"
     local src="${from%%/*}" snap="" srcref
     case "$from" in */*) snap="${from#*/}" ;; esac
     srcref="$(iname_of "$src")"; [ -n "$snap" ] && srcref="$srcref/$snap"
@@ -486,49 +568,67 @@ cmd_new() {
     incus start "$instance"
     wait_agent "$instance"
     reset_identity "$instance"
-    echo "claudebox: cloned $srcref — isolation and Claude auth carry over from the source."
+    echo "box: cloned $srcref — isolation and auth state carry over from the source."
   else
-    local m extra=(); m="$(pick_mode)"
-    # shellcheck disable=SC2054 # "root,size=60GiB" is a single incus argument
-    if [ "$m" = vm ]; then extra+=(--vm --device root,size=60GiB); else extra+=(--config security.nesting=true); fi
-    incus launch images:debian/13/cloud "$instance" --profile claude-dev \
-      --config user.claudebox=1 \
-      --config cloud-init.user-data="$(cat "$root/cloud-init/user-data.yaml")" \
+    local t="${template:-claude}" m extra=()
+    load_template "$t"
+    m="$(pick_mode)"
+    # shellcheck disable=SC2054 # "root,size=..." is a single incus argument
+    if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK"); else extra+=(--config security.nesting=true); fi
+    # The template's identity is stamped ONTO the instance: which template,
+    # which user. 'incus copy' preserves user.* keys (audit B2), so a clone
+    # knows what it is without ever consulting the template again.
+    incus launch "$T_IMAGE" "$instance" --profile box-net \
+      --config user.box=1 \
+      --config user.box.template="$t" \
+      --config user.box.user="$T_USER" \
+      --config limits.cpu="$T_CPU" \
+      --config limits.memory="$T_MEMORY" \
+      --config cloud-init.user-data="$(cat "$root/templates/$t/user-data.yaml")" \
       "${extra[@]}"
     wait_agent "$instance"
-    echo "claudebox: waiting for phase-1 (cloud-init)..."
+    echo "box: waiting for phase-1 (cloud-init)..."
     # A failed cloud-init used to print a screen of dots and the word "error",
     # with nothing to act on — the box's own log holds the reason, and nobody
     # was told it existed. Show it, and leave the box up to inspect.
     if ! incus exec "$instance" -- cloud-init status --wait; then
       echo >&2
-      echo "claudebox: cloud-init FAILED in $name. What it says:" >&2
+      echo "box: cloud-init FAILED in $name. What it says:" >&2
       incus exec "$instance" -- cloud-init status --long 2>&1 | sed 's/^/  /' >&2
       echo >&2
-      echo "claudebox: the errors, from the box's log:" >&2
+      echo "box: the errors, from the box's log:" >&2
       incus exec "$instance" -- sh -c \
         "grep -iE '^(E:|Err:)|Temporary failure|Could not resolve|Unable to fetch' /var/log/cloud-init-output.log | tail -8" \
         2>/dev/null | sed 's/^/  /' >&2
       echo >&2
-      echo "claudebox: '$name' is still up — inspect it, then delete it:" >&2
-      echo "  claudebox incus $name -- exec {} -- tail -50 /var/log/cloud-init-output.log" >&2
-      echo "  claudebox rm $name" >&2
-      echo "claudebox: a failed mint is usually the HOST's fault (a wedged daemon, a dnsmasq" >&2
-      echo "  not serving, a VPN resolver the box inherits). Diagnose it:  claudebox doctor" >&2
+      echo "box: '$name' is still up — inspect it, then delete it:" >&2
+      echo "  box incus $name -- exec {} -- tail -50 /var/log/cloud-init-output.log" >&2
+      echo "  box rm $name" >&2
+      echo "box: a failed mint is usually the HOST's fault (a wedged daemon, a dnsmasq" >&2
+      echo "  not serving, a VPN resolver the box inherits). Diagnose it:  box doctor" >&2
       die "cloud-init failed — the box is incomplete, so refusing to hand it over"
     fi
   fi
-  echo "claudebox: ready — 'claudebox shell $name'. Log into Claude inside: run 'claude' then /login."
+  if [ -z "$from" ] && [ "${template:-claude}" != claude ]; then
+    echo "box: ready — 'box shell $name'."
+  else
+    echo "box: ready — 'box shell $name'. Log into Claude inside: run 'claude' then /login."
+  fi
 }
 
-# Boxes are ordinary Incus instances tagged user.claudebox=1 — that tag is the
-# only thing that makes them ours, so every read below is filtered by it and we
-# never report on (or touch) an instance claudebox didn't mint.
+# Boxes are ordinary Incus instances tagged user.box=1 — that tag is the only
+# thing that makes them ours, so every read below is filtered by it and we
+# never report on (or touch) an instance box didn't mint. Pre-rename boxes
+# carry user.claudebox=1 instead and are ours forever; a box can't hold both
+# tags via any path we mint, but the dedupe costs nothing.
 # Emits: name,state,type,snapshot-count — none of which can contain a comma or a
 # newline, so a plain -F, split is safe. (IPv4 can: a box running docker has
 # several addresses and Incus quotes them across lines. It's fetched separately.)
 boxes_csv() {
-  incus list ${remote:+"$remote"} "user.claudebox=1" --format csv --columns nstS
+  {
+    incus list ${remote:+"$remote"} "user.box=1" --format csv --columns nstS
+    incus list ${remote:+"$remote"} "user.claudebox=1" --format csv --columns nstS
+  } 2>/dev/null | awk -F, '!seen[$1]++'
 }
 
 box_ipv4() {   # first address only; strips Incus's " (iface)" suffix. "-" if none.
@@ -549,7 +649,7 @@ short_type() {
 list_all() {
   local rows; rows="$(boxes_csv)"
   if [ -z "$rows" ]; then
-    echo "claudebox: no boxes yet — create one with: claudebox new --name work" >&2
+    echo "box: no boxes yet — create one with: box new --name work" >&2
     return 0
   fi
   {
@@ -569,10 +669,10 @@ list_all() {
 # guess we can answer, not a surprise: point at the command that does want one.
 cmd_list() {
   if [ "${#args[@]}" -ge 1 ] && [ -n "${args[0]}" ]; then
-    die "list takes no box — for one box, use: claudebox info ${args[0]}"
+    die "list takes no box — for one box, use: box info ${args[0]}"
   fi
   if [ "$json" -eq 1 ]; then
-    incus list ${remote:+"$remote"} "user.claudebox=1" --format json
+    incus list ${remote:+"$remote"} "user.box=1" --format json
   else
     list_all
   fi
@@ -583,7 +683,7 @@ cmd_info() {
   if [ "$json" -eq 1 ]; then incus list "$inst" --format json; return; fi
 
   row="$(boxes_csv | awk -F, -v b="$box" '$1 == b { print; exit }')"
-  [ -n "$row" ] || die "no such box: $box (see 'claudebox list')"
+  [ -n "$row" ] || die "no such box: $box (see 'box list')"
 
   local state type snaps
   IFS=, read -r _ state type snaps <<<"$row"
@@ -595,7 +695,7 @@ cmd_info() {
     ''|0)
       echo "SNAPSHOTS  (none)"
       echo
-      echo "Take one:   claudebox snapshot $box authed"
+      echo "Take one:   box snapshot $box authed"
       return 0 ;;
   esac
   echo "SNAPSHOTS"
@@ -606,11 +706,28 @@ cmd_info() {
     printf '  %-14s%s\n' "$sname" "$taken"
   done < <(incus snapshot list "$inst" --format csv 2>/dev/null)
   echo
-  echo "Clone one:  claudebox new --name <new> --from $box/${first:-<snapshot>}"
+  echo "Clone one:  box new --name <new> --from $box/${first:-<snapshot>}"
 }
 
-cmd_shell() { incus exec "$inst" -- sudo -u claude -i; }
-cmd_exec()  { incus exec "$inst" -- sudo -u claude -i "${args[@]:1}"; }
+# Which user does a shell land in? The template stamped it on the instance at
+# mint time (user.box.user), and 'incus copy' carries user.* keys — so a clone
+# knows without consulting the template. Two subtleties, both from the audit:
+# 'incus config get' prints EMPTY + exit 0 for an unset key (B4), hence ${u:-},
+# never '||'; and a pre-rename box has no metadata but is always a Claude box,
+# so the legacy tag maps to 'claude'. The root fallback is effectively
+# unreachable (every template sets a user) — anything that truly needs root
+# goes through the 'box incus' escape hatch.
+box_user() {
+  local u
+  u="$(incus config get "$1" user.box.user 2>/dev/null || true)"
+  if [ -z "$u" ] && [ "$(incus config get "$1" user.claudebox 2>/dev/null || true)" = 1 ]; then
+    u=claude
+  fi
+  echo "${u:-root}"
+}
+
+cmd_shell() { incus exec "$inst" -- sudo -u "$(box_user "$inst")" -i; }
+cmd_exec()  { incus exec "$inst" -- sudo -u "$(box_user "$inst")" -i "${args[@]:1}"; }
 
 # A shell is a child of the exec connection: drop the terminal and everything
 # in it is SIGHUP'd — a long Claude run dies with it. tmux 'new-session -A'
@@ -622,7 +739,7 @@ cmd_tmux() {
   case "$session" in
     *[!A-Za-z0-9_-]*) usage_error "session names are letters, digits, '-' and '_' — got '$session'" ;;
   esac
-  incus exec "$inst" -- sudo -u claude -i tmux new-session -A -s "$session"
+  incus exec "$inst" -- sudo -u "$(box_user "$inst")" -i tmux new-session -A -s "$session"
 }
 
 cmd_snapshot() {
@@ -632,7 +749,7 @@ cmd_snapshot() {
 }
 
 cmd_status() {
-  echo "claudebox: 'status' is deprecated — use 'claudebox list'." >&2
+  echo "box: 'status' is deprecated — use 'box list'." >&2
   list_all
 }
 
@@ -655,8 +772,8 @@ cmd_help() { show_help "${args[0]:-}"; }
 warn_isolation() {
   case " $* " in
     *" profile "*|*" network "*|*" device "*|*security.*|*" nic "*)
-      echo "claudebox: warning: this can move the box off the isolation stack" >&2
-      echo "claudebox: (profile / network / device / security.*). The trust boundary is yours from here." >&2 ;;
+      echo "box: warning: this can move the box off the isolation stack" >&2
+      echo "box: (profile / network / device / security.*). The trust boundary is yours from here." >&2 ;;
   esac
 }
 
@@ -671,7 +788,7 @@ cmd_incus() {
   done
   [ "$replaced" -eq 1 ] || out+=("$inst")
   warn_isolation "${out[@]}"
-  echo "claudebox: incus ${out[*]}" >&2   # no magic: show what runs
+  echo "box: incus ${out[*]}" >&2   # no magic: show what runs
   incus "${out[@]}"
 }
 
@@ -696,7 +813,7 @@ case "$action" in
     incus $sub "$inst" "${args[@]:1}"
     if [ -n "$ok" ]; then
       msg="${ok//\{\}/${args[0]}}"; msg="${msg//\{1\}/${args[1]:-}}"
-      echo "claudebox: $msg"
+      echo "box: $msg"
     fi
     ;;
 esac

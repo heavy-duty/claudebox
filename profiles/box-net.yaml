@@ -1,8 +1,11 @@
-name: claude-dev
-description: Trust-less claudebox (resources + isolated NIC)
-config:
-  limits.cpu: "4"
-  limits.memory: 8GiB
+# The placement contract. Every box, whatever its template, launches with
+# exactly this profile: the isolated NIC and the root disk — and NOTHING a
+# template controls. Resources (limits.*) are per-instance, stamped from the
+# template's box.env at mint time; they do not belong here, because a profile
+# a template could point away from is a network a template could escape.
+name: box-net
+description: The box placement contract — isolated NIC + root disk, nothing else
+config: {}
 devices:
   eth0:
     type: nic

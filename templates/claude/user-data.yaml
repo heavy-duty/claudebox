@@ -13,7 +13,7 @@ write_files:
       # You are running inside a claudebox
 
       A claudebox is a trust-less, network-isolated, ephemeral VM created by the
-      `claudebox` CLI. Keep this context in mind:
+      `box` CLI (template: claude). Keep this context in mind:
 
       - **Creds-free by default.** The box starts with no Claude and no git
         credentials. If you need to authenticate Claude, the operator runs `/login`
@@ -23,7 +23,7 @@ write_files:
       - **Isolated.** The box reaches the public internet but nothing on the host or
         local network. There is no inbound path.
       - **Disposable.** Nothing here is backed up. State is discarded when the box is
-        removed; the operator persists work via git push and via `claudebox snapshot`.
+        removed; the operator persists work via git push and via `box snapshot`.
       - **Bootstrap runbook.** If the repository you are working in contains a
         `.claudebox/` folder, read it as your setup runbook — how to install
         dependencies, start services, template environment files, seed data, and

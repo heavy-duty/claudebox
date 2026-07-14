@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time host setup: install Incus, create the isolated network + ACL and
-# the claude-dev profile. Idempotent. Ubuntu 24.04 / Debian 13.
+# the box-net profile. Idempotent. Ubuntu 24.04 / Debian 13.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -129,11 +129,15 @@ sudo systemctl enable claudebox-firewall.service
 # claimed to close it. Restart re-runs the script, which is idempotent by design.
 sudo systemctl restart claudebox-firewall.service
 
-# Profile
-if ! incus profile show claude-dev >/dev/null 2>&1; then
-  incus profile create claude-dev
+# Profile — box-net, the placement contract: the isolated NIC and the root
+# disk, nothing a template controls (resources are stamped per-instance from
+# the template at mint time). A legacy claude-dev profile is left alone:
+# Incus refuses to delete an in-use profile, and pre-rename boxes reference
+# it until their last one is gone — teardown-host removes it then.
+if ! incus profile show box-net >/dev/null 2>&1; then
+  incus profile create box-net
 fi
-incus profile edit claude-dev < "$here/profiles/claude-dev.yaml"
+incus profile edit box-net < "$here/profiles/box-net.yaml"
 
 # The sibling drop is the one rule whose absence is invisible: everything keeps
 # working, and boxes can simply reach each other. Assert it landed.
@@ -144,4 +148,4 @@ else
   echo "         check: sudo /usr/local/sbin/claudebox-firewall ; sudo nft list table bridge claudebox" >&2
 fi
 
-echo "Host ready. Launch with: claudebox new --name <box>"
+echo "Host ready. Launch with: box new --name <box>"

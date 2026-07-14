@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # doctor.sh — is this host fit to mint boxes (and to drill), and if not, what
-# is wrong? Users reach it as 'claudebox doctor'; the drill runs it directly.
+# is wrong? Users reach it as 'box doctor'; the drill runs it directly.
 #
 #   bash drill/doctor.sh          # report
 #   bash drill/doctor.sh --fix    # report, then revert what the drill left behind
@@ -93,29 +93,38 @@ else
   inf "      (or: sudo systemctl restart claudebox-firewall.service)"
 fi
 
-head_ "Profile — claude-dev (the NIC is the isolation contract)"
-if incus profile show claude-dev >/dev/null 2>&1; then
-  iso="$(incus profile device get claude-dev eth0 security.port_isolation 2>/dev/null)"
-  if [ "$iso" = "true" ]; then
-    ok "security.port_isolation = true — boxes cannot reach each other at L2"
-  else
-    no "security.port_isolation is NOT set — BOXES CAN REACH EACH OTHER"
-    inf "an L3 ACL cannot do this: two boxes on one bridge are on the same L2"
-    inf "segment, so their frames are switched, never routed past the ACL."
-    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
-  fi
-  for k in security.mac_filtering security.ipv4_filtering; do
-    v="$(incus profile device get claude-dev eth0 "$k" 2>/dev/null)"
-    if [ -z "$v" ]; then
-      ok "$k unset (as shipped)"
+# box-net is the placement contract since the 0.4.0 rename; claude-dev is its
+# pre-rename ancestor and may linger while legacy boxes still reference it.
+# Check whichever exist — an unisolated NIC is a fault on either.
+PROFILES=""
+incus profile show box-net >/dev/null 2>&1 && PROFILES="box-net"
+incus profile show claude-dev >/dev/null 2>&1 && PROFILES="$PROFILES claude-dev"
+head_ "Profile — the NIC is the isolation contract"
+if [ -n "$PROFILES" ]; then
+  for p in $PROFILES; do
+    [ "$p" = claude-dev ] && inf "claude-dev is legacy (pre-rename boxes still reference it)"
+    iso="$(incus profile device get "$p" eth0 security.port_isolation 2>/dev/null)"
+    if [ "$iso" = "true" ]; then
+      ok "$p: security.port_isolation = true — boxes cannot reach each other at L2"
     else
-      no "$k = $v  ← phase D left this behind. A box can fail to get on the network at all."
-      [ "$FIX" = 1 ] && { incus profile device unset claude-dev eth0 "$k" && inf "reverted: $k unset"; }
+      no "$p: security.port_isolation is NOT set — BOXES CAN REACH EACH OTHER"
+      inf "an L3 ACL cannot do this: two boxes on one bridge are on the same L2"
+      inf "segment, so their frames are switched, never routed past the ACL."
+      inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
     fi
+    for k in security.mac_filtering security.ipv4_filtering; do
+      v="$(incus profile device get "$p" eth0 "$k" 2>/dev/null)"
+      if [ -z "$v" ]; then
+        ok "$p: $k unset (as shipped)"
+      else
+        no "$p: $k = $v  ← phase D left this behind. A box can fail to get on the network at all."
+        [ "$FIX" = 1 ] && { incus profile device unset "$p" eth0 "$k" && inf "reverted: $k unset"; }
+      fi
+    done
   done
-  inf "cpu/mem: $(incus profile get claude-dev limits.cpu 2>/dev/null)/$(incus profile get claude-dev limits.memory 2>/dev/null) (the drill lowers these on a small host)"
+  inf "resources are per-box since 0.4.0 (stamped from the template at mint; BOX_CPU/BOX_MEMORY override)"
 else
-  inf "claude-dev does not exist (a fresh host)"
+  inf "box-net does not exist (a fresh host — setup-host.sh will create it)"
 fi
 
 head_ "ACL — claude-isolate"
@@ -203,8 +212,10 @@ if [ "$PIN" = 1 ]; then
 fi
 
 head_ "Can a box actually resolve DNS?"
-# Any box will do — the drill's names are not the only boxes on a host.
-probe="$(incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null \
+# Any box will do — the drill's names are not the only boxes on a host, and
+# a pre-rename box (legacy tag) is as good a probe as a new one.
+probe="$({ incus list "user.box=1" --format csv --columns ns 2>/dev/null
+           incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null; } \
          | awk -F, '$2 == "RUNNING" { print $1; exit }')"
 if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
   # Stdin MUST be pinned to /dev/null: with a TTY on stdin, 'incus exec' goes

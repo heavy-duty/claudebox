@@ -21,7 +21,8 @@ for i in $(incus list "user.claudebox=1" -f csv -c n || true); do
   incus delete -f "$i"
 done
 
-incus profile delete claude-dev 2>/dev/null || true
+incus profile delete box-net 2>/dev/null || true
+incus profile delete claude-dev 2>/dev/null || true   # legacy, pre-rename
 incus network delete claudenet 2>/dev/null || true
 incus network acl delete claude-isolate 2>/dev/null || true
 

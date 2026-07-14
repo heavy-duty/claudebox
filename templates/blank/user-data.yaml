@@ -1,0 +1,9 @@
+#cloud-config
+# The whole template: create the user and stop. BOX_USER in box.env must
+# match the name here — the file is passed to Incus verbatim.
+users:
+  - name: dev
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+package_update: false

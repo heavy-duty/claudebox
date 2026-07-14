@@ -1,8 +1,10 @@
-# claudebox
+# claudebox — ships the `box` CLI
 
-A CLI to run **headless, trust-less Claude Code in throwaway VMs**. One command
-mints a fresh, network-isolated Incus box with Claude Code installed. The box is
-the product — you log in and work; destroying it loses nothing you didn't push.
+**Headless, trust-less, throwaway dev VMs.** One command mints a fresh,
+network-isolated Incus box from a **template**; the flagship template is
+`claude` — Debian 13 with Claude Code installed, the box this repo is named
+for. The box is the product — you log in and work; destroying it loses
+nothing you didn't push.
 
 **Strictly creds-free.** A box ships with everything installed and **no**
 credentials — no Claude token, no git PAT, nothing. You authenticate
@@ -10,11 +12,20 @@ interactively *inside* the box. The tool never stores or injects a secret. That
 means there's nothing shared or committed, so it's safe for multiple operators
 out of the box.
 
+**Templates set what's in the box, never what it can reach.** A template is
+image + user + resources + cloud-init; the network and every security flag
+live in a shared profile no template can touch, so `blank` is a box with
+nobody home — not a box with the safety off.
+
 **The tool knows nothing about your projects.** You just `git clone` inside a
 box. A repo can ship an optional [`.claudebox/`](docs/claudebox-recipe.md)
 runbook that Claude Code reads and acts on — there is no `install` step and no
 host-run setup. See [docs/claudebox-design.md](docs/claudebox-design.md) for the
 design rationale.
+
+> **0.4.0 renamed the CLI** from `claudebox` to `box` — a clean cut, no shim.
+> Existing boxes minted by any earlier version keep working under every verb
+> (their legacy tag is honored forever); only the old command name retired.
 
 ## Install
 
@@ -22,8 +33,9 @@ design rationale.
 curl -fsSL https://raw.githubusercontent.com/heavy-duty/claudebox/main/install.sh | bash
 ```
 
-Installs the tree to `~/.local/share/claudebox` and links `claudebox` onto your
-`PATH`. Re-run any time to upgrade. (No `git clone` needed.)
+Installs the tree to `~/.local/share/claudebox` and links `box` onto your
+`PATH`. Re-run any time to upgrade — upgrading from a pre-0.4.0 install also
+retires the old `claudebox` symlink. (No `git clone` needed.)
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
@@ -34,7 +46,7 @@ Installs the tree to `~/.local/share/claudebox` and links `claudebox` onto your
 Idempotent. Installs Incus and creates the isolation stack: the `claudenet` NAT
 bridge (sibling-name resolution off, resolver pinned to public upstreams —
 `BOX_DNS` overrides), the `claude-isolate` ACL (drops all RFC1918/CGNAT/
-link-local egress), the `claude-dev` profile (port-isolated NICs — boxes can't
+link-local egress), the `box-net` profile (port-isolated NICs — boxes can't
 reach each other), and firewall rules blocking instance → host. All rules
 re-apply at boot via `claudebox-firewall.service` — no post-reboot ritual. If
 the host lacks `dnsmasq-base` (Debian cloud images skip Recommends):
@@ -43,8 +55,8 @@ the host lacks `dnsmasq-base` (Debian cloud images skip Recommends):
 ## Quick start
 
 ```sh
-claudebox new --name work        # mint a fresh, creds-free box (~10 min cold)
-claudebox shell work             # enter as the claude user
+box new --name work              # mint a fresh, creds-free claude box (~10 min cold)
+box shell work                   # enter as the template's user
 ```
 
 Inside the box, authenticate as needed:
@@ -57,69 +69,92 @@ git clone https://github.com/you/project && cd project
 claude                           # if the repo has .claudebox/, Claude reads it and sets up
 ```
 
+## Templates
+
+The claude box is one template among several. A template is a directory under
+`templates/`: a `box.env` (image, user, resources — parsed against a strict
+allowlist, never sourced) and a `user-data.yaml` (cloud-init, passed to Incus
+verbatim).
+
+```sh
+box templates                            # list what this install can mint
+box new --name scratch --template blank  # bare Debian: same isolation, no tooling
+```
+
+A template **cannot** name a network, a profile, or a `security.*` flag —
+there is no key for them. Every box launches with the shared `box-net`
+profile (the isolated NIC + root disk), so every template gets the identical
+trust boundary. Resources come from the template's `box.env`;
+`BOX_CPU` / `BOX_MEMORY` / `BOX_DISK` environment variables override them at
+mint time. The template's identity (name, user) is stamped onto the instance,
+so `shell`, `exec` and `tmux` land in the right user — and a clone still
+knows, because `incus copy` carries the metadata.
+
 ## Log in once, reuse via snapshots
 
 Because every fresh box is creds-free, re-authenticating each time would be
 toil. Snapshot an authenticated box and clone from it instead:
 
 ```sh
-claudebox snapshot work authed   # checkpoint after you've logged in
-claudebox new --name feature --from work/authed   # clone the authed state into a new box
+box snapshot work authed   # checkpoint after you've logged in
+box new --name feature --from work/authed   # clone the authed state into a new box
 ```
 
 `--from` copies the whole box (Claude login, git creds, clones and all) while
-preserving isolation. You can also `claudebox new --name x --from work` to clone
-a box's live state, or roll a box back with `claudebox restore work authed`.
+preserving isolation. You can also `box new --name x --from work` to clone
+a box's live state, or roll a box back with `box restore work authed`.
 
-Forgotten what you called a checkpoint? `claudebox info work` prints the box's
+Forgotten what you called a checkpoint? `box info work` prints the box's
 snapshot labels and the `--from` line to clone one.
 
 ## Commands
 
 ```
-claudebox new --name <box> [--from <src>[/<snap>]] [--vm|--container] [--remote r]
-claudebox list                     # list your boxes
-claudebox info <box>               # one box: state, IP, snapshot labels
-claudebox shell <box>              # enter as the claude user
-claudebox exec <box> -- <cmd...>   # run a command in the box
-claudebox tmux <box> [session]     # attach/create a tmux session — survives disconnects
-claudebox snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
-claudebox restore <box> <snap>     # roll back to a snapshot
-claudebox rename <box> <new>       # rename a box (stop it first)
-claudebox down <box>               # stop (state kept; `start` resumes)
-claudebox start <box>              # start a stopped box
-claudebox rm <box> [--force]       # delete the box + its snapshots (asks first)
-claudebox incus <box> -- <args...> # escape hatch: any incus command, box resolved
-claudebox doctor [--fix|--pin-dns] # is this host fit to mint boxes? diagnose from ground truth
-claudebox status                   # deprecated alias for `list`
-claudebox help [<command>]         # full help, or one command's page
+box new --name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container] [--remote r]
+box templates                # list the templates this install can mint
+box list                     # list your boxes
+box info <box>               # one box: state, IP, snapshot labels
+box shell <box>              # enter as the template's user
+box exec <box> -- <cmd...>   # run a command in the box
+box tmux <box> [session]     # attach/create a tmux session — survives disconnects
+box snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
+box restore <box> <snap>     # roll back to a snapshot
+box rename <box> <new>       # rename a box (stop it first)
+box down <box>               # stop (state kept; `start` resumes)
+box start <box>              # start a stopped box
+box rm <box> [--force]       # delete the box + its snapshots (asks first)
+box incus <box> -- <args...> # escape hatch: any incus command, box resolved
+box doctor [--fix|--pin-dns] # is this host fit to mint boxes? diagnose from ground truth
+box status                   # deprecated alias for `list`
+box help [<command>]         # full help, or one command's page
 ```
 
 Every command takes `--help`, and options come after the command
-(`claudebox list --json`). Exit status: `0` ok, `1` it went wrong, `2` you asked
+(`box list --json`). Exit status: `0` ok, `1` it went wrong, `2` you asked
 wrong.
 
-`new` fresh-launches from cloud-init, or with `--from` clones an existing box or
-snapshot. VM mode (`--vm`, the default where `/dev/kvm` exists) is the trust-less
-target; container mode (auto-fallback, `security.nesting=true`) is for hosts
-without nested virt — weaker isolation, dev/test only.
+`new` fresh-launches from a template (default: `claude`), or with `--from`
+clones an existing box or snapshot. VM mode (`--vm`, the default where
+`/dev/kvm` exists) is the trust-less target; container mode (auto-fallback,
+`security.nesting=true`) is for hosts without nested virt — weaker isolation,
+dev/test only.
 
 ## Boxes are just Incus instances
 
-A box is an ordinary Incus instance tagged `user.claudebox=1`. claudebox wraps
-the box lifecycle and the isolation model — not all of Incus. It owns a command
+A box is an ordinary Incus instance tagged `user.box=1` (pre-0.4.0 boxes
+carry `user.claudebox=1`, honored forever). box wraps the box lifecycle and the isolation model — not all of Incus. It owns a command
 when it must enforce something Incus can't see: that tag (it will not stop,
 rename or delete an instance it didn't mint), the isolation stack, or the
 creds-free snapshot workflow. For everything else, there's the door:
 
 ```sh
-claudebox incus work -- config show        # instance name appended
-claudebox incus work -- file push x.tar {}/tmp/   # or placed with {}
+box incus work -- config show        # instance name appended
+box incus work -- file push x.tar {}/tmp/   # or placed with {}
 ```
 
 The box is resolved and tag-checked; the rest is passed to `incus` verbatim, and
 the command is echoed before it runs. If it can move the box off the isolation
-stack (profile, network, device, `security.*`), claudebox warns and proceeds —
+stack (profile, network, device, `security.*`), box warns and proceeds —
 the trust boundary is then yours to keep. See
 [docs/claudebox-design.md](docs/claudebox-design.md) for the rule and why the
 command surface is a table.
@@ -147,8 +182,8 @@ enforces it, layer by layer:
   the host's public IPs. Entry is `incus exec` over the local socket only —
   **no inbound path exists.**
 
-The VM is the trust boundary: Claude can run arbitrary code inside and touch
-nothing you care about.
+The VM is the trust boundary: whatever runs inside — Claude, or anything a
+template ships — can run arbitrary code and touch nothing you care about.
 
 ### Measured, not claimed
 
@@ -184,7 +219,7 @@ host-executed script. See [docs/claudebox-recipe.md](docs/claudebox-recipe.md).
 ```sh
 ~/.local/share/claudebox/host/teardown-host.sh               # boxes, network, ACL, profile, firewall
 ~/.local/share/claudebox/host/teardown-host.sh --purge-incus # ...and Incus itself
-rm -rf ~/.local/share/claudebox ~/.local/bin/claudebox       # the CLI
+rm -rf ~/.local/share/claudebox ~/.local/bin/box             # the CLI
 ```
 
 ## Non-goals
