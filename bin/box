@@ -1005,14 +1005,37 @@ cmd_expose() {
   incus network acl rule add box-isolate ingress action=allow \
     "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1 || true
 
+  # A VM's proxy device needs NAT mode — the plain userspace forkproxy is a
+  # container thing. NAT mode DNATs host:port → instance:port in netfilter, and
+  # it REQUIRES the instance's NIC to hold a static address, so pin the lease
+  # the box already has. Pinning also fixes the restart caveat: the exposure
+  # survives a reboot instead of pointing at a lease the box no longer owns.
+  local err; err="$(mktemp)"
+  if ! incus config device override "$inst" eth0 "ipv4.address=$ip" >/dev/null 2>"$err"; then
+    # Already overridden (a second exposure on the same box) is fine.
+    grep -qi 'already' "$err" || {
+      echo "box: could not pin the box's address (needed for a VM proxy):" >&2
+      sed 's/^/  /' "$err" >&2; rm -f "$err"
+      incus network acl rule remove box-isolate ingress action=allow \
+        "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+      die "expose failed"
+    }
+  fi
+
   if incus config device add "$inst" "$dev" proxy \
-       "listen=tcp:127.0.0.1:$hport" "connect=tcp:$ip:$port" bind=host >/dev/null; then
+       "listen=tcp:127.0.0.1:$hport" "connect=tcp:$ip:$port" \
+       bind=host nat=true >/dev/null 2>"$err"; then
+    rm -f "$err"
     echo "box: 127.0.0.1:$hport → $box:$port"
     echo "box: (the in-box server must listen on 0.0.0.0:$port, not only its own loopback)"
   else
+    # NEVER swallow incus's reason — the first cut of this verb died with a bare
+    # "could not add the proxy device" and told the drill nothing.
+    echo "box: incus refused the proxy device:" >&2
+    sed 's/^/  /' "$err" >&2; rm -f "$err"
     incus network acl rule remove box-isolate ingress action=allow \
       "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
-    die "could not add the proxy device"
+    die "expose failed"
   fi
 }
 

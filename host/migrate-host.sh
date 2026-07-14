@@ -47,7 +47,17 @@ require_new_stack() {
   incus profile show box-net >/dev/null 2>&1 || die "box-net profile does not exist — run host/setup-host.sh first"
 }
 
-legacy_boxes() { incus list "user.claudebox=1" -f csv -c n 2>/dev/null; }
+# A box is LEGACY only if it still carries the old tag and has NOT been
+# re-homed. Counting every user.claudebox=1 box was a bug: re-homing ADDS
+# user.box=1 without removing the old tag, so --retire-legacy saw its own
+# migrated boxes as un-migrated and refused forever.
+legacy_boxes() {
+  local b
+  for b in $(incus list "user.claudebox=1" -f csv -c n 2>/dev/null); do
+    [ "$(incus config get "$b" user.box 2>/dev/null)" = 1 ] && continue   # already re-homed
+    echo "$b"
+  done
+}
 
 # Re-home one box. Legacy boxes are all claude boxes (the only template the old
 # tool minted), so the new metadata is the claude template's.
@@ -86,6 +96,12 @@ rehome_one() {
   done
   [ -n "$ip" ] || { warn "$b: never got a 10.88 address after restart — re-home INCOMPLETE, inspect: incus console $b"; return 1; }
   if incus exec "$b" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1; then
+    # LAST, and only once the move is VERIFIED: drop the legacy tag. Until this
+    # point the box wears both tags, so a failure anywhere above leaves it a
+    # valid box under one name or the other — never orphaned. Now it is simply
+    # a box, and --retire-legacy can see the old stack is empty.
+    incus config unset "$b" user.claudebox >/dev/null 2>&1 \
+      || warn "$b: migrated, but the legacy tag could not be removed — retire-legacy will still see it"
     say "$b re-homed: on boxnet ($ip), resolves + reachable, authed state preserved"
     return 0
   fi

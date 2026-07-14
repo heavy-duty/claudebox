@@ -57,9 +57,11 @@ inf()  { printf '        %s\n' "$*"; }
 phase(){ printf '\n\033[1m══ %s\033[0m\n' "$*"; }
 aud()  { audit+=("$*"); }                       # an answer for the #15 audit
 
-wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
+wait_box() {   # poll until exec answers (the VM agent can take a while), ~4 min
+  # 2 min was too short: run 17's legacy box came up AFTER the window closed —
+  # the drill called it dead and then every migration check on it passed.
   local b="$1" _i
-  for _i in $(seq 1 60); do
+  for _i in $(seq 1 120); do
     box exec "$b" -- true >/dev/null 2>&1 && return 0
     sleep 2
   done
@@ -465,6 +467,16 @@ for t in codex grok; do
     else
       no "$t: '$bin --version' FAILED via exec — not installed, or not on exec's PATH (the claude template's #15 bug)"
       inf "PATH as exec sees it: $(timeout -k 5 20 box exec "$t" -- printenv PATH </dev/null 2>/dev/null)"
+      # Do not throw the evidence away — say WHAT the installer actually left.
+      # Do NOT throw the evidence away — say what the installer actually left
+      # behind, and what its own log said. Guessing at an upstream installer's
+      # layout is how this FAILed in the first place.
+      inf "anything named '$t' on disk:"
+      in_box "$t" sh -c "find /home /opt /usr/local /usr/bin -maxdepth 4 \\( -type f -o -type l \\) -iname '*$t*' 2>/dev/null | head -8" \
+        | sed 's/^/          /'
+      inf "what its cloud-init said:"
+      in_box "$t" sh -c "grep -iE '$t|install' /var/log/cloud-init-output.log 2>/dev/null | tail -8" \
+        | sed 's/^/          /'
     fi
     box rm "$t" --force >/dev/null 2>&1 && ok "$t box removed" || no "$t: could not remove"
   else

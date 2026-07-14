@@ -50,10 +50,31 @@ runcmd:
   # binary under the invoking user's home, so run it AS grok, not root.
   - sudo -u grok bash -lc 'curl -fsSL https://x.ai/cli/install.sh | bash'
   # 'box exec <b> -- grok-build …' runs a NON-interactive shell that reads no
-  # rc files. Find whatever the installer dropped and symlink it onto the
-  # system PATH — the same fix the claude template needed. If the installer's
-  # binary name changes upstream, this glob is the one line to update.
+  # rc files, so whatever the installer dropped must be symlinked onto the
+  # system PATH — the same fix the claude template needed (#15).
+  #
+  # The FIRST cut of this hunted only for a regular file named exactly
+  # 'grok-build' under /home/grok, and found nothing: the drill's grok box
+  # minted fine and then failed '--version'. Two lessons, both applied here:
+  # an installer's drop may be a SYMLINK (so -type f alone misses it), and its
+  # binary name is upstream's to choose (so try the plausible names, and any
+  # 'grok*' executable, before giving up). Then SAY what was found — a silent
+  # miss is what cost the last run.
   - |
-    bin="$(find /home/grok -maxdepth 4 -type f -name 'grok-build' 2>/dev/null | head -1)"
-    [ -n "$bin" ] && ln -sf "$bin" /usr/local/bin/grok-build || echo "grok-build binary not found post-install — check x.ai/cli install layout" >&2
+    bin=""
+    for cand in grok-build grok; do
+      for d in /home/grok/.local/bin /home/grok/.grok/bin /home/grok/bin /usr/local/bin /opt; do
+        [ -x "$d/$cand" ] && { bin="$d/$cand"; break 2; }
+      done
+    done
+    [ -n "$bin" ] || bin="$(find /home/grok /opt -maxdepth 5 \( -type f -o -type l \) -iname 'grok*' -perm -u+x 2>/dev/null | head -1)"
+    if [ -n "$bin" ]; then
+      ln -sf "$bin" /usr/local/bin/grok-build
+      ln -sf "$bin" /usr/local/bin/grok
+      echo "grok: linked $bin -> /usr/local/bin/{grok-build,grok}"
+    else
+      echo "grok: NO BINARY FOUND after x.ai/cli/install.sh — the box is up but the CLI is not on PATH." >&2
+      echo "grok: what the installer left under /home/grok:" >&2
+      find /home/grok -maxdepth 4 \( -type f -o -type l \) -perm -u+x 2>/dev/null | head -20 >&2
+    fi
   - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/grok/.bashrc
