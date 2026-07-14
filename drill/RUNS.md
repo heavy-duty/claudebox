@@ -92,9 +92,23 @@ Read this before adding a probe. Every one of these cost a run.
    flip, in a different costume: **check that the thing you are measuring with
    still works before you trust what it tells you.**
 
+10. **The drill mutates the host, and those mutations outlive an aborted run.**
+    Phase D sets `dns.mode=none` and NIC filtering. If the run dies before
+    reverting them, **every box minted afterwards has no DNS** — cloud-init
+    fails with `Temporary failure resolving deb.debian.org` — and the next run
+    reports that breakage as a *finding*. This is the worst failure mode in the
+    whole list: a poisoned host does not fail honestly, it produces confident
+    wrong answers. Hence the `trap`-armed revert, the verified (not
+    `/dev/null`-ed) unset, the refusal to start on a dirty host, and
+    `doctor.sh`.
+
 ## Diagnosing a stall
 
-The drill narrates every long step. If it goes quiet, open a second terminal:
+**Start here: `bash drill/doctor.sh`** — it answers "what state is this host
+actually in?" (network, profile, ACL, leftover boxes, and whether a box can
+still resolve DNS), and `--fix` reverts what the drill left behind.
+
+If the drill goes quiet mid-run, open a second terminal:
 
 ```sh
 # what is actually running / blocked?
@@ -135,6 +149,7 @@ No listener is needed, and none should be started: see trap 3.
 | 4 | hung at C4 | trap 2 again, this time via `claudebox exec` in a command substitution |
 | 5 | stalled in host setup | trap 6 — silence through apt/sudo |
 | 6 | stalled in `setup-host.sh` | trap 8 — cleanup ran *after* setup. Recovering the host exposed **two real claudebox bugs**: `setup-host` deadlocks the incus daemon when re-run with boxes up (#26), and clones inherit their source's machine-id → same DHCP lease → **two boxes, one IP** (#27) |
+| 8 | aborted: cold mint failed | `cloud-init status: error` — **the box had no DNS at all**. Run 7's phase-D `dns.mode=none` survived the run and poisoned the host. Trap 10, and the reason `doctor.sh` exists |
 | 7 | 41/49 | the clone-identity fix could not reboot (systemd needs a valid machine-id to shut down cleanly), so it never took effect → the IP collision persisted → the box lost networking → **phase D reported a false design veto against #16**. Trap 9. Also found: `dir` storage makes every clone a full disk copy (#29) |
 
 **The instrument has been less reliable than the thing it measures.** Four of

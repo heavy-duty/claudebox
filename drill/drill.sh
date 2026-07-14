@@ -202,6 +202,22 @@ KEEP="${KEEP:-0}"
 # filtering) in place, so setup would be converging against a moving target.
 # Take the boxes down and revert the mutations FIRST; then the host is a
 # clean-ish slate and setup-host is the no-op it should be.
+# A host still carrying a previous run's phase-D mutations mints boxes with no
+# DNS, and then reports the resulting breakage as a finding. Refuse to run.
+dirty=""
+[ -n "$(incus network get claudenet dns.mode 2>/dev/null)" ] && dirty="dns.mode"
+[ -n "$(incus profile device get claude-dev eth0 security.ipv4_filtering 2>/dev/null)" ] && dirty="$dirty ipv4_filtering"
+[ -n "$(incus profile device get claude-dev eth0 security.mac_filtering 2>/dev/null)" ] && dirty="$dirty mac_filtering"
+if [ -n "$dirty" ]; then
+  note "this host still carries a previous run's phase-D mutations:$dirty — reverting them now"
+  incus network unset claudenet dns.mode >/dev/null 2>&1
+  incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
+  incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
+  incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
+  still="$(incus network get claudenet dns.mode 2>/dev/null)"
+  [ -n "$still" ] && { echo "drill: could not revert dns.mode ('$still'). run: bash drill/doctor.sh --fix" >&2; exit 1; }
+fi
+
 inf "clearing anything a previous run left behind…"
 # One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
 # which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
@@ -542,6 +558,21 @@ else
   aud "A7 inbound host→box: NOT PROBED"
 fi
 
+# The mutations below OUTLIVE the run if it dies: dns.mode=none leaves every
+# box minted afterwards with NO DNS at all (cloud-init then fails with
+# "Temporary failure resolving deb.debian.org"), and NIC filtering can stop a
+# box getting on the network. A poisoned host does not fail the NEXT run
+# honestly — it produces confident, wrong answers, which is how a false design
+# veto against #16 got posted. So arm the revert BEFORE making the first
+# mutation, and let it fire on any exit, including Ctrl-C.
+revert_phase_d() {
+  incus network unset claudenet dns.mode >/dev/null 2>&1
+  incus profile device unset claude-dev eth0 security.mac_filtering >/dev/null 2>&1
+  incus profile device unset claude-dev eth0 security.ipv4_filtering >/dev/null 2>&1
+  incus network acl rule remove claude-isolate egress action=drop destination=@internal >/dev/null 2>&1
+}
+trap 'revert_phase_d' EXIT INT TERM
+
 # ===========================================================================
 phase "D. Hardening rehearsal — #16's changes, applied live (#15 section B)"
 # ===========================================================================
@@ -633,6 +664,18 @@ else
 fi
 
 fi   # end of the BASELINE_OK guard around phase D
+
+# Revert now, and CHECK it — the old code fired these into /dev/null and moved
+# on, so a failed unset was indistinguishable from a successful one.
+revert_phase_d
+d="$(incus network get claudenet dns.mode 2>/dev/null)"
+f="$(incus profile device get claude-dev eth0 security.ipv4_filtering 2>/dev/null)"
+if [ -z "$d" ] && [ -z "$f" ]; then
+  ok "phase D reverted: dns.mode and NIC filtering are back to shipped defaults"
+else
+  no "PHASE D DID NOT REVERT (dns.mode='$d' ipv4_filtering='$f') — this host will poison the next run"
+  inf "fix it with: bash drill/doctor.sh --fix"
+fi
 
 # ===========================================================================
 if [ "$KEEP" = 1 ]; then
