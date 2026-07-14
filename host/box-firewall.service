@@ -1,12 +1,12 @@
 [Unit]
-Description=Re-apply claudebox host firewall rules
+Description=Re-apply box host firewall rules
 # After docker so DOCKER-USER exists; still fine if docker is absent.
 After=network.target incus.service docker.service
 Wants=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/sbin/claudebox-firewall
+ExecStart=/usr/local/sbin/box-firewall
 
 [Install]
 WantedBy=multi-user.target

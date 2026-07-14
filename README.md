@@ -23,9 +23,13 @@ runbook that Claude Code reads and acts on — there is no `install` step and no
 host-run setup. See [docs/claudebox-design.md](docs/claudebox-design.md) for the
 design rationale.
 
-> **0.4.0 renamed the CLI** from `claudebox` to `box` — a clean cut, no shim.
-> Existing boxes minted by any earlier version keep working under every verb
-> (their legacy tag is honored forever); only the old command name retired.
+> **0.4.0 is a clean cut**: the CLI is `box` (no `claudebox` shim), the host
+> stack is `boxnet`/`box-isolate`/`box-firewall` on 10.88.0.0/24, and the
+> default template is `blank`. Existing boxes minted by any earlier version
+> keep working under every verb — their legacy tag is honored forever, and
+> their old `claudenet` (10.87) is left standing beside the new bridge. To
+> strip a host of both generations at once: `host/teardown-host.sh`, or
+> `drill/wipe.sh` for the scorched-earth version.
 
 ## Install
 
@@ -43,19 +47,19 @@ retires the old `claudebox` symlink. (No `git clone` needed.)
 ~/.local/share/claudebox/host/setup-host.sh   # run twice if it adds you to incus-admin (re-login between)
 ```
 
-Idempotent. Installs Incus and creates the isolation stack: the `claudenet` NAT
+Idempotent. Installs Incus and creates the isolation stack: the `boxnet` NAT
 bridge (sibling-name resolution off, resolver pinned to public upstreams —
-`BOX_DNS` overrides), the `claude-isolate` ACL (drops all RFC1918/CGNAT/
+`BOX_DNS` overrides), the `box-isolate` ACL (drops all RFC1918/CGNAT/
 link-local egress), the `box-net` profile (port-isolated NICs — boxes can't
 reach each other), and firewall rules blocking instance → host. All rules
-re-apply at boot via `claudebox-firewall.service` — no post-reboot ritual. If
+re-apply at boot via `box-firewall.service` — no post-reboot ritual. If
 the host lacks `dnsmasq-base` (Debian cloud images skip Recommends):
 `sudo apt-get install -y dnsmasq-base`.
 
 ## Quick start
 
 ```sh
-box new --name work              # mint a fresh, creds-free claude box (~10 min cold)
+box new --name work --template claude   # a creds-free Claude box (~10 min cold)
 box shell work                   # enter as the template's user
 ```
 
@@ -77,8 +81,9 @@ allowlist, never sourced) and a `user-data.yaml` (cloud-init, passed to Incus
 verbatim).
 
 ```sh
-box templates                            # list what this install can mint
-box new --name scratch --template blank  # bare Debian: same isolation, no tooling
+box templates                    # list what this install can mint
+box new --name scratch           # the DEFAULT template is blank: bare Debian,
+                                 #   same isolation, nobody home
 ```
 
 A template **cannot** name a network, a profile, or a `security.*` flag —
@@ -165,10 +170,10 @@ The contract: **a box reaches the public internet and nothing else.** Not the
 host, not your LAN, not another box, not even another box's *name*. What
 enforces it, layer by layer:
 
-- **Dedicated NAT bridge** `claudenet`, IPv6 off. Every rule below is
+- **Dedicated NAT bridge** `boxnet`, IPv6 off. Every rule below is
   IPv4-only, so IPv6 would be an uncovered path — off is part of the
   contract, not a default.
-- **`claude-isolate` ACL** — drops all egress to private space (RFC1918,
+- **`box-isolate` ACL** — drops all egress to private space (RFC1918,
   CGNAT, link-local), with a single carve-out to the gateway so DNS works.
 - **Sibling isolation, at L2** — two boxes on one bridge are *switched*,
   never routed, so no L3 rule can separate them (learned the hard way; see
@@ -199,6 +204,8 @@ history, including every trap that fooled a run into a wrong verdict.
 ```sh
 bash drill/doctor.sh    # read-only: is this host healthy and the stack live?
 bash drill/drill.sh     # FULL end-to-end — mutates the host; use a machine you own
+bash drill/wipe.sh      # scorched earth: strip BOTH name generations, images and
+                        #   (--purge-storage) the pool, so a run starts from bare
 ```
 
 The doctor reads ground truth, not config claims — the kernel's `isolated on`

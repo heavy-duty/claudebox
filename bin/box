@@ -37,7 +37,7 @@ version() { echo "box $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)
 # doesn't enforce a box invariant, it is incus's job, not ours — that is
 # what `box incus` is for.
 CMDS=(
-  "new^--name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container]^^Mint a box from a template (default: claude), or --from an existing box/snapshot^fn:cmd_new^"
+  "new^--name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container]^^Mint a box from a template (default: blank), or --from an existing box/snapshot^fn:cmd_new^"
   "templates^^^List the templates this install can mint^fn:cmd_templates^"
   "list^[--json]^^List your boxes^fn:cmd_list^"
   "info^<box> [--json]^box^One box: state, type, IP, and its snapshot labels^fn:cmd_info^"
@@ -124,7 +124,7 @@ EOF
 
 OPTIONS
   --name <box>          Name for the new box                          (new)
-  --template <t>        Template to mint from (default: claude)       (new)
+  --template <t>        Template to mint from (default: blank)        (new)
   --from <src>[/<snap>] Clone from box <src>, or from its snapshot    (new)
   --vm                  Force VM mode: the trust-less target          (new)
   --container           Force container mode: weaker isolation,       (new)
@@ -138,16 +138,16 @@ OPTIONS
   Options come after the command: 'box list --json', not 'box --json list'.
 
 EXAMPLES
-  # mint a box and log in inside it — the tool never handles your token
-  box new --name work
+  # mint a claude box and log in inside it — the tool never handles your token
+  box new --name work --template claude
   box shell work                    # then: run 'claude', then /login
 
   # log in once, reuse forever: checkpoint the authed box, clone from it
   box snapshot work authed
   box new --name feature --from work/authed
 
-  # a box with nobody home — same isolation, no Claude
-  box new --name scratch --template blank
+  # the default: a blank box — same isolation, nobody home
+  box new --name scratch
   box templates
 
   # what have I got, and what can I clone?
@@ -187,10 +187,11 @@ help_cmd() {
   case "$1" in
     new) cat <<'EOF'
 Mint a box. Without --from, launches a fresh box from a template (default:
-claude — Debian 13 with Claude Code installed and NO credentials, ~10 min
-cold). With --from, clones an existing box or one of its snapshots — login
-state, git creds and clones carry over, isolation is preserved, and the
-clone knows its template's user without being told.
+blank — bare Debian 13, nobody home; --template claude gets Claude Code
+installed, creds-free, ~10 min cold). With --from, clones an existing box or
+one of its snapshots — login state, git creds and clones carry over,
+isolation is preserved, and the clone knows its template's user without
+being told.
 
   --name <box>           Required. The box's name.
   --template <t>         Template to mint from; 'box templates' lists them.
@@ -206,8 +207,8 @@ Resources come from the template's box.env; BOX_CPU / BOX_MEMORY / BOX_DISK
 environment variables override them at mint time (a small host shrinks a box
 without editing a template it doesn't own).
 
-  box new --name work
-  box new --name scratch --template blank
+  box new --name scratch                     # blank, the default
+  box new --name work --template claude
   box new --name feature --from work/authed
 EOF
 ;;
@@ -331,14 +332,14 @@ EOF
 ;;
     doctor) cat <<'EOF'
 Answer "is this host fit to mint boxes?" from ground truth, not config claims:
-is the Incus daemon answering, is a dnsmasq actually serving claudenet, does
+is the Incus daemon answering, is a dnsmasq actually serving boxnet, does
 the kernel's bridge port say 'isolated on', is the resolver pinned or is a
 host VPN's DNS leaking into boxes, can a box actually resolve names. Every
 check exists because its fault has happened — most kill a cold mint with a
 cloud-init error that names none of them.
 
   --fix      also revert what a drill run may have left behind
-  --pin-dns  pin claudenet's resolver to public upstreams and re-test
+  --pin-dns  pin boxnet's resolver to public upstreams and re-test
              (setup-host.sh now pins by default; this is the quick test)
 
   box doctor
@@ -570,7 +571,7 @@ cmd_new() {
     reset_identity "$instance"
     echo "box: cloned $srcref — isolation and auth state carry over from the source."
   else
-    local t="${template:-claude}" m extra=()
+    local t="${template:-blank}" m extra=()
     load_template "$t"
     m="$(pick_mode)"
     # shellcheck disable=SC2054 # "root,size=..." is a single incus argument
@@ -609,10 +610,15 @@ cmd_new() {
       die "cloud-init failed — the box is incomplete, so refusing to hand it over"
     fi
   fi
-  if [ -z "$from" ] && [ "${template:-claude}" != claude ]; then
-    echo "box: ready — 'box shell $name'."
-  else
+  # The login hint belongs to the claude template — read the EFFECTIVE
+  # template off the instance, so a clone of a claude box gets it too and a
+  # blank box is not told to run a binary it doesn't have.
+  local eff; eff="$(incus config get "$instance" user.box.template 2>/dev/null || true)"
+  [ -z "$eff" ] && [ "$(incus config get "$instance" user.claudebox 2>/dev/null || true)" = 1 ] && eff=claude
+  if [ "$eff" = claude ]; then
     echo "box: ready — 'box shell $name'. Log into Claude inside: run 'claude' then /login."
+  else
+    echo "box: ready — 'box shell $name'."
   fi
 }
 

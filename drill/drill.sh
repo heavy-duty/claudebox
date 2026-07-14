@@ -86,20 +86,20 @@ in_box() {
   return "$rc"
 }
 
-# The box's address ON CLAUDENET. Three ways to get this wrong, all of them hit:
+# The box's address ON BOXNET. Three ways to get this wrong, all of them hit:
 #   · 'incus list' name filters are NOT regexes ("^b$" silently matches nothing)
 #   · its CSV quotes a multi-address box across lines
 #   · and the interface is NOT called eth0. The PROFILE names the device eth0,
 #     but inside a VM guest predictable naming renames it enp5s0. Six runs of
 #     A3 "not probed" were this, not the network.
-# So: read it from inside the box, and select by SUBNET (10.87.x, what claudenet
+# So: read it from inside the box, and select by SUBNET (10.88.x, what boxnet
 # hands out) rather than by interface name — docker0 (172.17.x) is the decoy,
 # and the NIC's name is the guest's business, not ours.
-claudenet_ip() {
+boxnet_ip() {
   local b="$1" ip _i
   for _i in $(seq 1 15); do
     ip="$(in_box "$b" ip -4 -o addr show scope global \
-          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i+1) ~ /^10\.87\./) { split($(i+1), a, "/"); print a[1]; exit } }')"
+          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i+1) ~ /^10\.88\./) { split($(i+1), a, "/"); print a[1]; exit } }')"
     [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
     sleep 2
   done
@@ -143,9 +143,9 @@ if [ "${IN_GROUP:-0}" != 1 ]; then
     cat <<EOF
 This will, ON THIS HOST ($(hostname)):
   · install Incus and a systemd unit
-  · create a network (claudenet), an ACL, and a profile
+  · create a network (boxnet), an ACL, and a profile
   · rewrite firewall rules (nft or UFW, and Docker's DOCKER-USER chain)
-  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy
+  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl
   · mutate the network and profile mid-run to rehearse the #16 hardening
 Only do this on a machine you can format.
 EOF
@@ -161,7 +161,7 @@ EOF
     || { echo "install failed"; exit 1; }
   export PATH="$HOME/.local/bin:$PATH"
 
-  phase "Host setup (Incus, claudenet, ACL, profile, firewall)"
+  phase "Host setup (Incus, boxnet, ACL, profile, firewall)"
   # setup-host.sh installs nftables itself when neither nft nor UFW exists
   # (a stock Debian 13 cloud image ships neither). This guard is a tripwire:
   # if it fires, that fix regressed.
@@ -229,11 +229,11 @@ fi
 inf "clearing anything a previous run left behind…"
 # One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
 # which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
-for n in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
+for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl; do
   timeout -k 5 60 incus delete -f "$n" >/dev/null 2>&1
 done
-if incus network show claudenet >/dev/null 2>&1; then
-  timeout -k 5 30 incus network unset claudenet dns.mode >/dev/null 2>&1
+if incus network show boxnet >/dev/null 2>&1; then
+  timeout -k 5 30 incus network unset boxnet dns.mode >/dev/null 2>&1
 fi
 for p in box-net claude-dev; do
   if incus profile show "$p" >/dev/null 2>&1; then
@@ -248,10 +248,10 @@ inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
 if ! timeout -k 10 300 ~/.local/share/claudebox/host/setup-host.sh; then
   echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
   echo "  it should take seconds on a host that already has incus. usual causes:" >&2
-  echo "    · instances still attached to claudenet while its ACLs are reconfigured" >&2
+  echo "    · instances still attached to boxnet while its ACLs are reconfigured" >&2
   echo "        incus list" >&2
   echo "    · the firewall unit not completing" >&2
-  echo "        systemctl status claudebox-firewall.service --no-pager" >&2
+  echo "        systemctl status box-firewall.service --no-pager" >&2
   echo "    · the incus daemon wedged by an earlier aborted run" >&2
   echo "        systemctl status incus --no-pager; journalctl -u incus -n 30 --no-pager" >&2
   exit 1
@@ -370,10 +370,53 @@ else
     && ok "empty host: 'no boxes yet', exit 0" || no "empty-host message wrong"
 fi
 
-printf '\n  minting a box (cold, ~10 min)…\n'
+# --- templates: the mint surface is itself a surface to test ----------------
+box templates 2>/dev/null | grep -q '^  blank' && box templates 2>/dev/null | grep -q '^  claude' \
+  && ok "templates: lists blank and claude" || no "templates listing is missing a shipped template"
+box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
+  && ok "unknown template refused, points at 'box templates'" || no "an unknown template was not refused"
+# The one rule that keeps templates honest: no key can name a network. Plant a
+# bad template in the installed tree (the drill owns this host), expect the
+# parser to reject it BY NAME, remove it.
+badt="$HOME/.local/share/claudebox/templates/cbdrill-bad"
+mkdir -p "$badt" && printf 'BOX_IMAGE="x"\nBOX_USER="y"\nBOX_NETWORK="lan"\n' >"$badt/box.env" && : >"$badt/user-data.yaml"
+box new --name tpl --template cbdrill-bad 2>&1 | grep -q "unknown key 'BOX_NETWORK'" \
+  && ok "a template cannot name a network — BOX_NETWORK rejected by name" \
+  || no "a box.env key outside the allowlist was ACCEPTED — a template could weaken isolation"
+rm -rf "$badt"
+
+printf '\n  minting a blank box (the DEFAULT template — no tooling, fast)…\n'
 t0=$SECONDS
-if box new --name drill >/tmp/new.log 2>&1; then
-  ok "box new --name drill  ($((SECONDS - t0))s)"
+if box new --name tpl >/tmp/tpl.log 2>&1; then
+  ok "box new --name tpl, no --template  ($((SECONDS - t0))s)"
+  tt="$(incus config get tpl user.box.template 2>/dev/null)"
+  [ "$tt" = blank ] && ok "the default template is blank (user.box.template=blank)" \
+                    || no "default template is '${tt:-<unset>}' — expected blank"
+  [ "$(incus config get tpl user.box.user 2>/dev/null)" = dev ] \
+    && ok "template user stamped on the instance (user.box.user=dev)" || no "user.box.user not stamped"
+  incus config show tpl 2>/dev/null | grep -q '^- box-net' \
+    && ok "blank box launched with the box-net profile — same placement contract" \
+    || no "blank box is NOT on box-net — a template picked its own placement?!"
+  u="$(timeout -k 5 30 box exec tpl -- whoami </dev/null 2>/dev/null | tr -d '[:space:]')"
+  [ "$u" = dev ] && ok "exec lands in the template's user ($u) — nothing hardcodes claude" \
+                 || no "exec landed in '${u:-<nothing>}', expected dev"
+  timeout -k 5 30 box exec tpl -- sh -lc 'command -v claude' </dev/null >/dev/null 2>&1 \
+    && no "the blank box has claude installed — 'blank' is not blank" \
+    || ok "blank box has no claude — nobody home, as designed"
+  box_pings tpl 1.1.1.1 && ok "blank box reaches the internet (same egress as any template)" \
+                        || no "blank box has NO egress — isolation parity broken"
+  in_box tpl getent hosts deb.debian.org >/dev/null 2>&1 \
+    && ok "blank box resolves public names (pinned resolver serves every template)" \
+    || no "blank box cannot resolve — DNS parity broken"
+  box rm tpl --force >/dev/null 2>&1 && ok "blank box removed" || no "could not remove the blank box"
+else
+  no "blank mint FAILED — tail: $(tail -3 /tmp/tpl.log | tr '\n' ' ')"
+fi
+
+printf '\n  minting a claude box (cold, ~10 min)…\n'
+t0=$SECONDS
+if box new --name drill --template claude >/tmp/new.log 2>&1; then
+  ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
 else
   no "box new FAILED — tail: $(tail -3 /tmp/new.log | tr '\n' ' ')"
   echo; echo "── cannot continue without a box"; printf '  %s\n' "${findings[@]}"; exit 1
@@ -482,10 +525,10 @@ fi
 # nothing serves and read refused-vs-dropped — refused would mean the box's
 # packet reached the host's stack, which is the thing the firewall must prevent.
 # (No background listener: one less process to leak, one less way to wedge.)
-hv="$(box_probe archive http://10.87.0.1:8099)"
+hv="$(box_probe archive http://10.88.0.1:8099)"
 case "$hv" in
   reachable|refused)
-    no "THE BOX'S PACKETS REACH THE HOST on 10.87.0.1:8099 [$hv] — the firewall rules are not holding"
+    no "THE BOX'S PACKETS REACH THE HOST on 10.88.0.1:8099 [$hv] — the firewall rules are not holding"
     aud "A2 box→host: FAIL — $hv (the packet reached the host's stack)" ;;
   dropped)
     ok "box → host is blocked (no path to the machine's sockets)"
@@ -510,8 +553,8 @@ esac
 # port answers the question just as well (refused = the packet arrived), and
 # the listener was what kept wedging the run. Ping corroborates: if the two
 # disagree, say so rather than pick one.
-PEER_IP="$(claudenet_ip peer)"
-ARCH_IP_PRE="$(claudenet_ip archive)"
+PEER_IP="$(boxnet_ip peer)"
+ARCH_IP_PRE="$(boxnet_ip archive)"
 if [ -n "$PEER_IP" ] && [ "$PEER_IP" = "$ARCH_IP_PRE" ]; then
   # Guard, because this actually happened: a clone inherited its source's
   # machine-id, hence its DHCP lease, hence its ADDRESS. Probing "archive →
@@ -535,8 +578,8 @@ elif [ -n "$PEER_IP" ]; then
     aud "A3 sibling: BLOCKED — tcp dropped + no icmp reply (security.port_isolation)"
   fi
 else
-  no "could not read peer's claudenet address — the sibling probe never ran"
-  aud "A3 sibling: NOT PROBED (no 10.87.x address on peer)"
+  no "could not read peer's boxnet address — the sibling probe never ran"
+  aud "A3 sibling: NOT PROBED (no 10.88.x address on peer)"
 fi
 
 # C5 — DNS enumeration (#15 A4). Now a CONTRACT, not an observation: setup-host
@@ -552,13 +595,13 @@ else
 fi
 
 # C6 — IPv6 off (#15 A6): every ACL rule is IPv4-only; off is the only cover.
-[ "$(incus network get claudenet ipv6.address 2>/dev/null)" = none ] \
-  && { ok "claudenet ipv6.address = none (the IPv4-only ACLs have no uncovered path)"; aud "A6 ipv6: none, as contract requires"; } \
-  || { no "claudenet has IPv6 enabled — and not one ACL rule covers IPv6"; aud "A6 ipv6: ENABLED and uncovered"; }
+[ "$(incus network get boxnet ipv6.address 2>/dev/null)" = none ] \
+  && { ok "boxnet ipv6.address = none (the IPv4-only ACLs have no uncovered path)"; aud "A6 ipv6: none, as contract requires"; } \
+  || { no "boxnet has IPv6 enabled — and not one ACL rule covers IPv6"; aud "A6 ipv6: ENABLED and uncovered"; }
 
 # C7 — inbound, host → box (#15 A7): the ACL's default ingress drop. Same
 # listener-free logic, run from the host this time.
-ARCH_IP="$(claudenet_ip archive)"
+ARCH_IP="$(boxnet_ip archive)"
 if [ -n "$ARCH_IP" ]; then
   hmsg="$(curl -sS -m 5 -o /dev/null "http://$ARCH_IP:8087" 2>&1)"; hrc=$?
   if [ "$hrc" -eq 0 ]; then hv=reachable
@@ -577,7 +620,7 @@ if [ -n "$ARCH_IP" ]; then
       aud "A7 inbound host→box: INCONCLUSIVE ($hv)" ;;
   esac
 else
-  no "could not read archive's claudenet address — the inbound probe never ran"
+  no "could not read archive's boxnet address — the inbound probe never ran"
   aud "A7 inbound host→box: NOT PROBED"
 fi
 
@@ -586,7 +629,7 @@ phase "D. The isolation contract, stated"
 # ===========================================================================
 # Phase D used to REHEARSE the hardening on a throwaway host, because nobody
 # knew whether it would work. That question is settled: the hardening now ships
-# in setup-host.sh and claudebox-firewall.sh, so phase C tests the real thing
+# in setup-host.sh and box-firewall.sh, so phase C tests the real thing
 # and there is nothing left to rehearse. What the rehearsal established, kept
 # here so it is not re-litigated:
 #
@@ -621,11 +664,11 @@ if [ "$KEEP" = 1 ]; then
   inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
   # every name the drill can have left, whatever branch a partial run took
-  for n in drill clone archive peer; do box rm "$n" --force >/dev/null 2>&1; done
+  for n in drill clone archive peer tpl; do box rm "$n" --force >/dev/null 2>&1; done
   # Assert OUR boxes are gone — not that the host is empty. The rm loop above
   # already embodies the discipline (only names the drill minted); demanding
   # 'no boxes yet' here would flag any pre-existing operator box as a failure.
-  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer)([[:space:]]|$)' || true)"
+  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer|tpl)([[:space:]]|$)' || true)"
   [ -z "$leftover" ] && ok "teardown: every box the drill minted is gone" \
                      || no "a drill box survived teardown: $(printf '%s' "$leftover" | awk '{print $1}' | tr '\n' ' ')"
 fi
@@ -643,7 +686,7 @@ if [ "${#audit[@]}" -gt 0 ]; then
 fi
 
 echo
-inf "this host still has Incus, claudenet, the ACL, the profile and the firewall rules"
+inf "this host still has Incus, boxnet, the ACL, the profile and the firewall rules"
 inf "(plus, unless re-run: dns.mode=none and NIC filtering from the D phase)."
 inf "to undo:  ~/.local/share/claudebox/host/teardown-host.sh [--purge-incus]"
 [ "$fail" -eq 0 ]
