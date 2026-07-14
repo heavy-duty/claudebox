@@ -159,8 +159,8 @@ This will, ON THIS HOST ($(hostname)):
   · install Incus and a systemd unit
   · create a network (boxnet), an ACL, and a profile
   · rewrite firewall rules (nft or UFW, and Docker's DOCKER-USER chain)
-  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl
-  · mutate the network and profile mid-run to rehearse the #16 hardening
+  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl, legacybox
+  · build a faithful legacy stack (claudenet/10.87, claude-dev) to drill migration
 Only do this on a machine you can format.
 EOF
     [ -t 0 ] || { echo "drill: no TTY to confirm on — pass --yes if you mean it." >&2; exit 2; }
@@ -243,7 +243,7 @@ fi
 inf "clearing anything a previous run left behind…"
 # One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
 # which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
-for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl; do
+for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl legacybox; do
   timeout -k 5 60 incus delete -f "$n" >/dev/null 2>&1
 done
 if incus network show boxnet >/dev/null 2>&1; then
@@ -672,13 +672,80 @@ if [ "$BASELINE_OK" -ne 1 ]; then
 fi
 
 # ===========================================================================
+phase "M. Migration — the pre-0.4.0 → box transition (host/migrate-host.sh)"
+# ===========================================================================
+# A fresh host has no legacy stack, so build a faithful one: claudenet on the
+# OLD subnet, a claude-dev profile pinned to it, and a box tagged with the OLD
+# tag on the OLD network — exactly what a pre-0.4.0 host carries. Then prove
+# migrate-host.sh moves it onto the new stack with its identity intact, and
+# retires the legacy stack only once it is empty.
+MIG="$HOME/.local/share/claudebox/host/migrate-host.sh"
+if [ ! -f "$MIG" ]; then
+  no "migrate-host.sh not installed — cannot drill the transition"
+else
+  inf "building a faithful legacy stack (claudenet/10.87 + claude-dev)…"
+  incus network show claudenet >/dev/null 2>&1 || incus network create claudenet \
+    ipv4.address=10.87.0.1/24 ipv4.nat=true ipv6.address=none >/dev/null 2>&1
+  if ! incus profile show claude-dev >/dev/null 2>&1; then
+    incus profile create claude-dev >/dev/null 2>&1
+    incus profile device add claude-dev root disk pool=default path=/ >/dev/null 2>&1
+    incus profile device add claude-dev eth0 nic network=claudenet name=eth0 \
+      security.port_isolation=true >/dev/null 2>&1
+  fi
+  # A minimal legacy box: no template payload, just boots and networks on the
+  # old stack, wearing the old tag. This is what migrate has to move.
+  printf '\n  minting a faithful legacy box on the old stack…\n'
+  if mint_legacy=$(incus launch images:debian/13/cloud legacybox --profile claude-dev \
+       --config user.claudebox=1 --vm --device root,size=20GiB 2>&1); then
+    wait_box legacybox && ok "legacy box up on the old stack (claudenet, user.claudebox=1)" \
+                       || no "legacy box never came up — cannot drill migration"
+    box list 2>/dev/null | grep -q '^legacybox' \
+      && ok "box list shows the legacy box (dual-tag matching)" || no "legacy box invisible to 'box list'"
+
+    # Retire must REFUSE while a legacy box exists.
+    bash "$MIG" --retire-legacy 2>&1 | grep -qi 'legacy boxes still exist' \
+      && ok "retire-legacy refuses while a legacy box remains" \
+      || no "retire-legacy did NOT refuse with a legacy box present — it would strip an in-use stack"
+
+    # Re-home it.
+    printf '  re-homing the legacy box…\n'
+    bash "$MIG" --box legacybox 2>&1 | sed 's/^/        /'
+    [ "$(incus config get legacybox user.box 2>/dev/null)" = 1 ] \
+      && ok "migrate: legacy box now tagged user.box=1" || no "migrate: user.box tag not set"
+    [ "$(incus config get legacybox user.box.user 2>/dev/null)" = claude ] \
+      && ok "migrate: legacy box mapped to the claude user" || no "migrate: user.box.user not claude"
+    incus config show legacybox 2>/dev/null | grep -q '^- box-net' \
+      && ok "migrate: legacy box reassigned to box-net (the new placement contract)" \
+      || no "migrate: legacy box is NOT on box-net"
+    lip="$(boxnet_ip legacybox)"
+    [ -n "$lip" ] && ok "migrate: legacy box got a boxnet address ($lip) — network move landed" \
+                  || no "migrate: legacy box has no 10.88 address — the move did not take"
+    in_box legacybox getent hosts deb.debian.org >/dev/null 2>&1 \
+      && ok "migrate: re-homed box resolves + reaches the internet on its new leg" \
+      || no "migrate: re-homed box cannot resolve on boxnet"
+
+    # No legacy boxes remain → retire must now SUCCEED and leave nothing.
+    printf '  retiring the (now empty) legacy stack…\n'
+    bash "$MIG" --retire-legacy 2>&1 | sed 's/^/        /'
+    incus network show claudenet >/dev/null 2>&1 \
+      && no "retire-legacy left claudenet behind" || ok "retire-legacy removed claudenet"
+    incus profile show claude-dev >/dev/null 2>&1 \
+      && no "retire-legacy left claude-dev behind" || ok "retire-legacy removed claude-dev"
+
+    box rm legacybox --force >/dev/null 2>&1
+  else
+    no "could not launch the legacy box: $(printf '%s' "$mint_legacy" | tail -1)"
+  fi
+fi
+
+# ===========================================================================
 if [ "$KEEP" = 1 ]; then
   phase "Boxes left up (--keep-boxes)"
   box list
   inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
   # every name the drill can have left, whatever branch a partial run took
-  for n in drill clone archive peer tpl; do box rm "$n" --force >/dev/null 2>&1; done
+  for n in drill clone archive peer tpl legacybox; do box rm "$n" --force >/dev/null 2>&1; done
   # Assert OUR boxes are gone — not that the host is empty. The rm loop above
   # already embodies the discipline (only names the drill minted); demanding
   # 'no boxes yet' here would flag any pre-existing operator box as a failure.
