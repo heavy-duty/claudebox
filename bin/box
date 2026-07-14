@@ -557,11 +557,22 @@ wait_agent() {
       echo "box: instance agent never came up after 5 minutes." >&2
       echo "box: sanitized console log → $clog   (last non-blank lines:)" >&2
       grep -v '^[[:space:]]*$' "$clog" 2>/dev/null | tail -6 | sed 's/^/  /' >&2
-      # A box sitting at the GRUB/firmware menu is not slow — it never booted.
-      if grep -qiE 'GNU GRUB|Press enter to boot|UEFI Firmware Settings' "$clog" 2>/dev/null; then
-        echo "box: the VM is stuck at the GRUB/firmware menu — it is not booting." >&2
-        echo "box: this is the IMAGE, not box. Try re-pulling it (incus image delete …)" >&2
-        echo "box: or pin a known-good build/alias in the template's BOX_IMAGE." >&2
+      # A box that never boots is NOT a slow box, and the console says which
+      # failure it is. Each of these cost hours to diagnose by hand once; the
+      # box that hits them next should be told the answer, not the symptom.
+      if grep -qiE 'Failed to decompress kernel|efi_stub_entry\(\) failed' "$clog" 2>/dev/null; then
+        echo "box: THE KERNEL WOULD NOT DECOMPRESS — the cached image is corrupt." >&2
+        echo "box: (a truncated/bad image download does exactly this). Re-pull it:" >&2
+        echo "box:   incus image list                 # find the fingerprint" >&2
+        echo "box:   incus image delete <fingerprint> # the next mint re-downloads" >&2
+      elif grep -qiE 'bad shim signature|prohibited by secure boot' "$clog" 2>/dev/null; then
+        echo "box: SECURE BOOT rejected the kernel — but box mints VMs with" >&2
+        echo "box: security.secureboot=false, so this box predates that fix or was" >&2
+        echo "box: created by hand. Re-mint it with a current box." >&2
+      elif grep -qiE 'GNU GRUB|Press enter to boot|UEFI Firmware Settings' "$clog" 2>/dev/null; then
+        echo "box: the VM is stuck at the GRUB/firmware menu — it never booted." >&2
+        echo "box: this is the IMAGE, not box. Re-pull it (incus image delete …)," >&2
+        echo "box: or pin a known-good build in the template's BOX_IMAGE." >&2
       fi
       die "agent unreachable (inspect live: incus console $n)"
     fi
