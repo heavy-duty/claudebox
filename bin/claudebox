@@ -417,12 +417,21 @@ wait_agent() {
 reset_identity() {
   local i="$1"
   echo "claudebox: giving the clone its own identity (machine-id, DHCP lease)..."
+  # Do NOT truncate machine-id and reboot: systemd needs a valid one to shut
+  # down cleanly, so the graceful stop hangs and the reboot never happens —
+  # leaving the clone on its source's identity, which is the bug we are here to
+  # fix. 'systemd-machine-id-setup' writes a fresh VALID id instead; in a VM it
+  # derives from the DMI product UUID, which Incus makes unique per instance.
   incus exec "$i" -- sh -c '
-    : >/etc/machine-id
-    rm -f /var/lib/dbus/machine-id
+    rm -f /etc/machine-id /var/lib/dbus/machine-id
+    systemd-machine-id-setup >/dev/null 2>&1 || dbus-uuidgen > /etc/machine-id
     ln -sf /etc/machine-id /var/lib/dbus/machine-id
+    test -s /etc/machine-id
   ' || die "could not reset the clone's machine-id"
-  incus restart "$i"
+  # The new id only takes effect at boot. Ask nicely, then insist — a clone that
+  # keeps its source's DHCP lease is worse than an unclean stop of a box that
+  # booted 30 seconds ago.
+  incus restart --timeout 60 "$i" >/dev/null 2>&1 || incus restart -f "$i"
   wait_agent "$i"
 }
 
