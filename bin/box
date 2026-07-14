@@ -512,10 +512,21 @@ wait_agent() {
       # print only a short sanitized tail. Nothing raw ever reaches a terminal.
       clog="/tmp/box-console-$n.log"
       timeout -k 5 15 incus console "$n" --show-log </dev/null >"$clog.raw" 2>/dev/null || true
-      tr -cd '\11\12\40-\176' <"$clog.raw" >"$clog" 2>/dev/null; rm -f "$clog.raw"
+      # Strip whole escape sequences FIRST (while the ESC byte is present), then
+      # drop any residual control bytes — otherwise 'tr' alone leaves the visible
+      # '[1m[37m' halves behind. Result is clean, readable text.
+      sed -E $'s/\x1b\\[[0-9;:?]*[ -/]*[@-~]//g; s/\x1b[()#][0-9A-Za-z]//g; s/\x1b[=>PX^_].*?(\x1b\\\\|\x07)//g; s/\x1b.//g' \
+        "$clog.raw" 2>/dev/null | tr -cd '\11\12\40-\176' >"$clog"
+      rm -f "$clog.raw"
       echo "box: instance agent never came up after 5 minutes." >&2
-      echo "box: sanitized console log → $clog   (last lines:)" >&2
-      tail -8 "$clog" 2>/dev/null | sed 's/^/  /' >&2
+      echo "box: sanitized console log → $clog   (last non-blank lines:)" >&2
+      grep -v '^[[:space:]]*$' "$clog" 2>/dev/null | tail -6 | sed 's/^/  /' >&2
+      # A box sitting at the GRUB/firmware menu is not slow — it never booted.
+      if grep -qiE 'GNU GRUB|Press enter to boot|UEFI Firmware Settings' "$clog" 2>/dev/null; then
+        echo "box: the VM is stuck at the GRUB/firmware menu — it is not booting." >&2
+        echo "box: this is the IMAGE, not box. Try re-pulling it (incus image delete …)" >&2
+        echo "box: or pin a known-good build/alias in the template's BOX_IMAGE." >&2
+      fi
       die "agent unreachable (inspect live: incus console $n)"
     fi
     sleep 2
