@@ -182,9 +182,10 @@ else
     no "the host resolves via a CGNAT/Tailscale resolver ($hostns), and boxes INHERIT it — see issue #33"
     inf "· box DNS breaks whenever the tailnet's resolver does (this is what kills cold mints)"
     inf "· and tailnet names RESOLVE from inside a box, though its ACL blocks connecting to them"
-    inf "fix + test:  bash drill/doctor.sh --pin-dns"
+    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh  (it pins the resolver)"
+    inf "      or quick-test the pin alone:  bash drill/doctor.sh --pin-dns"
   else
-    inf "boxes inherit the host's resolver (unpinned). Fine while it is stable; see issue #33."
+    inf "boxes inherit the host's resolver (unpinned — setup-host.sh pins this now; re-run it)"
   fi
 fi
 
