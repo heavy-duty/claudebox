@@ -429,6 +429,8 @@ if mint_box /tmp/mint-tpl.log --name tpl; then
   box rm tpl --force >/dev/null 2>&1 && ok "blank box removed" || no "could not remove the blank box"
 else
   no "blank mint FAILED — tail: $(tail -3 /tmp/mint-tpl.log | tr '\n' ' ')"
+  # Tear the stuck box down — a failed mint that lingers starves the next one.
+  timeout -k 5 60 incus delete -f tpl >/dev/null 2>&1
 fi
 
 # The generic mechanic (metadata, placement, user, isolation parity) is proven
@@ -450,6 +452,7 @@ for t in codex grok; do
     box rm "$t" --force >/dev/null 2>&1 && ok "$t box removed" || no "$t: could not remove"
   else
     no "$t mint FAILED — tail: $(tail -3 "/tmp/mint-$t.log" | tr '\n' ' ')"
+    timeout -k 5 60 incus delete -f "$t" >/dev/null 2>&1
   fi
 done
 
@@ -459,6 +462,7 @@ if mint_box /tmp/mint-drill.log --name drill --template claude; then
   ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
 else
   no "box new FAILED — tail: $(tail -3 /tmp/mint-drill.log | tr '\n' ' ')"
+  timeout -k 5 60 incus delete -f drill >/dev/null 2>&1
   echo; echo "── cannot continue without a box"; printf '  %s\n' "${findings[@]}"; exit 1
 fi
 

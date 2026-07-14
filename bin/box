@@ -500,14 +500,23 @@ pick_mode() {
 # forensics: the VM's console says why, and the box is torn down by whoever
 # called us before anyone can read it.
 wait_agent() {
-  local n="$1" i
+  local n="$1" i clog
   echo "box: waiting for instance agent..."
   for i in $(seq 1 150); do
     if incus exec "$n" -- true </dev/null >/dev/null 2>&1; then return; fi
     if [ "$i" -eq 150 ]; then
-      echo "box: instance agent never came up. The VM's console log:" >&2
-      timeout -k 5 15 incus console "$n" --show-log 2>/dev/null | tail -15 | sed 's/^/  /' >&2
-      die "agent unreachable after 5 minutes (incus console $n to inspect live)"
+      # The console log is FULL of terminal escape sequences (boot messages,
+      # a firmware menu). Dumping it raw scrambles the operator's terminal —
+      # and doubly so when it lands in a log someone is tail -f'ing. Capture
+      # it to a file, STRIP everything but printable ASCII + tab/newline, and
+      # print only a short sanitized tail. Nothing raw ever reaches a terminal.
+      clog="/tmp/box-console-$n.log"
+      timeout -k 5 15 incus console "$n" --show-log </dev/null >"$clog.raw" 2>/dev/null || true
+      tr -cd '\11\12\40-\176' <"$clog.raw" >"$clog" 2>/dev/null; rm -f "$clog.raw"
+      echo "box: instance agent never came up after 5 minutes." >&2
+      echo "box: sanitized console log → $clog   (last lines:)" >&2
+      tail -8 "$clog" 2>/dev/null | sed 's/^/  /' >&2
+      die "agent unreachable (inspect live: incus console $n)"
     fi
     sleep 2
   done
