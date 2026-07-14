@@ -50,6 +50,7 @@ CMDS=(
   "start^<box>^box^Start a stopped box^incus:start^started {}"
   "rm^<box> [--force]^box,confirm^Delete a box and its snapshots — irreversible, and it asks first^incus:delete -f^removed {}"
   "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
+  "doctor^[--fix | --pin-dns]^^Is this host fit to mint boxes? Diagnose the daemon, network, DNS, isolation^fn:cmd_doctor^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
   "help^[<command>]^^This help, or 'claudebox help <command>' for one command^fn:cmd_help^"
 )
@@ -301,6 +302,25 @@ outside the isolation stack. claudebox warns and then does as you asked — from
 there, the trust boundary is yours to keep.
 EOF
 ;;
+    doctor) cat <<'EOF'
+Answer "is this host fit to mint boxes?" from ground truth, not config claims:
+is the Incus daemon answering, is a dnsmasq actually serving claudenet, does
+the kernel's bridge port say 'isolated on', is the resolver pinned or is a
+host VPN's DNS leaking into boxes, can a box actually resolve names. Every
+check exists because its fault has happened — most kill a cold mint with a
+cloud-init error that names none of them.
+
+  --fix      also revert what a drill run may have left behind
+  --pin-dns  pin claudenet's resolver to public upstreams and re-test
+             (setup-host.sh now pins by default; this is the quick test)
+
+  claudebox doctor
+  claudebox doctor --fix
+
+Exit 0 = clean; 1 = problems found (each printed with its fix). Read-only
+unless --fix or --pin-dns is given.
+EOF
+;;
     status) cat <<'EOF'
 Deprecated alias for 'claudebox list'. It ignored the <box> argument it
 advertised, so it was split into 'list' (all boxes) and 'info <box>' (one). It
@@ -348,6 +368,8 @@ while [ $# -gt 0 ]; do
     # An unrecognized flag used to be swallowed as a positional — so a typo'd
     # --labl silently became a snapshot's label. Say so instead.
     -*)
+      # doctor's flags belong to the doctor script, not to claudebox
+      if [ "$cmd" = doctor ]; then args+=("$1"); shift; continue; fi
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
@@ -491,8 +513,8 @@ cmd_new() {
       echo "claudebox: '$name' is still up — inspect it, then delete it:" >&2
       echo "  claudebox incus $name -- exec {} -- tail -50 /var/log/cloud-init-output.log" >&2
       echo "  claudebox rm $name" >&2
-      echo "claudebox: a box that cannot resolve DNS is usually the HOST's resolver" >&2
-      echo "  (a VPN/Tailscale resolver the box inherits — see issue #33)." >&2
+      echo "claudebox: a failed mint is usually the HOST's fault (a wedged daemon, a dnsmasq" >&2
+      echo "  not serving, a VPN resolver the box inherits). Diagnose it:  claudebox doctor" >&2
       die "cloud-init failed — the box is incomplete, so refusing to hand it over"
     fi
   fi
@@ -612,6 +634,18 @@ cmd_snapshot() {
 cmd_status() {
   echo "claudebox: 'status' is deprecated — use 'claudebox list'." >&2
   list_all
+}
+
+# The host-health checks live in drill/doctor.sh — grown by the drill, but
+# every fault they diagnose (a wedged daemon, a dnsmasq that isn't serving,
+# a VPN resolver boxes inherit, isolation off in the kernel) is a USER's
+# fault first: each one has killed a cold mint or silently weakened a
+# boundary. The install tree ships the whole repo, so delegate — one
+# hardened script, two audiences.
+cmd_doctor() {
+  local script="$root/drill/doctor.sh"
+  [ -f "$script" ] || die "doctor script not found at $script — re-run install.sh"
+  exec bash "$script" "${args[@]}"
 }
 
 cmd_help() { show_help "${args[0]:-}"; }
