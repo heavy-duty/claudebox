@@ -212,17 +212,23 @@ if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
   inf "probing inside '$probe' — this separates DNS from routing, which is the whole question:"
   inf "its resolv.conf: $(timeout -k 5 20 incus exec "$probe" -- sh -c 'grep -m2 nameserver /etc/resolv.conf' </dev/null 2>/dev/null | tr '\n' ' ')"
 
-  timeout -k 5 20 incus exec "$probe" -- ping -c1 -W2 10.87.0.1 </dev/null >/dev/null 2>&1 \
-    && ok "reaches the gateway (10.87.0.1) — routing is fine" \
-    || no "cannot even reach the gateway — this is routing, not DNS"
+  # Routing is probed by ADDRESS against the public internet, NOT by pinging
+  # the gateway: claudebox-firewall.sh drops everything from a box to the host
+  # except DNS/DHCP, so ICMP to 10.87.0.1 fails BY DESIGN on a healthy host.
+  # A gateway ping here is a check that can only ever lie.
+  if timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null; then
+    routing=1; ok "reaches 1.1.1.1 by address — egress routing is fine"
+  else
+    routing=0; no "cannot reach 1.1.1.1 by address — egress routing is broken (this is not DNS)"
+  fi
 
   if timeout -k 5 25 incus exec "$probe" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1; then
     ok "resolves deb.debian.org — DNS works"
   else
     no "CANNOT resolve deb.debian.org — this is exactly what kills cloud-init on every cold mint"
-    # Does the box reach the internet at all WITHOUT DNS? If yes, the fault is
-    # purely name resolution — i.e. the forwarder, i.e. issue #33.
-    if timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null; then
+    # Egress by address was probed above. If it worked, the fault is purely
+    # name resolution — i.e. the forwarder, i.e. issue #33.
+    if [ "$routing" = 1 ]; then
       inf "…but it CAN reach 1.1.1.1 by address. So egress works and only NAME RESOLUTION is broken:"
       inf "the fault is the forwarder the box inherits from the host — issue #33."
       inf "test the fix:  bash drill/doctor.sh --pin-dns   then re-run the drill"
