@@ -3,11 +3,12 @@ set -euo pipefail
 
 # box installer — intended for: curl -fsSL .../install.sh | bash
 #
-# Downloads the box source tarball from its GitHub repo (heavy-duty/claudebox —
-# the repo keeps the old name; only the tool is 'box'), installs the whole tree
-# under $DEST, and puts a `box` symlink on PATH via $BINDIR.
+# Downloads the box source tarball from its GitHub repo (heavy-duty/box),
+# installs the whole tree under $DEST, and puts a `box` symlink on PATH via
+# $BINDIR. (GitHub redirects the repo's pre-rename URLs, so an old install
+# script keeps working; BOX_REPO overrides.)
 
-REPO="${BOX_REPO:-heavy-duty/claudebox}"
+REPO="${BOX_REPO:-heavy-duty/box}"
 REF="${BOX_REF:-main}"
 DEST="${BOX_HOME:-$HOME/.local/share/box}"
 BINDIR="${BOX_BIN:-$HOME/.local/bin}"

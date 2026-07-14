@@ -1,10 +1,9 @@
-# claudebox — ships the `box` CLI
+# box
 
 **Headless, trust-less, throwaway dev VMs.** One command mints a fresh,
 network-isolated Incus box from a **template**; the flagship template is
-`claude` — Debian 13 with Claude Code installed, the box this repo is named
-for. The box is the product — you log in and work; destroying it loses
-nothing you didn't push.
+`claude` — Debian 13 with Claude Code installed. The box is the product —
+you log in and work; destroying it loses nothing you didn't push.
 
 **Strictly creds-free.** A box ships with everything installed and **no**
 credentials — no Claude token, no git PAT, nothing. You authenticate
@@ -29,7 +28,7 @@ design rationale.
 > `box migrate-host`, which re-homes pre-0.4.0 boxes onto the current stack
 > and retires the legacy bridge.
 >
-> **0.4.0's clean cut stands**: the CLI is `box` (no `claudebox` shim), the
+> **0.4.0's clean cut stands**: the CLI is `box` (no legacy shim), the
 > host stack is `boxnet`/`box-isolate`/`box-firewall` on 10.88.0.0/24, and
 > the default template is `blank`. Boxes minted by any earlier version keep
 > working under every verb — their legacy tag is honored forever.
@@ -37,7 +36,7 @@ design rationale.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/heavy-duty/claudebox/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
 ```
 
 Installs the tree to `~/.local/share/box` and links `box` onto your
@@ -88,7 +87,7 @@ The claude box is one template among several. What ships today:
 | Template | What's in it |
 | --- | --- |
 | `blank`  | Bare Debian 13 — same isolation, no tooling. The default. |
-| `claude` | Claude Code, creds-free (the original claudebox) |
+| `claude` | Claude Code, creds-free — where this project started |
 | `codex`  | OpenAI Codex CLI, creds-free |
 | `grok`   | xAI Grok CLI, creds-free |
 
