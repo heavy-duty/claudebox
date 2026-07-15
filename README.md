@@ -249,11 +249,31 @@ pre-0.4.0 box through `migrate-host`, and removes what it minted —
 currently **81 checks, 81 passing**. [drill/RUNS.md](drill/RUNS.md) is the full
 history, including every trap that fooled a run into a wrong verdict.
 
+### Run the drill yourself
+
+The drill ships in the repo, not the installed tree — run it from a checkout.
+Two versions are in play and both must be current: **the drill script you
+run** (a stale checkout judges the past), and **the code under test** — the
+drill does not test your working tree; it installs box from GitHub
+(default: `heavy-duty/box@main`) and asserts the installed tree is exactly
+the ref it asked for before issuing any verdict.
+
 ```sh
+git clone https://github.com/heavy-duty/box && cd box   # or refresh an existing
+git log --oneline -1                                    #   checkout — this commit is
+                                                        #   the drill that will judge
 bash drill/doctor.sh    # read-only: is this host healthy and the stack live?
 bash drill/drill.sh     # FULL end-to-end — mutates the host; use a machine you own
 bash drill/wipe.sh      # scorched earth: strip BOTH name generations, images and
                         #   (--purge-storage) the pool, so a run starts from bare
+```
+
+To drill something other than latest `main` — a release ref, or a PR branch
+on a fork:
+
+```sh
+bash drill/drill.sh --ref <branch-or-tag>
+bash drill/drill.sh --repo <owner>/<repo> --ref <branch>   # a PR under review
 ```
 
 The doctor reads ground truth, not config claims — the kernel's `isolated on`

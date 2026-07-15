@@ -32,7 +32,7 @@
 # false FAILs on the first live run. The pipeline verdict must be grep's alone.
 set -u
 
-REPO="${BOX_REPO:-heavy-duty/claudebox}"
+REPO="${BOX_REPO:-heavy-duty/box}"
 REF="${BOX_REF:-main}"
 YES=0; KEEP=0
 SELF="$(readlink -f "$0")"
