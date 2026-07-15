@@ -422,13 +422,24 @@ box new --name tpl --template cbdrill-bad 2>&1 | grep -q "unknown key 'BOX_NETWO
   || no "a box.env key outside the allowlist was ACCEPTED — a template could weaken isolation"
 rm -rf "$badt"
 
+# Inline resource flags (#57): refused on a clone, honored on a mint. The
+# mint proof rides the blank box below — and because this drill exports
+# BOX_CPU/BOX_MEMORY on small hosts, it is also the precedence proof
+# (flag > env > template > default).
+box new --name tpl --from nowhere --cpu 2 2>&1 | grep -q 'carries its source' \
+  && ok "resource flags refused on --from — a clone carries its source's resources" \
+  || no "--from accepted a resource flag (should refuse: clone resources come from the source)"
+
 printf '\n  minting a blank box (the DEFAULT template — no tooling, fast)…\n'
 t0=$SECONDS
-if mint_box /tmp/mint-tpl.log --name tpl; then
+if mint_box /tmp/mint-tpl.log --name tpl --cpu 1 --memory 1GiB; then
   ok "box new --name tpl, no --template  ($((SECONDS - t0))s)"
   tt="$(incus config get tpl user.box.template 2>/dev/null)"
   [ "$tt" = blank ] && ok "the default template is blank (user.box.template=blank)" \
                     || no "default template is '${tt:-<unset>}' — expected blank"
+  rc="$(incus config get tpl limits.cpu 2>/dev/null)/$(incus config get tpl limits.memory 2>/dev/null)"
+  [ "$rc" = "1/1GiB" ] && ok "inline --cpu/--memory landed (limits = $rc, beating BOX_* env)" \
+                       || no "inline resource flags did not land — limits are $rc, expected 1/1GiB"
   [ "$(incus config get tpl user.box.user 2>/dev/null)" = dev ] \
     && ok "template user stamped on the instance (user.box.user=dev)" || no "user.box.user not stamped"
   incus config show tpl 2>/dev/null | grep -q '^- box-net' \
