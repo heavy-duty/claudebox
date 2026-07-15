@@ -106,9 +106,10 @@ box new --name scratch           # the DEFAULT template is blank: bare Debian,
 A template **cannot** name a network, a profile, or a `security.*` flag —
 there is no key for them. Every box launches with the shared `box-net`
 profile (the isolated NIC + root disk), so every template gets the identical
-trust boundary. Resources come from the template's `box.env`;
-`BOX_CPU` / `BOX_MEMORY` / `BOX_DISK` environment variables override them at
-mint time. The template's identity (name, user) is stamped onto the instance,
+trust boundary. Resources come from the template's `box.env`, overridable at
+mint time — inline (`--cpu 2 --memory 3GiB --disk 20GiB`) or via
+`BOX_CPU` / `BOX_MEMORY` / `BOX_DISK` environment variables (the scripting
+form; flags win). The template's identity (name, user) is stamped onto the instance,
 so `shell`, `exec` and `tmux` land in the right user — and a clone still
 knows, because `incus copy` carries the metadata.
 
@@ -152,7 +153,7 @@ the door is per-port, punched and removable at runtime.
 ## Commands
 
 ```
-box new --name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container]
+box new --name <box> [--template <t>] [--from <src>[/<snap>]] [--cpu <n>] [--memory <size>] [--disk <size>] [--vm|--container]
 box templates                # list the templates this install can mint
 box list                     # list your boxes
 box info <box>               # one box: state, IP, exposures, snapshot labels
@@ -246,7 +247,7 @@ drill installs the whole stack, mints every template cold, snapshots and
 clones, probes every boundary from inside the boxes, opens and shuts the
 `expose` door (and checks the contract survives it), re-homes a faithful
 pre-0.4.0 box through `migrate-host`, and removes what it minted —
-currently **81 checks, 81 passing**. [drill/RUNS.md](drill/RUNS.md) is the full
+currently **83 checks**. [drill/RUNS.md](drill/RUNS.md) is the full
 history, including every trap that fooled a run into a wrong verdict.
 
 ```sh

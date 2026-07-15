@@ -7,6 +7,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 remote=""; mode="auto"; name=""; from=""; template=""; force=0; json=0; want_help=0
+cpu=""; memory=""; disk=""
 inst=""   # the resolved Incus instance, set by the 'box' precondition
 
 die() { echo "box: $*" >&2; exit 1; }         # 1 = it went wrong
@@ -37,7 +38,7 @@ version() { echo "box $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)
 # doesn't enforce a box invariant, it is incus's job, not ours — that is
 # what `box incus` is for.
 CMDS=(
-  "new^--name <box> [--template <t>] [--from <src>[/<snap>]] [--vm|--container]^^Mint a box from a template (default: blank), or --from an existing box/snapshot^fn:cmd_new^"
+  "new^--name <box> [--template <t>] [--from <src>[/<snap>]] [--cpu <n>] [--memory <size>] [--disk <size>] [--vm|--container]^^Mint a box from a template (default: blank), or --from an existing box/snapshot^fn:cmd_new^"
   "templates^^^List the templates this install can mint^fn:cmd_templates^"
   "list^[--json]^^List your boxes^fn:cmd_list^"
   "info^<box> [--json]^box^One box: state, type, IP, and its snapshot labels^fn:cmd_info^"
@@ -202,17 +203,24 @@ being told.
                          A template sets image, user and resources — never
                          the network: every template gets the same isolation.
   --from <src>[/<snap>]  Clone src's live state, or its snapshot <snap>.
+  --cpu <n>              CPUs for this mint (limits.cpu, verbatim to Incus).
+  --memory <size>        RAM for this mint, e.g. 3GiB (limits.memory).
+  --disk <size>          Root disk size, e.g. 20GiB. VM mode only — a
+                         container's root rides the storage pool.
   --vm | --container     Force the mode. VM is the trust boundary and the
                          default wherever /dev/kvm exists; container mode
                          (security.nesting=true) is the fallback for hosts
                          without nested virt — weaker isolation, dev/test only.
 
-Resources come from the template's box.env; BOX_CPU / BOX_MEMORY / BOX_DISK
-environment variables override them at mint time (a small host shrinks a box
-without editing a template it doesn't own).
+Resources resolve most-specific-first: these flags, then BOX_CPU /
+BOX_MEMORY / BOX_DISK environment variables (the scripting form), then the
+template's box.env, then defaults. Flags shape a fresh mint only — a --from
+clone carries its source's resources. Resources are all a flag can touch:
+there is no flag for a network or a security key, on purpose.
 
   box new --name scratch                     # blank, the default
   box new --name work --template claude
+  box new --name lean --template claude --cpu 2 --memory 3GiB
   box new --name feature --from work/authed
 EOF
 ;;
@@ -443,6 +451,9 @@ while [ $# -gt 0 ]; do
     --name) [ $# -ge 2 ] || usage_error "--name needs a value"; name="$2"; shift 2 ;;
     --from) [ $# -ge 2 ] || usage_error "--from needs a value"; from="$2"; shift 2 ;;
     --template) [ $# -ge 2 ] || usage_error "--template needs a value"; template="$2"; shift 2 ;;
+    --cpu) [ $# -ge 2 ] || usage_error "--cpu needs a value"; cpu="$2"; shift 2 ;;
+    --memory) [ $# -ge 2 ] || usage_error "--memory needs a value"; memory="$2"; shift 2 ;;
+    --disk) [ $# -ge 2 ] || usage_error "--disk needs a value"; disk="$2"; shift 2 ;;
     --remote) [ $# -ge 2 ] || usage_error "--remote needs a value"; remote="$2:"; shift 2 ;;
     --vm) mode=vm; shift ;;
     --container) mode=container; shift ;;
@@ -640,11 +651,14 @@ load_template() {
     esac
   done <"$dir/box.env"
   [ -n "$T_IMAGE" ] && [ -n "$T_USER" ] || die "template '$t': BOX_IMAGE and BOX_USER are required"
-  # Environment overrides beat the file — this is how a small host (or the
-  # drill) shrinks a box without editing a template it doesn't own.
-  T_CPU="${BOX_CPU:-${T_CPU:-4}}"
-  T_MEMORY="${BOX_MEMORY:-${T_MEMORY:-8GiB}}"
-  T_DISK="${BOX_DISK:-${T_DISK:-60GiB}}"
+  # Resolution, most specific wins: inline flag (--cpu/--memory/--disk, #57)
+  # > BOX_* environment (how a small host or the drill shrinks every box it
+  # mints) > the template's file > defaults. Values pass to Incus verbatim —
+  # its units, its validation; box adds no parser of its own. Resources only:
+  # there is still no flag for a network or a security.* key, on purpose.
+  T_CPU="${cpu:-${BOX_CPU:-${T_CPU:-4}}}"
+  T_MEMORY="${memory:-${BOX_MEMORY:-${T_MEMORY:-8GiB}}}"
+  T_DISK="${disk:-${BOX_DISK:-${T_DISK:-60GiB}}}"
 }
 
 cmd_templates() {
@@ -664,6 +678,7 @@ cmd_new() {
   local instance; instance="$(iname_of "$name")"
   if [ -n "$from" ]; then
     [ -z "$template" ] || usage_error "--from clones an existing box; its template rides along (drop --template)"
+    [ -z "$cpu$memory$disk" ] || usage_error "--cpu/--memory/--disk shape a fresh mint; a clone carries its source's resources ('box incus' can change them afterwards)"
     local src="${from%%/*}" snap="" srcref
     case "$from" in */*) snap="${from#*/}" ;; esac
     srcref="$(iname_of "$src")"; [ -n "$snap" ] && srcref="$srcref/$snap"
@@ -685,6 +700,9 @@ cmd_new() {
     # turning it off boots reliably across image rebuilds. Container mode has
     # no firmware, so it does not apply there.
     if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK" --config security.secureboot=false); else extra+=(--config security.nesting=true); fi
+    # Root size is a VM launch concern; a container's root rides the pool. Say
+    # so instead of silently dropping an explicit --disk.
+    [ "$m" = vm ] || [ -z "$disk" ] || echo "box: note — --disk applies to VM mode only; this container's root rides the pool" >&2
     # The template's identity is stamped ONTO the instance: which template,
     # which user. 'incus copy' preserves user.* keys (audit B2), so a clone
     # knows what it is without ever consulting the template again.
