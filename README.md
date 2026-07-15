@@ -252,7 +252,7 @@ drill installs the whole stack, mints every template cold, snapshots and
 clones, probes every boundary from inside the boxes, opens and shuts the
 `expose` door (and checks the contract survives it), re-homes a faithful
 pre-0.4.0 box through `migrate-host`, and removes what it minted —
-currently **83 checks**. [drill/RUNS.md](drill/RUNS.md) is the full
+currently **84 checks, 84 passing**. [drill/RUNS.md](drill/RUNS.md) is the full
 history, including every trap that fooled a run into a wrong verdict.
 
 ### Run the drill yourself
