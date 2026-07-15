@@ -1,28 +1,30 @@
 # box design
 
 `box` is a CLI that mints and manages **trust-less, network-isolated VMs
-with Claude Code installed**. It is infrastructure, not a project provisioner.
+with a coding agent installed** (`claude`, `codex`, `grok`, or `blank` for
+none). It is infrastructure, not a project provisioner.
 
 See issue #3 for the full reframe and rationale. This doc captures the durable
 design decisions.
 
 ## Principle: separate the tool from the agent
 
-- **The tool** mints isolated boxes with Claude installed but **unauthenticated**.
+- **The tool** mints isolated boxes with the agent installed but **unauthenticated**.
   It knows nothing about projects, secrets, recipes, or memory.
-- **The agent** (Claude Code, inside the box) reads an optional `.box/`
-  runbook in a cloned repo and acts on it. The recipe's consumer is the
-  reasoning agent, not host machinery.
+- **The agent** (Claude Code, Codex, Grok — whichever template, inside the box)
+  reads an optional `.box/` runbook in a cloned repo and acts on it. The recipe's
+  consumer is the reasoning agent, not host machinery.
 
 ## Boxes are strictly creds-free
 
 `box new --name <n>` launches a blank box: everything installed, **no**
-git credentials and **no** Claude credentials. The operator authenticates
+git credentials and **no** agent credentials. The operator authenticates
 interactively *inside* the box:
 
-- **Claude** — `claude` → `/login` (paste-a-code OAuth: copy the URL, open it in
-  your own browser, paste the code back). Works because the box is outbound-only;
-  the tool never handles a token.
+- **The coding agent** — e.g. `claude` → `/login` (paste-a-code OAuth: copy the
+  URL, open it in your own browser, paste the code back); `codex` and `grok`
+  have their own login step. Works because the box is outbound-only; the tool
+  never handles a token.
 - **Git** — the operator adds their own PAT / `gh auth login` inside the box.
 
 The tool stores and injects **no** credentials, ever. This dissolves the
@@ -43,8 +45,9 @@ Log in once → snapshot → spin up authed boxes from it.
 
 ## The box announces itself to the agent
 
-cloud-init installs a global `~/.claude/CLAUDE.md` in every box telling Claude it
-is running in a box (trust-less, ephemeral, creds-free) and to treat a
+cloud-init installs a global agent-context file in every coding-agent box
+(`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.grok/AGENTS.md`) telling the
+agent it is running in a box (trust-less, ephemeral, creds-free) and to treat a
 repo's `.box/` folder as its bootstrap runbook. No "tell it" step, no host
 execution.
 
