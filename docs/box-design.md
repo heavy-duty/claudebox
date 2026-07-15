@@ -38,7 +38,7 @@ snapshots, not a secrets store:
 - `box snapshot <n> [label]` — checkpoint after login + clone.
 - `box new --name <n2> --from <src>[/<snapshot>]` — clone an existing box
   or snapshot (authed state and all). Isolation is preserved: the clone keeps
-  the `claude-dev` profile + `claudenet` + ACL.
+  the `box-net` profile + `boxnet` + ACL.
 - `box restore <n> <snapshot>` — roll a box back to a checkpoint.
 
 Log in once → snapshot → spin up authed boxes from it.
@@ -65,7 +65,7 @@ forever — and wrapping them one at a time grows a worse `incus`. The rule:
 
 > **box owns a command when it must enforce an invariant Incus cannot see:**
 > the `user.box=1` boundary (never touch an instance we didn't mint), the
-> isolation stack (`claude-dev` profile + `claudenet` + ACL), or the creds-free
+> isolation stack (`box-net` profile + `boxnet` + ACL), or the creds-free
 > snapshot→clone workflow. Everything else is Incus's job.
 
 The rule cuts both ways, and that's the point:
@@ -95,7 +95,7 @@ warns and proceeds — from there the trust boundary is yours to keep.
 
 ## Isolation
 
-Dedicated NAT bridge `claudenet` + Incus `claude-isolate` ACL dropping all
+Dedicated NAT bridge `boxnet` + Incus `box-isolate` ACL dropping all
 RFC1918/CGNAT/link-local egress, plus host-firewall rules blocking instance →
 host. Entry is `incus exec` over the local socket — no inbound path. The VM is
 the trust boundary.
@@ -104,12 +104,12 @@ the trust boundary.
 That last clause is the one that was assumed and turned out to be false, so it
 is spelled out here with the mechanism, and `drill/` tests it on every run.
 
-- **Box → host, LAN, RFC1918, CGNAT, link-local:** the `claude-isolate` ACL.
+- **Box → host, LAN, RFC1918, CGNAT, link-local:** the `box-isolate` ACL.
 - **Box → box: an nftables *bridge-family* rule** (`host/box-firewall.sh`).
   It cannot be an ACL rule. Two boxes on one bridge share an L2 segment, so
   their frames are *switched* between bridge ports and never traverse the
   netfilter path an L3 ACL lives on — the ACL looked airtight (it drops
-  `10.0.0.0/8`, which contains `claudenet`) while box→box was in fact wide open.
+  `10.0.0.0/8`, which contains `boxnet`) while box→box was in fact wide open.
   A live probe found box A's SYN arriving at box B. The bridge family's forward
   hook fires exactly on port-to-port frames, which on this bridge means box→box
   and nothing else: gateway traffic and routed egress are delivered locally, not
