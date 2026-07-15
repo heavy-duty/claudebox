@@ -37,9 +37,13 @@ log "extracting archive"
 tar -xzf "$TMPDIR/box.tar.gz" -C "$TMPDIR" \
   || die "failed to extract archive"
 
-# GitHub names the archive's top dir after the REPO, which is still 'claudebox':
-# it extracts to claudebox-<ref>/. That is repo-derived, not a stray brand.
-EXTRACTED="$(find "$TMPDIR" -maxdepth 1 -type d -name 'claudebox-*' | head -n1)"
+# GitHub names the archive's top dir <repo>-<ref> (slashes in a ref become
+# dashes) — deriving that name is guesswork, and it broke for real at the
+# claudebox → box rename, when this glob kept looking for claudebox-* and the
+# installer died on every host. The tarball has exactly ONE top-level
+# directory: take the directory, whatever it is called, and let the bin/box
+# check below judge whether it is the right tree.
+EXTRACTED="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
 [ -n "$EXTRACTED" ] || die "could not find the extracted source directory in archive"
 [ -f "$EXTRACTED/bin/box" ] || die "archive does not contain bin/box — is $REPO@$REF correct?"
 
