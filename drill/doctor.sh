@@ -40,6 +40,12 @@ timeout 10 incus list >/dev/null 2>&1 || {
   exit 1
 }
 
+# A FRESH host (no boxnet) is not a DIRTY one. Everything below that would
+# scream about a missing piece must first ask: missing from a stack, or never
+# set up? setup-host creates all of it, and the drill runs setup-host itself —
+# a bare host went 84/84 green minutes after this doctor called it unfit.
+FRESH=0
+
 head_ "Network — boxnet"
 if incus network show boxnet >/dev/null 2>&1; then
   # dns.mode=none is SHIPPED — it is what stops a box enumerating its siblings
@@ -79,12 +85,15 @@ if incus network show boxnet >/dev/null 2>&1; then
   [ "$ipv6" = none ] && ok "ipv6.address = none (the isolation contract — every ACL rule is IPv4-only)" \
                      || no "ipv6.address = $ipv6 — IPv6 is on and NOT covered by any ACL rule"
 else
+  FRESH=1
   inf "boxnet does not exist (a fresh host — setup-host.sh will create it)"
 fi
 
 head_ "Firewall — the box-to-box drop"
 if sudo nft list table bridge box >/dev/null 2>&1; then
   ok "nft bridge table 'box' is present — boxes cannot reach each other"
+elif [ "$FRESH" = 1 ]; then
+  inf "not installed yet (a fresh host — setup-host.sh installs it)"
 else
   no "the box-to-box drop is MISSING — boxes can reach each other"
   inf "an L3 ACL never sees frames switched between two ports of one bridge;"
@@ -186,6 +195,16 @@ raw="$(incus network get boxnet raw.dnsmasq 2>/dev/null | tr '\n' ';')"
 if [ -n "$raw" ]; then
   ok "boxnet has a pinned resolver (raw.dnsmasq: $raw)"
   inf "boxes do NOT inherit the host's resolver — good (issue #33)"
+elif [ "$FRESH" = 1 ]; then
+  # No boxnet, so there is nothing to pin YET. A VPN resolver on the host is
+  # worth naming, but it is a fact about the host, not a fault in a stack
+  # that does not exist — setup-host pins around it at creation.
+  if printf '%s' "$hostns" | grep -qE '(^| )100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'; then
+    inf "the host resolves via a CGNAT/Tailscale resolver ($hostns) — noted, not a fault:"
+    inf "setup-host pins the box resolver to public upstreams, so boxes will not inherit it (issue #33)"
+  else
+    inf "no boxnet yet — setup-host.sh pins its resolver at creation"
+  fi
 else
   # 100.64.0.0/10 is CGNAT — which is exactly Tailscale's range.
   if printf '%s' "$hostns" | grep -qE '(^| )100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'; then
@@ -255,7 +274,12 @@ fi
 
 head_ "Verdict"
 if [ "$bad" -eq 0 ]; then
-  printf '  \033[32mclean\033[0m — this host is fit to mint boxes (and to drill).\n\n'
+  if [ "$FRESH" = 1 ]; then
+    printf '  \033[32mfresh\033[0m — no box stack on this host yet, and nothing dirty either.\n'
+    printf '  run:  box setup-host   (or the drill — it sets the host up itself)\n\n'
+  else
+    printf '  \033[32mclean\033[0m — this host is fit to mint boxes (and to drill).\n\n'
+  fi
   exit 0
 fi
 printf '  \033[31m%s problem(s)\033[0m — this host is NOT fit to mint boxes (or to drill).\n' "$bad"

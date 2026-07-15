@@ -65,7 +65,7 @@ installer retires — but nothing current carries the old name.
 - **Debrand complete** — env vars, install dir, docs, template descriptions
   and the README all say `box`; the install URL is
   `heavy-duty/box` (GitHub redirects the old one, `BOX_REPO` overrides).
-- **The drill grew from 47 to 83 checks** — the expose door opened, exercised
+- **The drill grew from 47 to 84 checks** — the expose door opened, exercised
   and shut (with the contract re-probed around it), every template minted
   cold, a faithful pre-0.4.0 box re-homed through `migrate-host`, and the
   inline resource flags asserted (including their precedence over the
