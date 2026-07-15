@@ -1,12 +1,13 @@
 # box
 
 **Headless, trust-less, throwaway dev VMs.** One command mints a fresh,
-network-isolated Incus box from a **template**; the flagship template is
-`claude` — Debian 13 with Claude Code installed. The box is the product —
-you log in and work; destroying it loses nothing you didn't push.
+network-isolated Incus box from a **template**; the coding-agent templates
+ship a CLI agent on Debian 13 — `claude` (Claude Code), `codex` (OpenAI
+Codex), `grok` (xAI Grok). The box is the product — you log in and work;
+destroying it loses nothing you didn't push.
 
 **Strictly creds-free.** A box ships with everything installed and **no**
-credentials — no Claude token, no git PAT, nothing. You authenticate
+credentials — no agent token, no git PAT, nothing. You authenticate
 interactively *inside* the box. The tool never stores or injects a secret. That
 means there's nothing shared or committed, so it's safe for multiple operators
 out of the box.
@@ -18,8 +19,8 @@ nobody home — not a box with the safety off.
 
 **The tool knows nothing about your projects.** You just `git clone` inside a
 box. A repo can ship an optional [`.box/`](docs/box-recipe.md)
-runbook that Claude Code reads and acts on — there is no `install` step and no
-host-run setup. See [docs/box-design.md](docs/box-design.md) for the
+runbook that the box's coding agent reads and acts on — there is no `install`
+step and no host-run setup. See [docs/box-design.md](docs/box-design.md) for the
 design rationale.
 
 > **0.5.0**: two new templates (`codex`, `grok`), `box expose` — a
@@ -66,23 +67,26 @@ legacy box remains.
 ## Quick start
 
 ```sh
-box new --name work --template claude   # a creds-free Claude box (~10 min cold)
+box new --name work --template claude   # a creds-free coding-agent box (~10 min cold)
 box shell work                   # enter as the template's user
 ```
 
-Inside the box, authenticate as needed:
+Pick whichever coding-agent template you like — `claude`, `codex`, `grok` — or
+`blank` for none. Inside the box, authenticate as needed. The `claude` template
+looks like this; the others follow the same shape with their own login step:
 
 ```sh
 claude                           # then run /login — copy the URL (press c), open it
                                  #   in YOUR browser, paste the code back. No host CLI needed.
 gh auth login                    # or drop a PAT in — your git credentials, your call
 git clone https://github.com/you/project && cd project
-claude                           # if the repo has .box/, Claude reads it and sets up
+claude                           # if the repo has .box/, the agent reads it and sets up
 ```
 
 ## Templates
 
-The claude box is one template among several. What ships today:
+No coding agent is special — each is one template among several, and adding
+another is just another directory. What ships today:
 
 | Template | What's in it |
 | --- | --- |
@@ -122,7 +126,7 @@ box snapshot work authed   # checkpoint after you've logged in
 box new --name feature --from work/authed   # clone the authed state into a new box
 ```
 
-`--from` copies the whole box (Claude login, git creds, clones and all) while
+`--from` copies the whole box (agent login, git creds, clones and all) while
 preserving isolation. You can also `box new --name x --from work` to clone
 a box's live state, or roll a box back with `box restore work authed`.
 
@@ -233,8 +237,9 @@ enforces it, layer by layer:
   that door only ever opens onto the host's own loopback (`127.0.0.1`), never
   the network.
 
-The VM is the trust boundary: whatever runs inside — Claude, or anything a
-template ships — can run arbitrary code and touch nothing you care about.
+The VM is the trust boundary: whatever runs inside — the coding agent, or
+anything a template ships — can run arbitrary code and touch nothing you care
+about.
 
 ### Measured, not claimed
 
@@ -265,9 +270,10 @@ inherit.
 ## Recipes: the `.box/` convention
 
 A repo that wants to be easy to stand up in a box ships an optional `.box/`
-folder — a runbook Claude reads and follows (install deps, start services,
-template env, seed data, smoke-test). It is agent-facing documentation, not a
-host-executed script. See [docs/box-recipe.md](docs/box-recipe.md).
+folder — a runbook the box's coding agent reads and follows (install deps,
+start services, template env, seed data, smoke-test). It is agent-facing
+documentation, not a host-executed script. See
+[docs/box-recipe.md](docs/box-recipe.md).
 
 ## Uninstall
 
@@ -280,6 +286,6 @@ rm -rf ~/.local/share/box ~/.local/bin/box   # the CLI itself
 ## Non-goals
 
 - **No unattended/CI bring-up.** The flow is interactive (log in, clone, ask
-  Claude). Reproducible-by-construction provisioning is out of scope.
+  the agent). Reproducible-by-construction provisioning is out of scope.
 - **No credential storage or injection by the tool.** Boxes are creds-free;
   snapshots are the reuse mechanism, not a secrets store.
