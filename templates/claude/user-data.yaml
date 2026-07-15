@@ -10,10 +10,10 @@ write_files:
     permissions: '0644'
     defer: true
     content: |
-      # You are running inside a claudebox
+      # You are running inside a box (template: claude)
 
-      A claudebox is a trust-less, network-isolated, ephemeral VM created by the
-      `box` CLI (template: claude). Keep this context in mind:
+      A box is a trust-less, network-isolated, ephemeral VM created by the
+      `box` CLI. Keep this context in mind:
 
       - **Creds-free by default.** The box starts with no Claude and no git
         credentials. If you need to authenticate Claude, the operator runs `/login`
@@ -25,7 +25,7 @@ write_files:
       - **Disposable.** Nothing here is backed up. State is discarded when the box is
         removed; the operator persists work via git push and via `box snapshot`.
       - **Bootstrap runbook.** If the repository you are working in contains a
-        `.claudebox/` folder, read it as your setup runbook — how to install
+        `.box/` folder (older repos may use `.claudebox/`), read it as your setup runbook — how to install
         dependencies, start services, template environment files, seed data, and
         smoke-test — and follow it. It is documentation for you, not a script the
         host runs.
@@ -49,7 +49,7 @@ runcmd:
   - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
   - apt-get install -y nodejs
   - sudo -u claude bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
-  # 'claudebox exec box -- claude …' runs through a NON-interactive shell, which
+  # 'box exec <box> -- claude …' runs through a NON-interactive shell, which
   # reads no .bashrc/.zshrc — a PATH export there is invisible to it. The
   # symlink makes claude reachable from every shell, interactive or not.
   - ln -sf /home/claude/.local/bin/claude /usr/local/bin/claude

@@ -72,4 +72,4 @@ if $purge; then
   fi
 fi
 
-echo "Teardown complete. (Your ~/.local/bin/box symlink and ~/.local/share/claudebox remain — remove by hand if wanted.)"
+echo "Teardown complete. (Your ~/.local/bin/box symlink and ~/.local/share/box remain — remove by hand if wanted.)"

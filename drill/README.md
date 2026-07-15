@@ -1,6 +1,6 @@
 # The drill
 
-An end-to-end rehearsal of claudebox against a **real** Incus: install the CLI,
+An end-to-end rehearsal of box against a **real** Incus: install the CLI,
 set up the host, mint boxes, drive the whole surface, check that the isolation
 actually holds — and run the full
 [#15 audit](https://github.com/heavy-duty/claudebox/issues/15), including a live
@@ -32,7 +32,7 @@ The drill mutates the host in phase D; an aborted run can leave a network that
 mints boxes with **no DNS**.
 
 **Iterating on the drill?** Read [RUNS.md](RUNS.md) first — it is the run log:
-what the audit has answered so far, the bugs the drill has found in claudebox,
+what the audit has answered so far, the bugs the drill has found in box,
 the traps this script has already fallen into (every one cost a run), how to
 diagnose a stall, and how to run a single probe by hand instead of paying for a
 whole run.
@@ -46,7 +46,7 @@ wrong. The drill runs the real thing.
 
 ## What it checks
 
-**A. Incus semantics.** The assumptions claudebox is built on, probed directly:
+**A. Incus semantics.** The assumptions box is built on, probed directly:
 that `incus config get <inst> user.claudebox` returns `1` (this is on the path of
 *every* box command — if it lies, everything fails closed); that the
 `user.claudebox=1` list filter selects our instances and excludes an untagged
@@ -62,7 +62,7 @@ and its isolation warning, the `rm` confirmation guard, and the CLI contract
 (typo'd command, typo'd flag, `list <box>`).
 
 **The boundary** gets its own treatment: the drill launches an instance
-claudebox did *not* mint, aims `down`, `rm` and the escape hatch at it, and
+box did *not* mint, aims `down`, `rm` and the escape hatch at it, and
 requires all three to refuse — and the instance to still be standing afterwards.
 
 **C. Isolation baseline (#15 section A).** From inside a real box: public egress
@@ -88,6 +88,6 @@ a **design veto** for #16, caught before the code is written.
 design. The drill confirms Claude Code is installed and runnable; authenticating
 is yours.
 
-If the host has no `/dev/kvm`, claudebox falls back to container mode. The drill
+If the host has no `/dev/kvm`, box falls back to container mode. The drill
 still runs, but it says loudly that **the VM trust boundary was not validated**
 rather than passing quietly on a weaker one.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# drill.sh — end-to-end drill for box (the claudebox repo), against a real Incus.
+# drill.sh — end-to-end drill for box, against a real Incus.
 #
 #   ⚠ DESTRUCTIVE, AND MEANT TO BE. Run it on a THROWAWAY host you can format.
 #     It installs Incus, rewrites the host's firewall rules, installs a systemd
@@ -32,8 +32,8 @@
 # false FAILs on the first live run. The pipeline verdict must be grep's alone.
 set -u
 
-REPO="${CLAUDEBOX_REPO:-heavy-duty/claudebox}"
-REF="${CLAUDEBOX_REF:-main}"
+REPO="${BOX_REPO:-heavy-duty/claudebox}"
+REF="${BOX_REF:-main}"
 YES=0; KEEP=0
 SELF="$(readlink -f "$0")"
 
@@ -57,9 +57,11 @@ inf()  { printf '        %s\n' "$*"; }
 phase(){ printf '\n\033[1m══ %s\033[0m\n' "$*"; }
 aud()  { audit+=("$*"); }                       # an answer for the #15 audit
 
-wait_box() {   # poll until exec answers (the VM agent can take a while), ~2 min
+wait_box() {   # poll until exec answers (the VM agent can take a while), ~4 min
+  # 2 min was too short: run 17's legacy box came up AFTER the window closed —
+  # the drill called it dead and then every migration check on it passed.
   local b="$1" _i
-  for _i in $(seq 1 60); do
+  for _i in $(seq 1 120); do
     box exec "$b" -- true >/dev/null 2>&1 && return 0
     sleep 2
   done
@@ -159,8 +161,8 @@ This will, ON THIS HOST ($(hostname)):
   · install Incus and a systemd unit
   · create a network (boxnet), an ACL, and a profile
   · rewrite firewall rules (nft or UFW, and Docker's DOCKER-USER chain)
-  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl
-  · mutate the network and profile mid-run to rehearse the #16 hardening
+  · create and destroy instances named: drill, clone, archive, peer, payroll, cbprobe, cbcopy, tpl, codex, grok, legacybox
+  · build a faithful legacy stack (claudenet/10.87, claude-dev) to drill migration
 Only do this on a machine you can format.
 EOF
     [ -t 0 ] || { echo "drill: no TTY to confirm on — pass --yes if you mean it." >&2; exit 2; }
@@ -170,10 +172,27 @@ EOF
   fi
 
   phase "Installing box ($REPO@$REF)"
-  CLAUDEBOX_REPO="$REPO" CLAUDEBOX_REF="$REF" \
+  BOX_REPO="$REPO" BOX_REF="$REF" \
     bash -c "$(curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install.sh")" \
     || { echo "install failed"; exit 1; }
   export PATH="$HOME/.local/bin:$PATH"
+
+  # ASSERT WHAT LANDED — never trust that the install obeyed us.
+  # This has bitten twice: once on a lagged CDN tarball, once when a STALE local
+  # drill.sh passed the retired CLAUDEBOX_* env vars to a 0.5.0 install.sh that
+  # reads BOX_* — the vars were ignored, main was installed, and the run drilled
+  # the wrong tree while reporting success. A drill that silently drills the
+  # wrong code is worse than one that fails.
+  got="$(cat "$HOME/.local/share/box/INSTALLED_FROM" 2>/dev/null || echo '<unknown>')"
+  if [ "$got" != "$REPO@$REF" ]; then
+    echo "drill: FATAL — asked to install $REPO@$REF, but the tree says '$got'." >&2
+    echo "  Your local drill.sh is probably STALE (pre-0.5.0 it passed CLAUDEBOX_*," >&2
+    echo "  which today's install.sh ignores, so it fell back to main). Fix:" >&2
+    echo "    git fetch origin && git checkout <the branch you mean> && git pull" >&2
+    echo "  then re-run this drill." >&2
+    exit 1
+  fi
+  inf "installed tree confirms: $got"
 
   phase "Host setup (Incus, boxnet, ACL, profile, firewall)"
   # setup-host.sh installs nftables itself when neither nft nor UFW exists
@@ -206,10 +225,10 @@ EOF
   fi
 
   inf "running setup-host.sh (first pass: may only add you to incus-admin)…"
-  ~/.local/share/claudebox/host/setup-host.sh || true
+  ~/.local/share/box/host/setup-host.sh || true
   # The group we were just added to isn't in this shell's credentials yet.
   inf "re-entering inside the incus-admin group…"
-  exec sg incus-admin -c "IN_GROUP=1 CLAUDEBOX_REPO='$REPO' CLAUDEBOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
+  exec sg incus-admin -c "IN_GROUP=1 BOX_REPO='$REPO' BOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
@@ -243,7 +262,7 @@ fi
 inf "clearing anything a previous run left behind…"
 # One name at a time — 'incus delete -f a b c' aborts at the first MISSING name,
 # which is how run 2 inherited run 1's boxes and cascaded five false FAILs.
-for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl; do
+for n in drill clone archive peer payroll cbprobe cbcopy cbnotours tpl codex grok legacybox; do
   timeout -k 5 60 incus delete -f "$n" >/dev/null 2>&1
 done
 if incus network show boxnet >/dev/null 2>&1; then
@@ -259,7 +278,7 @@ left="$(incus list --format csv --columns n 2>/dev/null | tr '\n' ' ')"
 [ -n "$left" ] && inf "instances still on this host (not ours, left alone): $left"
 
 inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
-if ! timeout -k 10 300 ~/.local/share/claudebox/host/setup-host.sh; then
+if ! timeout -k 10 300 ~/.local/share/box/host/setup-host.sh; then
   echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
   echo "  it should take seconds on a host that already has incus. usual causes:" >&2
   echo "    · instances still attached to boxnet while its ACLs are reconfigured" >&2
@@ -367,7 +386,7 @@ phase "B. The box surface"
 # ===========================================================================
 # Compare against the installed tree's VERSION file, not a hardcoded number —
 # a pinned literal here would fail the drill on every release.
-expected="$(cat "$HOME/.local/share/claudebox/VERSION" 2>/dev/null || echo '?')"
+expected="$(cat "$HOME/.local/share/box/VERSION" 2>/dev/null || echo '?')"
 v="$(box --version 2>&1)"
 case "$v" in *"$expected"*) ok "box --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
 
@@ -385,14 +404,18 @@ else
 fi
 
 # --- templates: the mint surface is itself a surface to test ----------------
-box templates 2>/dev/null | grep -q '^  blank' && box templates 2>/dev/null | grep -q '^  claude' \
-  && ok "templates: lists blank and claude" || no "templates listing is missing a shipped template"
+tpl_missing=""
+for t in blank claude codex grok; do
+  box templates 2>/dev/null | grep -q "^  $t" || tpl_missing="$tpl_missing $t"
+done
+[ -z "$tpl_missing" ] && ok "templates: lists blank, claude, codex, grok" \
+                      || no "templates listing is missing:$tpl_missing"
 box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
   && ok "unknown template refused, points at 'box templates'" || no "an unknown template was not refused"
 # The one rule that keeps templates honest: no key can name a network. Plant a
 # bad template in the installed tree (the drill owns this host), expect the
 # parser to reject it BY NAME, remove it.
-badt="$HOME/.local/share/claudebox/templates/cbdrill-bad"
+badt="$HOME/.local/share/box/templates/cbdrill-bad"
 mkdir -p "$badt" && printf 'BOX_IMAGE="x"\nBOX_USER="y"\nBOX_NETWORK="lan"\n' >"$badt/box.env" && : >"$badt/user-data.yaml"
 box new --name tpl --template cbdrill-bad 2>&1 | grep -q "unknown key 'BOX_NETWORK'" \
   && ok "a template cannot name a network — BOX_NETWORK rejected by name" \
@@ -425,7 +448,42 @@ if mint_box /tmp/mint-tpl.log --name tpl; then
   box rm tpl --force >/dev/null 2>&1 && ok "blank box removed" || no "could not remove the blank box"
 else
   no "blank mint FAILED — tail: $(tail -3 /tmp/mint-tpl.log | tr '\n' ' ')"
+  # Tear the stuck box down — a failed mint that lingers starves the next one.
+  timeout -k 5 60 incus delete -f tpl >/dev/null 2>&1
 fi
+
+# The generic mechanic (metadata, placement, user, isolation parity) is proven
+# once by blank+claude and needs no per-template repeat. What a NEW template
+# still has to prove is its own payload: the CLI installs, lands on the
+# non-interactive exec PATH, and answers --version. One mint each.
+for t in codex grok; do
+  case "$t" in codex) bin=codex; user=codex ;; grok) bin=grok; user=grok ;; esac
+  printf '\n  minting a %s box (cold — validates the template install)…\n' "$t"
+  if mint_box "/tmp/mint-$t.log" --name "$t" --template "$t"; then
+    [ "$(incus config get "$t" user.box.user 2>/dev/null)" = "$user" ] \
+      && ok "$t: template user stamped ($user)" || no "$t: user.box.user not $user"
+    if timeout -k 5 30 box exec "$t" -- "$bin" --version </dev/null >/dev/null 2>&1; then
+      ok "$t: '$bin --version' answers via box exec — installed and on the non-interactive PATH"
+    else
+      no "$t: '$bin --version' FAILED via exec — not installed, or not on exec's PATH (the claude template's #15 bug)"
+      inf "PATH as exec sees it: $(timeout -k 5 20 box exec "$t" -- printenv PATH </dev/null 2>/dev/null)"
+      # Do not throw the evidence away — say WHAT the installer actually left.
+      # Do NOT throw the evidence away — say what the installer actually left
+      # behind, and what its own log said. Guessing at an upstream installer's
+      # layout is how this FAILed in the first place.
+      inf "anything named '$t' on disk:"
+      in_box "$t" sh -c "find /home /opt /usr/local /usr/bin -maxdepth 4 \\( -type f -o -type l \\) -iname '*$t*' 2>/dev/null | head -8" \
+        | sed 's/^/          /'
+      inf "what its cloud-init said:"
+      in_box "$t" sh -c "grep -iE '$t|install' /var/log/cloud-init-output.log 2>/dev/null | tail -8" \
+        | sed 's/^/          /'
+    fi
+    box rm "$t" --force >/dev/null 2>&1 && ok "$t box removed" || no "$t: could not remove"
+  else
+    no "$t mint FAILED — tail: $(tail -3 "/tmp/mint-$t.log" | tr '\n' ' ')"
+    timeout -k 5 60 incus delete -f "$t" >/dev/null 2>&1
+  fi
+done
 
 printf '\n  minting a claude box (cold, ~10 min)…\n'
 t0=$SECONDS
@@ -433,6 +491,7 @@ if mint_box /tmp/mint-drill.log --name drill --template claude; then
   ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
 else
   no "box new FAILED — tail: $(tail -3 /tmp/mint-drill.log | tr '\n' ' ')"
+  timeout -k 5 60 incus delete -f drill >/dev/null 2>&1
   echo; echo "── cannot continue without a box"; printf '  %s\n' "${findings[@]}"; exit 1
 fi
 
@@ -639,6 +698,63 @@ else
 fi
 
 # ===========================================================================
+phase "E. box expose — a deliberate loopback door (#55)"
+# ===========================================================================
+# archive is a running claude box (node is installed). Start a DETACHED
+# listener on 0.0.0.0 inside it, expose the port, and prove the door works
+# from the HOST's loopback. Then prove removing it closes the door, and that a
+# NON-exposed port still obeys the ingress drop — the feature must not
+# globally weaken A7.
+EP=8091; EHP=18091
+srv="$(mktemp)"
+printf 'require("http").createServer((q,r)=>r.end("box-expose-ok")).listen(%s,"0.0.0.0")\n' "$EP" >"$srv"
+if incus file push "$srv" archive/tmp/srv.js >/dev/null 2>&1; then
+  rm -f "$srv"
+  # Detached: setsid + all fds redirected so 'incus exec' returns at once and
+  # nothing holds its stdout (trap 2/3). The listener outlives the exec.
+  timeout -k 5 20 incus exec archive -- sh -c 'setsid node /tmp/srv.js >/tmp/srv.log 2>&1 </dev/null &' </dev/null
+  sleep 3
+  xlog="$(mktemp)"
+  if box expose archive "$EP" "$EHP" >"$xlog" 2>&1; then
+    ok "box expose archive $EP $EHP — the device was added"
+    box expose archive --list 2>/dev/null | grep -q "$EP" \
+      && ok "expose --list shows the open door" || no "expose --list does not show the exposure"
+    box info archive 2>/dev/null | grep -qi "$EP" \
+      && ok "box info surfaces the exposure (a box with a hole says so)" || note "box info does not mention the exposure (nice-to-have)"
+    # THE test: does the host's loopback reach the box's server?
+    sleep 2
+    if curl -sS -m 6 "http://127.0.0.1:$EHP" 2>/dev/null | grep -q box-expose-ok; then
+      ok "127.0.0.1:$EHP reaches the box's server — the door WORKS"
+    else
+      no "127.0.0.1:$EHP does NOT reach the box — the proxy/ACL mechanism needs work (#55)"
+      inf "srv.log inside the box: $(in_box archive cat /tmp/srv.log 2>/dev/null | tail -2 | tr '\n' ' ')"
+    fi
+    # A NON-exposed port must still be dropped — the feature is per-port, not a
+    # global ingress opening.
+    nemsg="$(curl -sS -m 5 -o /dev/null "http://$ARCH_IP:9099" 2>&1)"
+    printf '%s' "$nemsg" | grep -q 'Connection refused' \
+      && no "a non-exposed port answered on the box — expose opened ingress too wide" \
+      || ok "a non-exposed port is still dropped — expose is per-port, A7 survives"
+    # Close it, and confirm the door shuts.
+    box expose archive --remove "$EP" >/dev/null 2>&1 && ok "box expose --remove closed the device" || no "expose --remove failed"
+    sleep 2
+    curl -sS -m 5 -o /dev/null "http://127.0.0.1:$EHP" 2>/dev/null \
+      && no "the host still reaches the box after --remove — the door did not shut" \
+      || ok "after --remove, 127.0.0.1:$EHP is dead — the door shut"
+  else
+    no "box expose failed to add the device"
+    inf "what box and incus actually said:"
+    sed 's/^/          /' "$xlog" 2>/dev/null
+    rm -f "$srv" 2>/dev/null
+  fi
+  rm -f "$xlog" 2>/dev/null
+  timeout -k 5 15 incus exec archive -- pkill -f srv.js </dev/null >/dev/null 2>&1
+else
+  rm -f "$srv"
+  no "could not push the test server into archive — expose phase did not run"
+fi
+
+# ===========================================================================
 phase "D. The isolation contract, stated"
 # ===========================================================================
 # Phase D used to REHEARSE the hardening on a throwaway host, because nobody
@@ -672,17 +788,90 @@ if [ "$BASELINE_OK" -ne 1 ]; then
 fi
 
 # ===========================================================================
+phase "M. Migration — the pre-0.4.0 → box transition (host/migrate-host.sh)"
+# ===========================================================================
+# A fresh host has no legacy stack, so build a faithful one: claudenet on the
+# OLD subnet, a claude-dev profile pinned to it, and a box tagged with the OLD
+# tag on the OLD network — exactly what a pre-0.4.0 host carries. Then prove
+# migrate-host.sh moves it onto the new stack with its identity intact, and
+# retires the legacy stack only once it is empty.
+MIG="$HOME/.local/share/box/host/migrate-host.sh"
+if [ ! -f "$MIG" ]; then
+  no "migrate-host.sh not installed — cannot drill the transition"
+else
+  inf "building a faithful legacy stack (claudenet/10.87 + claude-dev)…"
+  incus network show claudenet >/dev/null 2>&1 || incus network create claudenet \
+    ipv4.address=10.87.0.1/24 ipv4.nat=true ipv6.address=none >/dev/null 2>&1
+  if ! incus profile show claude-dev >/dev/null 2>&1; then
+    incus profile create claude-dev >/dev/null 2>&1
+    incus profile device add claude-dev root disk pool=default path=/ >/dev/null 2>&1
+    incus profile device add claude-dev eth0 nic network=claudenet name=eth0 \
+      security.port_isolation=true >/dev/null 2>&1
+  fi
+  # A minimal legacy box: no template payload, just boots and networks on the
+  # old stack, wearing the old tag. This is what migrate has to move.
+  printf '\n  minting a faithful legacy box on the old stack…\n'
+  # The legacy box must carry a 'claude' user, because that is what a real
+  # pre-0.4.0 box had — and box_user() maps the legacy tag to it. Without the
+  # user, 'box exec' (sudo -u claude) can never answer and wait_box fails
+  # forever on a box that is perfectly healthy. Run 17/18 lost a FAIL to this.
+  if mint_legacy=$(incus launch images:debian/13/cloud legacybox --profile claude-dev \
+       --config user.claudebox=1 --vm --device root,size=20GiB \
+       --config security.secureboot=false \
+       --config cloud-init.user-data="$(printf '#cloud-config\nusers:\n  - name: claude\n    shell: /bin/bash\n    sudo: "ALL=(ALL) NOPASSWD:ALL"\n    lock_passwd: true\n')" 2>&1); then
+    wait_box legacybox && ok "legacy box up on the old stack (claudenet, user.claudebox=1)" \
+                       || no "legacy box never came up — cannot drill migration"
+    box list 2>/dev/null | grep -q '^legacybox' \
+      && ok "box list shows the legacy box (dual-tag matching)" || no "legacy box invisible to 'box list'"
+
+    # Retire must REFUSE while a legacy box exists.
+    bash "$MIG" --retire-legacy 2>&1 | grep -qi 'legacy boxes still exist' \
+      && ok "retire-legacy refuses while a legacy box remains" \
+      || no "retire-legacy did NOT refuse with a legacy box present — it would strip an in-use stack"
+
+    # Re-home it.
+    printf '  re-homing the legacy box…\n'
+    bash "$MIG" --box legacybox 2>&1 | sed 's/^/        /'
+    [ "$(incus config get legacybox user.box 2>/dev/null)" = 1 ] \
+      && ok "migrate: legacy box now tagged user.box=1" || no "migrate: user.box tag not set"
+    [ "$(incus config get legacybox user.box.user 2>/dev/null)" = claude ] \
+      && ok "migrate: legacy box mapped to the claude user" || no "migrate: user.box.user not claude"
+    incus config show legacybox 2>/dev/null | grep -q '^- box-net' \
+      && ok "migrate: legacy box reassigned to box-net (the new placement contract)" \
+      || no "migrate: legacy box is NOT on box-net"
+    lip="$(boxnet_ip legacybox)"
+    [ -n "$lip" ] && ok "migrate: legacy box got a boxnet address ($lip) — network move landed" \
+                  || no "migrate: legacy box has no 10.88 address — the move did not take"
+    in_box legacybox getent hosts deb.debian.org >/dev/null 2>&1 \
+      && ok "migrate: re-homed box resolves + reaches the internet on its new leg" \
+      || no "migrate: re-homed box cannot resolve on boxnet"
+
+    # No legacy boxes remain → retire must now SUCCEED and leave nothing.
+    printf '  retiring the (now empty) legacy stack…\n'
+    bash "$MIG" --retire-legacy 2>&1 | sed 's/^/        /'
+    incus network show claudenet >/dev/null 2>&1 \
+      && no "retire-legacy left claudenet behind" || ok "retire-legacy removed claudenet"
+    incus profile show claude-dev >/dev/null 2>&1 \
+      && no "retire-legacy left claude-dev behind" || ok "retire-legacy removed claude-dev"
+
+    box rm legacybox --force >/dev/null 2>&1
+  else
+    no "could not launch the legacy box: $(printf '%s' "$mint_legacy" | tail -1)"
+  fi
+fi
+
+# ===========================================================================
 if [ "$KEEP" = 1 ]; then
   phase "Boxes left up (--keep-boxes)"
   box list
   inf "note: the D-phase mutations (dns.mode=none, NIC filtering) are still applied"
 else
   # every name the drill can have left, whatever branch a partial run took
-  for n in drill clone archive peer tpl; do box rm "$n" --force >/dev/null 2>&1; done
+  for n in drill clone archive peer tpl codex grok legacybox; do box rm "$n" --force >/dev/null 2>&1; done
   # Assert OUR boxes are gone — not that the host is empty. The rm loop above
   # already embodies the discipline (only names the drill minted); demanding
   # 'no boxes yet' here would flag any pre-existing operator box as a failure.
-  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer|tpl)([[:space:]]|$)' || true)"
+  leftover="$(box list 2>/dev/null | grep -E '^(drill|clone|archive|peer|tpl|codex|grok)([[:space:]]|$)' || true)"
   [ -z "$leftover" ] && ok "teardown: every box the drill minted is gone" \
                      || no "a drill box survived teardown: $(printf '%s' "$leftover" | awk '{print $1}' | tr '\n' ' ')"
 fi
@@ -702,5 +891,5 @@ fi
 echo
 inf "this host still has Incus, boxnet, the ACL, the profile and the firewall rules"
 inf "(plus, unless re-run: dns.mode=none and NIC filtering from the D phase)."
-inf "to undo:  ~/.local/share/claudebox/host/teardown-host.sh [--purge-incus]"
+inf "to undo:  ~/.local/share/box/host/teardown-host.sh [--purge-incus]"
 [ "$fail" -eq 0 ]

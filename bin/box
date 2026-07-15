@@ -50,8 +50,12 @@ CMDS=(
   "down^<box>^box^Stop a box, keeping its state ('start' resumes it)^incus:stop^stopped {}"
   "start^<box>^box^Start a stopped box^incus:start^started {}"
   "rm^<box> [--force]^box,confirm^Delete a box and its snapshots — irreversible, and it asks first^incus:delete -f^removed {}"
+  "expose^<box> <port> [<host-port>] | --list | --remove <port>^box^Forward a box port to the host's loopback — see a dev server^fn:cmd_expose^"
   "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
   "doctor^[--fix | --pin-dns]^^Is this host fit to mint boxes? Diagnose the daemon, network, DNS, isolation^fn:cmd_doctor^"
+  "setup-host^^^One-time host setup: Incus, the boxnet stack, the profile, the firewall^fn:cmd_setup_host^"
+  "teardown-host^[--purge-incus]^^Remove the box host stack (both name generations)^fn:cmd_teardown_host^"
+  "migrate-host^--box <n> | --all-boxes | --retire-legacy^^Move a host from the pre-0.4.0 stack onto box^fn:cmd_migrate_host^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
   "help^[<command>]^^This help, or 'box help <command>' for one command^fn:cmd_help^"
 )
@@ -118,7 +122,7 @@ EOF
   local r v sum
   for r in "${CMDS[@]}"; do
     IFS='^' read -r v _ _ sum _ _ <<<"$r"
-    printf '  %-9s %s\n' "$v" "$sum"
+    printf '  %-13s %s\n' "$v" "$sum"
   done
   cat <<'EOF'
 
@@ -311,6 +315,28 @@ confirmation first; --force (-f) skips the prompt. With no TTY to confirm on
   box rm work --force
 EOF
 ;;
+    expose) cat <<'EOF'
+Open a deliberate, loopback-only door to a port inside a box — for when you
+are coding in a box and want to see its dev server in your browser.
+
+  box expose <box> <port> [<host-port>]   # forward 127.0.0.1:<host-port> → box:<port>
+  box expose <box> --list                 # what doors are open
+  box expose <box> --remove <port>        # close one
+
+The host side ALWAYS listens on 127.0.0.1 — no other machine can reach the
+box, only this host's loopback. There is no flag to widen that; if you need
+LAN exposure you are leaving the tool's threat model, and 'box incus' is the
+door (with its warning).
+
+The in-box server must listen on 0.0.0.0:<port>, not only its own loopback —
+a VM's forwarder connects to the box over the network. Inside an isolated box
+that is safe: nothing but this proxy can reach the port.
+
+  box new --name web --template claude
+  box shell web        # inside: run a dev server on 0.0.0.0:3000
+  box expose web 3000  # then open http://127.0.0.1:3000 in your browser
+EOF
+;;
     incus) cat <<'EOF'
 The door out. box wraps the box lifecycle and the isolation model, not
 all of Incus — so when you need something it doesn't wrap, run Incus through
@@ -347,6 +373,37 @@ cloud-init error that names none of them.
 
 Exit 0 = clean; 1 = problems found (each printed with its fix). Read-only
 unless --fix or --pin-dns is given.
+EOF
+;;
+    setup-host) cat <<'EOF'
+Prepare this host to mint boxes — one time. Installs Incus and builds the
+isolation stack: the boxnet NAT bridge (resolver pinned), the box-isolate
+ACL, the box-net profile, and the firewall rules, all re-applied at boot.
+Idempotent — safe to re-run after a box upgrade to pick up stack changes.
+
+If it has to add you to the incus-admin group it will say so and exit; log
+back in (or 'sg incus-admin') and run it again.
+
+  box setup-host
+EOF
+;;
+    teardown-host) cat <<'EOF'
+Remove the box host stack — all boxes, the boxnet/claudenet networks, the
+ACLs, the profiles, and the firewall rules of BOTH name generations (current
+and pre-0.4.0). Asks first.
+
+  box teardown-host                # the stack; leaves Incus installed
+  box teardown-host --purge-incus  # ...and uninstall Incus too
+EOF
+;;
+    migrate-host) cat <<'EOF'
+Move a host from the pre-0.4.0 'claudebox' stack onto 'box'. Re-homing
+preserves a box's authed state (no re-login) — it only re-tags and reassigns
+the profile, then verifies the box works on its new network leg.
+
+  box migrate-host --box <name>    # re-home one legacy box
+  box migrate-host --all-boxes     # re-home every legacy box
+  box migrate-host --retire-legacy # remove the old stack (once no legacy box remains)
 EOF
 ;;
     status) cat <<'EOF'
@@ -399,6 +456,10 @@ while [ $# -gt 0 ]; do
     -*)
       # doctor's flags belong to the doctor script, not to box
       if [ "$cmd" = doctor ]; then args+=("$1"); shift; continue; fi
+      # expose's own flags (--list, --remove) are positional to it, not box's
+      if [ "$cmd" = expose ]; then args+=("$1"); shift; continue; fi
+      # the host verbs delegate their flags to the scripts they wrap
+      case "$cmd" in setup-host|teardown-host|migrate-host) args+=("$1"); shift; continue ;; esac
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
@@ -475,14 +536,45 @@ pick_mode() {
 # forensics: the VM's console says why, and the box is torn down by whoever
 # called us before anyone can read it.
 wait_agent() {
-  local n="$1" i
+  local n="$1" i clog
   echo "box: waiting for instance agent..."
   for i in $(seq 1 150); do
     if incus exec "$n" -- true </dev/null >/dev/null 2>&1; then return; fi
     if [ "$i" -eq 150 ]; then
-      echo "box: instance agent never came up. The VM's console log:" >&2
-      timeout -k 5 15 incus console "$n" --show-log 2>/dev/null | tail -15 | sed 's/^/  /' >&2
-      die "agent unreachable after 5 minutes (incus console $n to inspect live)"
+      # The console log is FULL of terminal escape sequences (boot messages,
+      # a firmware menu). Dumping it raw scrambles the operator's terminal —
+      # and doubly so when it lands in a log someone is tail -f'ing. Capture
+      # it to a file, STRIP everything but printable ASCII + tab/newline, and
+      # print only a short sanitized tail. Nothing raw ever reaches a terminal.
+      clog="/tmp/box-console-$n.log"
+      timeout -k 5 15 incus console "$n" --show-log </dev/null >"$clog.raw" 2>/dev/null || true
+      # Strip whole escape sequences FIRST (while the ESC byte is present), then
+      # drop any residual control bytes — otherwise 'tr' alone leaves the visible
+      # '[1m[37m' halves behind. Result is clean, readable text.
+      sed -E $'s/\x1b\\[[0-9;:?]*[ -/]*[@-~]//g; s/\x1b[()#][0-9A-Za-z]//g; s/\x1b[=>PX^_].*?(\x1b\\\\|\x07)//g; s/\x1b.//g' \
+        "$clog.raw" 2>/dev/null | tr -cd '\11\12\40-\176' >"$clog"
+      rm -f "$clog.raw"
+      echo "box: instance agent never came up after 5 minutes." >&2
+      echo "box: sanitized console log → $clog   (last non-blank lines:)" >&2
+      grep -v '^[[:space:]]*$' "$clog" 2>/dev/null | tail -6 | sed 's/^/  /' >&2
+      # A box that never boots is NOT a slow box, and the console says which
+      # failure it is. Each of these cost hours to diagnose by hand once; the
+      # box that hits them next should be told the answer, not the symptom.
+      if grep -qiE 'Failed to decompress kernel|efi_stub_entry\(\) failed' "$clog" 2>/dev/null; then
+        echo "box: THE KERNEL WOULD NOT DECOMPRESS — the cached image is corrupt." >&2
+        echo "box: (a truncated/bad image download does exactly this). Re-pull it:" >&2
+        echo "box:   incus image list                 # find the fingerprint" >&2
+        echo "box:   incus image delete <fingerprint> # the next mint re-downloads" >&2
+      elif grep -qiE 'bad shim signature|prohibited by secure boot' "$clog" 2>/dev/null; then
+        echo "box: SECURE BOOT rejected the kernel — but box mints VMs with" >&2
+        echo "box: security.secureboot=false, so this box predates that fix or was" >&2
+        echo "box: created by hand. Re-mint it with a current box." >&2
+      elif grep -qiE 'GNU GRUB|Press enter to boot|UEFI Firmware Settings' "$clog" 2>/dev/null; then
+        echo "box: the VM is stuck at the GRUB/firmware menu — it never booted." >&2
+        echo "box: this is the IMAGE, not box. Re-pull it (incus image delete …)," >&2
+        echo "box: or pin a known-good build in the template's BOX_IMAGE." >&2
+      fi
+      die "agent unreachable (inspect live: incus console $n)"
     fi
     sleep 2
   done
@@ -585,7 +677,14 @@ cmd_new() {
     load_template "$t"
     m="$(pick_mode)"
     # shellcheck disable=SC2054 # "root,size=..." is a single incus argument
-    if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK"); else extra+=(--config security.nesting=true); fi
+    # security.secureboot=false: Incus defaults VMs to secureboot ON, and a
+    # Debian cloud image whose shim is signed with a key the host's OVMF does
+    # not trust dies with "bad shim signature / prohibited by secure boot
+    # policy" and drops to the GRUB menu forever — the kernel never loads. It
+    # is not part of a throwaway box's threat model (the VM boundary is), and
+    # turning it off boots reliably across image rebuilds. Container mode has
+    # no firmware, so it does not apply there.
+    if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK" --config security.secureboot=false); else extra+=(--config security.nesting=true); fi
     # The template's identity is stamped ONTO the instance: which template,
     # which user. 'incus copy' preserves user.* keys (audit B2), so a clone
     # knows what it is without ever consulting the template again.
@@ -663,6 +762,21 @@ box_ipv4() {   # first address only; strips Incus's " (iface)" suffix. "-" if no
     | grep . || echo "-"
 }
 
+# The box's address ON BOXNET — which is NOT the same as "its first address".
+# A box running docker also carries 172.17.0.1 (docker0), and Incus happily
+# lists that FIRST. box_ipv4() hands you the decoy, and pointing anything at it
+# is pointing at the wrong interface: 'box expose' did exactly that until Incus
+# refused with `Connect IP "172.17.0.1" must be one of the instance's static
+# IPv4 addresses`. The drill has known this trap since run 4; the CLI had not.
+# Derive the prefix from the network rather than hardcoding it.
+box_net_ip() {
+  local pfx
+  pfx="$(incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1 | cut -d. -f1-3)"
+  [ -n "$pfx" ] || return 1
+  incus list "$1" --format csv --columns 4 2>/dev/null \
+    | tr -d '"' | tr ' ,' '\n\n' | grep -E "^${pfx//./\\.}\.[0-9]+$" | head -n1 | grep .
+}
+
 # VIRTUAL-MACHINE is a mouthful in a table; anything unexpected passes through.
 short_type() {
   case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
@@ -715,6 +829,15 @@ cmd_info() {
   IFS=, read -r _ state type snaps <<<"$row"
   printf '%-11s%s\n' NAME "$box" STATE "${state:--}" TYPE "$(short_type "$type")" \
     IPV4 "$(box_ipv4 "$inst")"
+
+  # A box with a hole says so — an exposure visible only to --list is a hole
+  # info would deny. One line per open door.
+  local d listen
+  while IFS= read -r d; do
+    case "$d" in expose-*) : ;; *) continue ;; esac
+    listen="$(incus config device get "$inst" "$d" listen 2>/dev/null)"
+    printf '%-11s%s → port %s\n' EXPOSED "${listen#tcp:}" "${d#expose-}"
+  done < <(incus config device list "$inst" 2>/dev/null)
 
   echo
   case "${snaps:-0}" in
@@ -791,6 +914,19 @@ cmd_doctor() {
   exec bash "$script" "${args[@]}"
 }
 
+# The host lifecycle scripts, as first-class verbs — nobody should have to know
+# where the install tree keeps its scripts. Each execs the installed script
+# with its flags passed through; the script owns its own behavior (setup-host's
+# incus-admin re-login dance, teardown's confirmation, migrate's per-box work).
+host_script() {   # $1 = script basename under host/
+  local script="$root/host/$1"
+  [ -f "$script" ] || die "$1 not found at $script — re-run install.sh"
+  exec bash "$script" "${args[@]}"
+}
+cmd_setup_host()    { host_script setup-host.sh; }
+cmd_teardown_host() { host_script teardown-host.sh; }
+cmd_migrate_host()  { host_script migrate-host.sh; }
+
 cmd_help() { show_help "${args[0]:-}"; }
 
 # The escape hatch. The box is resolved and tag-checked; everything else is
@@ -816,6 +952,145 @@ cmd_incus() {
   warn_isolation "${out[@]}"
   echo "box: incus ${out[*]}" >&2   # no magic: show what runs
   incus "${out[@]}"
+}
+
+# A deliberate, loopback-only door to a box's port — for the one workflow the
+# "no inbound path" contract is too absolute for: you are coding in a box and
+# want to open its dev server in your browser.
+#
+# Two decisions, both load-bearing:
+#   · The listen side is ALWAYS 127.0.0.1. The network-facing contract stays
+#     true — no other machine can reach the box; only THIS host's loopback gets
+#     a door. There is no flag to widen it; that is the escape hatch's job, with
+#     its warning.
+#   · Each exposure is a named proxy device (expose-<port>), so 'box info' and
+#     --list can see it and --remove can undo it. A box with a hole says so.
+#
+# Mechanism (VMs): an Incus 'proxy' device in NAT mode DNATs host
+# 127.0.0.1:<hostport> to the box's <ip>:<port>. The traffic rides the
+# network into the guest, so the in-box server must listen on 0.0.0.0 (not
+# just its own loopback) — inside an isolated box that is safe: boxnet +
+# port-isolation + the ingress drop mean only this door can reach it. Three
+# pieces beside the device itself, each one a drill-found absence:
+#   · a SCOPED ACL allow (this box's ip + this port only) — the ingress drop
+#     that makes A7 true would eat the DNAT'd packet;
+#   · route_localnet + a loopback masquerade on the host (box-firewall.sh) —
+#     Incus installs only the DNAT, and a loopback-sourced packet can neither
+#     leave the host nor be answered without them;
+#   · a static ipv4.address pin on the NIC — NAT mode refuses to start
+#     without one (see below).
+exposure_dev() { echo "expose-$1"; }   # device name for a port
+
+cmd_expose() {
+  local box="${args[0]}" a2="${args[1]:-}" a3="${args[2]:-}"
+
+  # --list
+  if [ "$a2" = "--list" ]; then
+    local found=0 d listen connect
+    while IFS= read -r d; do
+      case "$d" in expose-*) : ;; *) continue ;; esac
+      listen="$(incus config device get "$inst" "$d" listen 2>/dev/null)"
+      connect="$(incus config device get "$inst" "$d" connect 2>/dev/null)"
+      [ "$found" = 0 ] && echo "EXPOSURES for $box"
+      found=1
+      printf '  %-14s %s → %s\n' "${d#expose-}" "$listen" "$connect"
+    done < <(incus config device list "$inst" 2>/dev/null)
+    [ "$found" = 0 ] && echo "box: $box has no exposed ports"
+    return 0
+  fi
+
+  # --remove <port>
+  if [ "$a2" = "--remove" ]; then
+    local port="$a3"; [ -n "$port" ] || usage_error "usage: box expose $box --remove <port>"
+    local dev; dev="$(exposure_dev "$port")"
+    incus config device get "$inst" "$dev" listen >/dev/null 2>&1 \
+      || die "$box has no exposure on port $port (see 'box expose $box --list')"
+    incus config device remove "$inst" "$dev" >/dev/null \
+      && echo "box: closed the door on port $port"
+    # Remove the scoped ACL allow, if one was added. Best-effort: its absence
+    # is not an error (the drill may show the allow was never needed).
+    local ip; ip="$(box_net_ip "$inst" || true)"
+    [ -n "$ip" ] && incus network acl rule remove box-isolate ingress \
+      action=allow "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+    # If that was the last door, unpin the static address it required. Only
+    # then — other exposures still lean on the pin. Best-effort, like the ACL.
+    if ! incus config device list "$inst" 2>/dev/null | grep -q '^expose-'; then
+      incus config device unset "$inst" eth0 ipv4.address >/dev/null 2>&1
+    fi
+    return 0
+  fi
+
+  # expose <port> [<host-port>]
+  local port="$a2" hport="${a3:-$a2}"
+  [ -n "$port" ] || usage_error "usage: $(synopsis_of expose)"
+  case "$port$hport" in *[!0-9]*) usage_error "ports must be numbers — got port='$port' host-port='$hport'" ;; esac
+
+  local ip; ip="$(box_net_ip "$inst")" \
+    || die "$box has no boxnet address yet — is it running? (box info $box)"
+
+  local dev; dev="$(exposure_dev "$port")"
+  if incus config device get "$inst" "$dev" listen >/dev/null 2>&1; then
+    die "$box already exposes port $port (change or remove it: box expose $box --remove $port)"
+  fi
+
+  # The scoped ACL allow FIRST, so the door is open by the time the proxy uses
+  # it. Scoped to this box's IP and this port — it does not widen any other box.
+  incus network acl rule add box-isolate ingress action=allow \
+    "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1 || true
+
+  # A VM's proxy device must be NAT mode — Incus supports proxy on containers in
+  # both modes, but on VMs "NAT mode only" (the userspace forkproxy is a
+  # container thing). NAT mode DNATs host:port → instance:port in netfilter, and
+  # it needs the host to be the instance's gateway, which boxnet makes true.
+  #
+  # And NAT mode needs a STATIC address. Incus resolves connect=0.0.0.0 to the
+  # NIC's ipv4.address — the device config, not the lease — and refuses when it
+  # is unset: `Instance has no static IPv4 address assigned to be used as the
+  # connect IP` (the 0.5.0 drill). The first cut pinned an address but the
+  # WRONG one (box_ipv4's docker0 decoy); the second cut removed the pin
+  # instead of correcting it. Third cut: pin the box's current BOXNET lease.
+  # Same address the box already holds, so nothing about its networking moves —
+  # the lease just becomes official. Left in place across exposures; unpinned
+  # when the last door closes.
+  local err; err="$(mktemp)"
+  if [ -z "$(incus config device get "$inst" eth0 ipv4.address 2>/dev/null)" ]; then
+    # override copies the profile NIC into the instance with the key set; if a
+    # local eth0 already exists, override refuses and set is the right verb.
+    if ! incus config device override "$inst" eth0 "ipv4.address=$ip" >/dev/null 2>"$err" \
+       && ! incus config device set "$inst" eth0 "ipv4.address=$ip" >/dev/null 2>"$err"; then
+      echo "box: could not pin $box's boxnet address ($ip) as static — the NAT proxy requires one:" >&2
+      sed 's/^/  /' "$err" >&2; rm -f "$err"
+      incus network acl rule remove box-isolate ingress action=allow \
+        "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+      die "expose failed"
+    fi
+  fi
+  # connect=0.0.0.0 is deliberate: Incus resolves it to the instance's static
+  # IPv4 (the pin above). Naming an address here would work too, but 0.0.0.0
+  # cannot repeat the docker0 mistake — there is nothing to get wrong.
+  if incus config device add "$inst" "$dev" proxy \
+       "listen=tcp:127.0.0.1:$hport" "connect=tcp:0.0.0.0:$port" \
+       bind=host nat=true >/dev/null 2>"$err"; then
+    rm -f "$err"
+    echo "box: 127.0.0.1:$hport → $box:$port"
+    echo "box: (the in-box server must listen on 0.0.0.0:$port, not only its own loopback)"
+    # The device alone is not the door: the DNAT'd loopback packet also needs
+    # route_localnet on the bridge (box-firewall.sh installs it, with the
+    # masquerade). Readable without root — warn instead of handing over a
+    # door that silently does not answer.
+    if [ "$(cat /proc/sys/net/ipv4/conf/boxnet/route_localnet 2>/dev/null)" != 1 ]; then
+      echo "box: WARNING — route_localnet is off on boxnet, so this door will NOT answer." >&2
+      echo "box: the host firewall predates expose — apply it: sudo /usr/local/sbin/box-firewall" >&2
+    fi
+  else
+    # NEVER swallow incus's reason — the first cut of this verb died with a bare
+    # "could not add the proxy device" and told the drill nothing.
+    echo "box: incus refused the proxy device:" >&2
+    sed 's/^/  /' "$err" >&2; rm -f "$err"
+    incus network acl rule remove box-isolate ingress action=allow \
+      "destination=$ip/32" "destination_port=$port" protocol=tcp >/dev/null 2>&1
+    die "expose failed"
+  fi
 }
 
 # --- dispatch: driven by the table, not by a hand-written case --------------

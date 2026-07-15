@@ -49,7 +49,7 @@ if incus network show boxnet >/dev/null 2>&1; then
     ok "dns.mode = none — a box cannot enumerate its siblings by name"
   else
     no "dns.mode = ${dns:-<unset>} — a box can RESOLVE its siblings' names and addresses"
-    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
+    inf "fix:  re-run:  box setup-host"
     [ "$FIX" = 1 ] && { incus network set boxnet dns.mode=none && inf "set: dns.mode=none"; }
   fi
   inf "ipv4.address = $(incus network get boxnet ipv4.address 2>/dev/null)"
@@ -110,7 +110,7 @@ if [ -n "$PROFILES" ]; then
       no "$p: security.port_isolation is NOT set — BOXES CAN REACH EACH OTHER"
       inf "an L3 ACL cannot do this: two boxes on one bridge are on the same L2"
       inf "segment, so their frames are switched, never routed past the ACL."
-      inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh"
+      inf "fix:  re-run:  box setup-host"
     fi
     for k in security.mac_filtering security.ipv4_filtering; do
       v="$(incus profile device get "$p" eth0 "$k" 2>/dev/null)"
@@ -192,7 +192,7 @@ else
     no "the host resolves via a CGNAT/Tailscale resolver ($hostns), and boxes INHERIT it — see issue #33"
     inf "· box DNS breaks whenever the tailnet's resolver does (this is what kills cold mints)"
     inf "· and tailnet names RESOLVE from inside a box, though its ACL blocks connecting to them"
-    inf "fix:  re-run  ~/.local/share/claudebox/host/setup-host.sh  (it pins the resolver)"
+    inf "fix:  re-run:  box setup-host  (it pins the resolver)"
     inf "      or quick-test the pin alone:  bash drill/doctor.sh --pin-dns"
   else
     inf "boxes inherit the host's resolver (unpinned — setup-host.sh pins this now; re-run it)"
