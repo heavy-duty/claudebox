@@ -1,28 +1,30 @@
 # box design
 
 `box` is a CLI that mints and manages **trust-less, network-isolated VMs
-with Claude Code installed**. It is infrastructure, not a project provisioner.
+with a coding agent installed** (`claude`, `codex`, `grok`, or `blank` for
+none). It is infrastructure, not a project provisioner.
 
 See issue #3 for the full reframe and rationale. This doc captures the durable
 design decisions.
 
 ## Principle: separate the tool from the agent
 
-- **The tool** mints isolated boxes with Claude installed but **unauthenticated**.
+- **The tool** mints isolated boxes with the agent installed but **unauthenticated**.
   It knows nothing about projects, secrets, recipes, or memory.
-- **The agent** (Claude Code, inside the box) reads an optional `.box/`
-  runbook in a cloned repo and acts on it. The recipe's consumer is the
-  reasoning agent, not host machinery.
+- **The agent** (Claude Code, Codex, Grok — whichever template, inside the box)
+  reads an optional `.box/` runbook in a cloned repo and acts on it. The recipe's
+  consumer is the reasoning agent, not host machinery.
 
 ## Boxes are strictly creds-free
 
 `box new --name <n>` launches a blank box: everything installed, **no**
-git credentials and **no** Claude credentials. The operator authenticates
+git credentials and **no** agent credentials. The operator authenticates
 interactively *inside* the box:
 
-- **Claude** — `claude` → `/login` (paste-a-code OAuth: copy the URL, open it in
-  your own browser, paste the code back). Works because the box is outbound-only;
-  the tool never handles a token.
+- **The coding agent** — e.g. `claude` → `/login` (paste-a-code OAuth: copy the
+  URL, open it in your own browser, paste the code back); `codex` and `grok`
+  have their own login step. Works because the box is outbound-only; the tool
+  never handles a token.
 - **Git** — the operator adds their own PAT / `gh auth login` inside the box.
 
 The tool stores and injects **no** credentials, ever. This dissolves the
@@ -36,15 +38,16 @@ snapshots, not a secrets store:
 - `box snapshot <n> [label]` — checkpoint after login + clone.
 - `box new --name <n2> --from <src>[/<snapshot>]` — clone an existing box
   or snapshot (authed state and all). Isolation is preserved: the clone keeps
-  the `claude-dev` profile + `claudenet` + ACL.
+  the `box-net` profile + `boxnet` + ACL.
 - `box restore <n> <snapshot>` — roll a box back to a checkpoint.
 
 Log in once → snapshot → spin up authed boxes from it.
 
 ## The box announces itself to the agent
 
-cloud-init installs a global `~/.claude/CLAUDE.md` in every box telling Claude it
-is running in a box (trust-less, ephemeral, creds-free) and to treat a
+cloud-init installs a global agent-context file in every coding-agent box
+(`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.grok/AGENTS.md`) telling the
+agent it is running in a box (trust-less, ephemeral, creds-free) and to treat a
 repo's `.box/` folder as its bootstrap runbook. No "tell it" step, no host
 execution.
 
@@ -62,7 +65,7 @@ forever — and wrapping them one at a time grows a worse `incus`. The rule:
 
 > **box owns a command when it must enforce an invariant Incus cannot see:**
 > the `user.box=1` boundary (never touch an instance we didn't mint), the
-> isolation stack (`claude-dev` profile + `claudenet` + ACL), or the creds-free
+> isolation stack (`box-net` profile + `boxnet` + ACL), or the creds-free
 > snapshot→clone workflow. Everything else is Incus's job.
 
 The rule cuts both ways, and that's the point:
@@ -92,7 +95,7 @@ warns and proceeds — from there the trust boundary is yours to keep.
 
 ## Isolation
 
-Dedicated NAT bridge `claudenet` + Incus `claude-isolate` ACL dropping all
+Dedicated NAT bridge `boxnet` + Incus `box-isolate` ACL dropping all
 RFC1918/CGNAT/link-local egress, plus host-firewall rules blocking instance →
 host. Entry is `incus exec` over the local socket — no inbound path. The VM is
 the trust boundary.
@@ -101,12 +104,12 @@ the trust boundary.
 That last clause is the one that was assumed and turned out to be false, so it
 is spelled out here with the mechanism, and `drill/` tests it on every run.
 
-- **Box → host, LAN, RFC1918, CGNAT, link-local:** the `claude-isolate` ACL.
+- **Box → host, LAN, RFC1918, CGNAT, link-local:** the `box-isolate` ACL.
 - **Box → box: an nftables *bridge-family* rule** (`host/box-firewall.sh`).
   It cannot be an ACL rule. Two boxes on one bridge share an L2 segment, so
   their frames are *switched* between bridge ports and never traverse the
   netfilter path an L3 ACL lives on — the ACL looked airtight (it drops
-  `10.0.0.0/8`, which contains `claudenet`) while box→box was in fact wide open.
+  `10.0.0.0/8`, which contains `boxnet`) while box→box was in fact wide open.
   A live probe found box A's SYN arriving at box B. The bridge family's forward
   hook fires exactly on port-to-port frames, which on this bridge means box→box
   and nothing else: gateway traffic and routed egress are delivered locally, not

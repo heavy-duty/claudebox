@@ -84,9 +84,9 @@ a **design veto** for #16, caught before the code is written.
 
 ## What it does not check
 
-`claude /login` — it's interactive by design, and the box is creds-free by
-design. The drill confirms Claude Code is installed and runnable; authenticating
-is yours.
+agent login (e.g. `claude /login`) — it's interactive by design, and the box is
+creds-free by design. The drill confirms each coding-agent template's CLI is
+installed and runnable; authenticating is yours.
 
 If the host has no `/dev/kvm`, box falls back to container mode. The drill
 still runs, but it says loudly that **the VM trust boundary was not validated**
