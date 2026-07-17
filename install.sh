@@ -17,9 +17,49 @@ log() { printf 'box-install: %s\n' "$*"; }
 warn() { printf 'box-install: WARNING: %s\n' "$*" >&2; }
 die() { printf 'box-install: ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Ask a yes/no question and echo the answer. The wrinkle: under the intended
+# 'curl … | bash', THIS SCRIPT is stdin — so a plain 'read' would consume the
+# installer's own remaining lines, not the user's keystroke. Prompts therefore
+# read the terminal directly via /dev/tty. When there is no terminal at all (CI,
+# a pipe with no tty), there is nobody to ask: BOX_YES=1 means "assume yes to
+# every prompt" and is how automation and the drill drive this unattended;
+# without it we refuse rather than silently assume consent.
+confirm() {  # $1 = question
+  [ -n "${BOX_YES:-}" ] && return 0
+  if ! { true >/dev/tty; } 2>/dev/null; then
+    die "no terminal to confirm on. Re-run with BOX_YES=1 to proceed non-interactively (assumes yes to all prompts)."
+  fi
+  local reply
+  printf 'box-install: %s [y/N] ' "$1" >/dev/tty
+  read -r reply </dev/tty || reply=""
+  case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
 # --- prerequisites ---------------------------------------------------------
 command -v curl >/dev/null 2>&1 || die "curl is required but was not found. Please install curl and re-run."
 command -v tar  >/dev/null 2>&1 || die "tar is required but was not found. Please install tar and re-run."
+
+# --- confirm, then no-op if already installed ------------------------------
+# Prompt BEFORE downloading anything: the first thing a curl|bash should do is
+# ask whether you meant to. Then, if box is already installed, this run changes
+# nothing and says so — a re-run is a safe no-op, which dissolves the whole
+# "curl clobbered my working install / rebuilt the stack under my boxes" class
+# of failures. Upgrading is deliberately NOT an in-place overwrite: you uninstall
+# what you have (dealing with your boxes as you do) and install fresh.
+confirm "Install box from $REPO@$REF?" || die "cancelled — nothing was changed."
+
+if [ -e "$BINDIR/box" ] || [ -x "$DEST/bin/box" ]; then
+  cur="$(cat "$DEST/INSTALLED_FROM" 2>/dev/null || echo '<unknown source>')"
+  cur_ver="$(cat "$DEST/VERSION" 2>/dev/null || echo '?')"
+  log "box is already installed ($cur, version $cur_ver) — nothing to do."
+  log "To install a different version, remove the current one first:"
+  log "    · preserve any boxes you care about — 'box down <box>', then keep them"
+  log "      (a portable 'box export' is #70; for now copy what you need OUT via"
+  log "      'box shell'/'box exec'), and 'box rm <box>' when you are done"
+  log "    · uninstall:  rm -rf \"$DEST\" \"$BINDIR/box\""
+  log "    · then re-run this installer"
+  exit 0
+fi
 
 # --- temp workspace --------------------------------------------------------
 TMPDIR="$(mktemp -d)"
@@ -47,80 +87,10 @@ EXTRACTED="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
 [ -n "$EXTRACTED" ] || die "could not find the extracted source directory in archive"
 [ -f "$EXTRACTED/bin/box" ] || die "archive does not contain bin/box — is $REPO@$REF correct?"
 
-# --- upgrade hatch ---------------------------------------------------------
-# This installer builds the host stack itself now, and every box on the host is
-# attached to that stack — so a version change here is not just a tree swap, it
-# reaches under running boxes. Until the version-aware migration exists (#67),
-# refuse rather than guess: if this would change what is installed AND there are
-# boxes on the host, stop and let a human decide. Checked BEFORE $DEST is
-# touched, so a refusal leaves the working install exactly as it was.
-# Same version + same ref = nothing to change: say so and carry on.
-new_ver="$(cat "$EXTRACTED/VERSION" 2>/dev/null || echo unknown)"
-old_ver="$(cat "$DEST/VERSION" 2>/dev/null || true)"
-old_from="$(cat "$DEST/INSTALLED_FROM" 2>/dev/null || true)"
-
-if [ -n "$old_ver" ] && [ "$old_ver" = "$new_ver" ] && [ "$old_from" = "$REPO@$REF" ]; then
-  CHANGING=0
-else
-  CHANGING=1
-fi
-
-# How we ask incus about boxes. No incus => no boxes, and nothing to protect.
-if [ "$(id -u)" -eq 0 ]; then PRIV=""
-elif command -v sudo >/dev/null 2>&1; then PRIV="sudo"
-else PRIV=""
-fi
-
-# Unprivileged FIRST: anyone who owns boxes is already in incus-admin, so the
-# plain query answers it without making the installer demand a sudo password
-# just to look. Escalate only if the socket refuses us.
-incus_names() {  # $1 = tag filter
-  incus list "$1" --format csv --columns n 2>/dev/null && return 0
-  [ -n "$PRIV" ] && $PRIV incus list "$1" --format csv --columns n 2>/dev/null
-  return 0
-}
-
-boxes_on_host() {
-  command -v incus >/dev/null 2>&1 || return 0
-  # BOTH tags: a pre-rename box carries user.claudebox=1 and is just as much
-  # someone's work as a current one.
-  { incus_names "user.box=1"; incus_names "user.claudebox=1"; } | sed '/^$/d' | sort -u
-}
-
-if [ "$CHANGING" = 0 ]; then
-  log "already at $new_ver ($REPO@$REF) — reinstalling the same tree, nothing to migrate"
-elif [ -z "${BOX_FORCE_UPGRADE:-}" ]; then
-  found="$(boxes_on_host)"
-  if [ -n "$found" ]; then
-    printf 'box-install: ERROR: this host has boxes, and this install would change what runs them.\n' >&2
-    printf '\n  installed: %s\n  incoming:  %s\n\n  boxes on this host:\n' \
-      "${old_from:-<none>} ${old_ver:-<no version file>}" "$REPO@$REF $new_ver" >&2
-    printf '%s\n' "$found" | sed 's/^/    · /' >&2
-    cat >&2 <<EOF
-
-  Refusing, and nothing has been changed — your current install is intact.
-  The installer now builds the host stack (network, ACL, profile, firewall)
-  itself, so upgrading reaches under boxes that are attached to it.
-
-  Your options:
-    · Stay where you are. The boxes keep working. Nothing to do.
-    · Deal with the boxes, then re-run this installer.
-      NOTE: 'box rm' deletes a box AND every snapshot it has — it cannot be
-      undone, and a snapshot does NOT survive its box. Copy anything you need
-      OUT of a box first ('box shell <box>' / 'box exec <box> -- ...').
-    · Upgrade anyway, on purpose:
-        BOX_FORCE_UPGRADE=1 curl -fsSL <this url> | bash
-      Boxes are not deleted, but the stack is rebuilt underneath them.
-
-  A version-aware upgrade that migrates boxes instead of refusing is #67.
-EOF
-    exit 1
-  fi
-fi
-
-# --- atomically replace $DEST ---------------------------------------------
+# --- install into $DEST ----------------------------------------------------
+# Reached only on a host with no existing install (the no-op check above
+# exits otherwise), so this is always a fresh tree, never an overwrite.
 log "installing into $DEST"
-rm -rf "$DEST"
 mkdir -p "$(dirname "$DEST")"
 mv "$EXTRACTED" "$DEST"
 
@@ -163,36 +133,43 @@ esac
 # and it must not hinge on whether the host stack came up.
 printf '%s@%s\n' "$REPO" "$REF" > "$DEST/INSTALLED_FROM"
 
-# --- host setup ------------------------------------------------------------
-# The installer finishes the job (#64). Telling the user to go run setup-host
-# was a step that read as optional and failed later as mysterious: the install
-# reports success, 'box' is on PATH, and 'box new' dies on a host with no
-# Incus, no boxnet, no profile. setup-host is idempotent by design, so doing
-# this on EVERY install is also how an upgraded host picks up stack changes —
-# the isolation fixes that ship as new firewall rules land when the tool that
-# claims them lands, instead of waiting on someone to re-run a command.
-# BOX_SKIP_SETUP_HOST=1 opts out: CI, image builds, a host set up by hand.
+# --- host setup (second prompt) --------------------------------------------
+# The tool is installed; the machine is not yet a box host. Offer to finish the
+# job — build Incus and the isolation stack — rather than leave 'box new' to die
+# later on a host with no boxnet and no profile (#64). This is its own decision:
+# you might be installing the CLI on a workstation and hosting boxes elsewhere.
+# BOX_SKIP_SETUP_HOST=1 answers "no" without prompting (image builds, a host set
+# up by hand); BOX_YES answers "yes".
 setup_ok=""
+setup_declined=""
 if [ -n "${BOX_SKIP_SETUP_HOST:-}" ]; then
-  log "skipping host setup (BOX_SKIP_SETUP_HOST is set) — run it yourself: box setup-host"
+  log "skipping host setup (BOX_SKIP_SETUP_HOST is set)."
+  setup_declined=1
 elif [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
-  warn "host setup needs root and sudo was not found."
+  warn "cannot set up the host: it needs root and sudo was not found."
   warn "  run this as root to finish: $DEST/host/setup-host.sh"
-else
-  log "running one-time host setup (installs Incus + the isolation stack; may ask for sudo)"
+  setup_declined=1
+elif confirm "Set up this machine as a box host now? (installs Incus + the isolation stack; needs sudo)"; then
   # </dev/null because under 'curl … | bash' this script IS stdin: a child that
   # reads stdin eats the installer's own remaining lines. sudo is unaffected —
   # it prompts on /dev/tty, so an interactive host can still authenticate.
+  # setup-host re-execs itself under sg incus-admin if it must add you to the
+  # group; that re-exec is a child here and completes the whole setup in one go.
   if bash "$DEST/host/setup-host.sh" </dev/null; then
     setup_ok=1
   else
     warn "host setup did not complete — box is installed, the host is not ready."
     warn "  fix the error above and re-run: box setup-host"
   fi
+else
+  log "skipped host setup."
+  setup_declined=1
 fi
 
 if [ -n "$setup_ok" ]; then
   log "done ($REPO@$REF) — try: box new --name test"
+elif [ -n "$setup_declined" ]; then
+  log "done ($REPO@$REF) — when you want this machine to host boxes: box setup-host"
 else
   log "done ($REPO@$REF) — finish with 'box setup-host', then: box new --name test"
 fi

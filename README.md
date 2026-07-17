@@ -40,20 +40,29 @@ design rationale.
 curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
 ```
 
-Installs the tree to `~/.local/share/box` and links `box` onto your
-`PATH`, then runs the host setup below for you (it may ask for `sudo`; set
-`BOX_SKIP_SETUP_HOST=1` to opt out and run it yourself). Upgrading from a
-pre-0.4.0 install also retires the old `claudebox` symlink. (No `git clone`
-needed.)
+It asks first — **"Install box?"** — then, if box is not already installed,
+downloads the tree to `~/.local/share/box`, links `box` onto your `PATH`, and
+asks a second question: **"Set up this machine as a box host now?"** Say yes and
+it builds the whole isolation stack for you (it may ask for `sudo`); say no and
+you can run `box setup-host` later. (No `git clone` needed.)
 
-**Upgrading, and boxes.** Because the installer builds the host stack, an
-upgrade reaches under the boxes attached to it — so it is deliberate about it.
-Re-running the same version changes nothing and says so. Changing version on a
-host that has boxes **refuses**, lists them, and leaves your install exactly as
-it was; deal with the boxes and re-run, or say `BOX_FORCE_UPGRADE=1` to upgrade
-over them on purpose (boxes are not deleted, but the stack is rebuilt beneath
-them). With no boxes on the host, it just upgrades. Migrating boxes across an
-upgrade instead of refusing is [#67](https://github.com/heavy-duty/box/issues/67).
+**Re-running is a safe no-op.** If box is already installed, the installer tells
+you so and changes nothing — a stray re-run can never clobber your install or
+rebuild the stack under your boxes. Upgrading is therefore explicit: uninstall
+what you have and install fresh. Preserve any boxes first — `box down <box>`,
+copy out anything you need (a portable `box export` is
+[#70](https://github.com/heavy-duty/box/issues/70)), then `box rm <box>`
+(which deletes the box *and* its snapshots) — then:
+
+```sh
+rm -rf ~/.local/share/box ~/.local/bin/box   # uninstall
+curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
+```
+
+A version-aware upgrade that migrates boxes instead of asking you to is
+[#67](https://github.com/heavy-duty/box/issues/67). For unattended installs
+(CI, images), `BOX_YES=1` answers every prompt yes and `BOX_SKIP_SETUP_HOST=1`
+declines the host-setup step.
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 

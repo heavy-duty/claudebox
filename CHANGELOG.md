@@ -55,19 +55,22 @@ which records not just what changed but what each drill run proved.
   unsets `dns.mode` and so has to be converged back. `DRILL_OWNS_SETUP=1`
   hands sequencing back to the drill. Pre-setup tripwires now read *before*
   `install.sh`, since that is what triggers setup now.
-- **`install.sh` runs the host setup itself** (#64) — it printed a warning and
-  left you a command to run, so the install reported success and `box new`
-  failed on a host with no Incus. `BOX_SKIP_SETUP_HOST=1` opts out; if setup
-  fails, the install still stands and says what to re-run.
-- **`install.sh` refuses to change versions under existing boxes** — building
-  the host stack from the installer means an upgrade reaches under every box
-  attached to that stack, so it is no longer only a tree swap. Same version and
-  ref: says so, changes nothing. Version or ref change with boxes on the host
-  (either tag generation): refuses, loudly, listing them — and refuses *before*
-  `$DEST` is touched, so the working install survives the refusal. No boxes:
-  proceeds. `BOX_FORCE_UPGRADE=1` overrides; the drill sets it, since wiping
-  boxes is its job. The version-aware upgrade that migrates instead of refusing
-  is #67.
+- **`install.sh` asks, sets up the host, and no-ops on re-run** (#64) — it now
+  prompts *"Install box?"*, then on a fresh host installs the tree and asks a
+  second question, *"Set up this machine as a box host now?"*, running the whole
+  isolation stack if you say yes (previously it only printed a warning and left
+  you a command, so the install reported success and `box new` died on a host
+  with no Incus). Prompts read `/dev/tty`, since under `curl | bash` the script
+  itself is stdin; `BOX_YES=1` answers yes unattended (required where there is
+  no terminal), `BOX_SKIP_SETUP_HOST=1` declines the host-setup step.
+- **`install.sh` never overwrites an existing install** — if box is already
+  installed it says so and changes nothing, so a stray re-run can no longer
+  clobber a working tree or rebuild the host stack under live boxes. Upgrading
+  is explicit: uninstall (`rm -rf ~/.local/share/box ~/.local/bin/box`, boxes
+  preserved first) and install fresh. This replaces the earlier version-diff
+  refusal with a simpler rule that dissolves the same class of errors. The
+  version-aware upgrade that migrates boxes instead is #67; a portable
+  `box export` so a box survives its own deletion is #70.
 
 ## 0.5.0 — 2026-07-15
 
