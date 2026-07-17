@@ -387,10 +387,11 @@ EOF
 Prepare this host to mint boxes — one time. Installs Incus and builds the
 isolation stack: the boxnet NAT bridge (resolver pinned), the box-isolate
 ACL, the box-net profile, and the firewall rules, all re-applied at boot.
-Idempotent — safe to re-run after a box upgrade to pick up stack changes.
+Idempotent — safe to re-run after a box upgrade to pick up stack changes;
+install.sh runs it for you, so this is for re-applying by hand.
 
-If it has to add you to the incus-admin group it will say so and exit; log
-back in (or 'sg incus-admin') and run it again.
+One run is enough. If it has to add you to the incus-admin group it re-runs
+itself under that group — no re-login, no second invocation.
 
   box setup-host
 EOF

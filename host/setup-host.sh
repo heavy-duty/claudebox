@@ -3,17 +3,39 @@
 # the box-net profile. Idempotent. Ubuntu 24.04 / Debian 13.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+here="$(dirname "$(dirname "$self")")"
 
 if ! command -v incus >/dev/null; then
   sudo apt-get update
   sudo apt-get install -y incus
 fi
 
-if ! id -nG "$USER" | grep -qw incus-admin; then
+# Group membership is a property of THIS PROCESS's credentials, not of the group
+# database — and the two disagree for exactly as long as it matters here.
+# 'id -nG "$USER"' names a user, so it reads /etc/group and reports incus-admin
+# the instant usermod returns; the running shell's own credentials still lack
+# it, because supplementary groups are fixed at login. So the old check passed
+# on a same-session re-run, sailed into the incus calls below, and died on a
+# permission error that named neither the group nor the re-login. Argless
+# 'id -nG' asks the process what it actually holds, which is what incus checks
+# when it opens /var/lib/incus/unix.socket.
+if ! id -nG | grep -qw incus-admin; then
   sudo usermod -aG incus-admin "$USER"
-  echo "NOTE: added $USER to incus-admin — re-login (or 'sg incus-admin') and re-run."
-  exit 0
+  # Then finish the job rather than adjourning it. Exiting 0 here was a
+  # success-shaped no-op: no boxnet, no ACL, no box-net profile, no firewall —
+  # and the burden of knowing that on the reader of a NOTE (#63). 'sg' runs us
+  # again with the new group in our credentials, no re-login, one invocation.
+  # The guard makes that at most one hop: if sg somehow lands without the
+  # group, we fail loudly instead of forking forever.
+  if [ -z "${BOX_SETUP_HOST_REEXEC:-}" ]; then
+    echo "added $USER to incus-admin — re-running under the new group (no re-login needed)"
+    export BOX_SETUP_HOST_REEXEC=1
+    exec sg incus-admin -c "$(printf '%q ' bash "$self" "$@")"
+  fi
+  echo "ERROR: still not in incus-admin after usermod + sg." >&2
+  echo "       log out and back in, then re-run: box setup-host" >&2
+  exit 1
 fi
 
 # Storage pool + base config (safe to re-run: skipped once the pool exists).

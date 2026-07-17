@@ -41,13 +41,18 @@ curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | ba
 ```
 
 Installs the tree to `~/.local/share/box` and links `box` onto your
-`PATH`. Re-run any time to upgrade — upgrading from a pre-0.4.0 install also
-retires the old `claudebox` symlink. (No `git clone` needed.)
+`PATH`, then runs the host setup below for you (it may ask for `sudo`; set
+`BOX_SKIP_SETUP_HOST=1` to opt out and run it yourself). Re-run any time to
+upgrade — upgrading re-applies the host stack, and from a pre-0.4.0 install
+also retires the old `claudebox` symlink. (No `git clone` needed.)
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
+The installer already does this. Run it directly to set up a host you
+installed with `BOX_SKIP_SETUP_HOST=1`, or to re-apply the stack by hand:
+
 ```sh
-box setup-host   # run twice if it adds you to incus-admin (re-login between)
+box setup-host   # one run is enough
 ```
 
 Idempotent. Installs Incus and creates the isolation stack: the `boxnet` NAT

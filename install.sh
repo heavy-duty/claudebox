@@ -84,16 +84,44 @@ case ":$PATH:" in
     ;;
 esac
 
-# --- environment check -----------------------------------------------------
-if ! command -v incus >/dev/null 2>&1; then
-  warn "incus was not found. box needs Incus on the host."
-  warn "  run the one-time host setup: $DEST/host/setup-host.sh"
-fi
-
 # Record WHAT was installed, so a caller can assert it got what it asked for.
 # Without this, an installer invoked with stale env vars (the CLAUDEBOX_* names
 # retired in 0.5.0) silently falls back to the defaults and installs main —
 # and the caller drills the wrong tree, believing it drilled its branch.
+# Written BEFORE host setup: this records the install, which has now happened,
+# and it must not hinge on whether the host stack came up.
 printf '%s@%s\n' "$REPO" "$REF" > "$DEST/INSTALLED_FROM"
 
-log "done ($REPO@$REF) — try: box new --name test"
+# --- host setup ------------------------------------------------------------
+# The installer finishes the job (#64). Telling the user to go run setup-host
+# was a step that read as optional and failed later as mysterious: the install
+# reports success, 'box' is on PATH, and 'box new' dies on a host with no
+# Incus, no boxnet, no profile. setup-host is idempotent by design, so doing
+# this on EVERY install is also how an upgraded host picks up stack changes —
+# the isolation fixes that ship as new firewall rules land when the tool that
+# claims them lands, instead of waiting on someone to re-run a command.
+# BOX_SKIP_SETUP_HOST=1 opts out: CI, image builds, a host set up by hand.
+setup_ok=""
+if [ -n "${BOX_SKIP_SETUP_HOST:-}" ]; then
+  log "skipping host setup (BOX_SKIP_SETUP_HOST is set) — run it yourself: box setup-host"
+elif [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
+  warn "host setup needs root and sudo was not found."
+  warn "  run this as root to finish: $DEST/host/setup-host.sh"
+else
+  log "running one-time host setup (installs Incus + the isolation stack; may ask for sudo)"
+  # </dev/null because under 'curl … | bash' this script IS stdin: a child that
+  # reads stdin eats the installer's own remaining lines. sudo is unaffected —
+  # it prompts on /dev/tty, so an interactive host can still authenticate.
+  if bash "$DEST/host/setup-host.sh" </dev/null; then
+    setup_ok=1
+  else
+    warn "host setup did not complete — box is installed, the host is not ready."
+    warn "  fix the error above and re-run: box setup-host"
+  fi
+fi
+
+if [ -n "$setup_ok" ]; then
+  log "done ($REPO@$REF) — try: box new --name test"
+else
+  log "done ($REPO@$REF) — finish with 'box setup-host', then: box new --name test"
+fi

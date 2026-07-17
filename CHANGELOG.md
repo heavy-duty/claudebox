@@ -3,6 +3,30 @@
 History before 0.5.0 lives in git and in [drill/RUNS.md](drill/RUNS.md),
 which records not just what changed but what each drill run proved.
 
+## Unreleased
+
+### Fixed
+
+- **`box setup-host` finishes in one run** (#63). When it had to add you to
+  `incus-admin` it stopped there and told you to re-login and re-run — an
+  `exit 0` that reported success having built none of the stack: no `boxnet`,
+  no ACL, no `box-net` profile, no firewall. It now re-execs itself under
+  `sg incus-admin` and completes in that one invocation. The membership check
+  was also asking the wrong question: `id -nG "$USER"` reads the group
+  database, which lists the group the moment `usermod` returns, so a
+  same-session re-run passed the check with credentials that still lacked the
+  group and died further down on a bare permission error from `incus`. Argless
+  `id -nG` asks the process what it actually holds.
+
+### Changed
+
+- **`install.sh` runs the host setup itself** (#64) — it printed a warning and
+  left you a command to run, so the install reported success and `box new`
+  failed on a host with no Incus. Since `setup-host` is idempotent, doing this
+  on every install is also how an upgraded host picks up stack changes.
+  `BOX_SKIP_SETUP_HOST=1` opts out; if setup fails, the install still stands
+  and says what to re-run.
+
 ## 0.5.0 — 2026-07-15
 
 The release the project was renamed in: the repo is `heavy-duty/box`, matching
