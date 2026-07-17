@@ -188,6 +188,39 @@ certificate) and asserts the absence afterwards. A failed `grant` backs its
 own group-add out on exit for the same reason: no half-granted user holding
 an un-narrowed socket.
 
+## Server-class boxes: joining an overlay from inside
+
+"No inbound path" is a claim about the **host's network position**: box builds
+no route in — no SSH, no forwarded port, no LAN listener beyond `expose`'s
+loopback door. It was never a claim about what a guest may do with its own
+outbound reach. A guest can deliberately join an overlay network (a tailnet)
+from inside and invite management in over the tunnel it established — the
+host-side stack only ever sees allowed outbound UDP, and every rule above
+still holds: the box still cannot reach the host, the LAN, or a sibling box.
+It is reachable *only* over the overlay. For a staging server that is not a
+hole in the posture, it **is** the posture: tailnet-only, never LAN or public.
+
+The `staging` template is the sanctioned server-class use of that, and the
+layering keeps each tool honest:
+
+- **box** mints the VM — docker + rig preinstalled, still strictly creds-free.
+- **rig**, run *inside* the box (`box shell` → `sudo rig bootstrap workload`),
+  hardens sshd and joins the tailnet. rig holds the auth key in process
+  memory per its own contract; box never sees it.
+- **cast** registers the box in the control plane by its tailnet address.
+
+Two template keys carry the server posture, and only those: `BOX_REQUIRE_VM`
+(no container fallback — the VM is the trust boundary, and the guest runs
+docker) and `BOX_AUTOSTART` (`boot.autostart`, so the box returns from a host
+reboot without an operator). There is still no key for a network or a
+`security.*` flag.
+
+**Snapshot before the join.** Clone from a snapshot taken *before*
+`rig bootstrap` runs: a post-join clone carries its source's tailnet identity,
+and two machines answering as one node is the overlay's version of the DHCP
+collision `reset_identity` exists for. Mint → snapshot → bootstrap, in that
+order.
+
 ## Non-goals
 
 - Interactive-first: install and setup prompt by default (`BOX_YES=1` and the
