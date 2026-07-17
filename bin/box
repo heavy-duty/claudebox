@@ -235,8 +235,10 @@ being told.
 
   --name <box>           Required. The box's name.
   --template <t>         Template to mint from; 'box templates' lists them.
-                         A template sets image, user and resources — never
-                         the network: every template gets the same isolation.
+                         A template sets image, user, resources and boot
+                         demands (a server-class one insists on VM mode and
+                         autostart) — never the network: every template gets
+                         the same isolation.
   --from <src>[/<snap>]  Clone src's live state, or its snapshot <snap>.
   --cpu <n>              CPUs for this mint (limits.cpu, verbatim to Incus).
   --memory <size>        RAM for this mint, e.g. 3GiB (limits.memory).
@@ -246,6 +248,8 @@ being told.
                          default wherever /dev/kvm exists; container mode
                          (security.nesting=true) is the fallback for hosts
                          without nested virt — weaker isolation, dev/test only.
+                         A template that requires VM mode refuses both the
+                         fallback and --container.
 
 Resources resolve most-specific-first: these flags, then BOX_CPU /
 BOX_MEMORY / BOX_DISK environment variables (the scripting form), then the
@@ -261,11 +265,11 @@ EOF
 ;;
     templates) cat <<'EOF'
 List the templates this install can mint, with their descriptions. A template
-is a directory under templates/: a box.env (image, user, resources — parsed
-against an allowlist, never sourced) and a user-data.yaml (cloud-init, passed
-to Incus verbatim). Templates cannot touch the network or security flags —
-the shared box-net profile is the placement contract, so every template gets
-the same isolation.
+is a directory under templates/: a box.env (image, user, resources, boot
+demands — parsed against an allowlist, never sourced) and a user-data.yaml
+(cloud-init, passed to Incus verbatim). Templates cannot touch the network
+or security flags — the shared box-net profile is the placement contract, so
+every template gets the same isolation.
 
   box templates
   box new --name scratch --template blank
@@ -824,18 +828,23 @@ reset_identity() {
   wait_agent "$i"
 }
 
-# Templates set image, user, resources and cloud-init — NOTHING else. The
-# box.env file is parsed against this allowlist, never sourced: sourcing would
-# hand every template arbitrary bash execution on the HOST at mint time. And
-# there is deliberately no key for a network or a security flag — the shared
-# box-net profile is the placement contract, so no template can weaken
-# isolation. 'blank' is a box with nobody home, not a box with the safety off.
+# Templates set image, user, resources, boot demands and cloud-init — NOTHING
+# else. The box.env file is parsed against this allowlist, never sourced:
+# sourcing would hand every template arbitrary bash execution on the HOST at
+# mint time. And there is deliberately no key for a network or a security flag
+# — the shared box-net profile is the placement contract, so no template can
+# weaken isolation. 'blank' is a box with nobody home, not a box with the
+# safety off. The two boot demands are for server-class templates (#68):
+# BOX_REQUIRE_VM=1 refuses the container fallback (the VM is the trust
+# boundary, and a server-class guest runs docker), and BOX_AUTOSTART=1 stamps
+# boot.autostart so the box survives a host reboot without an operator.
 load_template() {
   local t="$1" dir line key val
   dir="$root/templates/$t"
   [ -d "$dir" ] || die "no such template: $t (see 'box templates')"
   [ -f "$dir/box.env" ] || die "template '$t' has no box.env"
   T_DESC=""; T_IMAGE=""; T_USER=""; T_CPU=""; T_MEMORY=""; T_DISK=""
+  T_REQUIRE_VM=""; T_AUTOSTART=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; esac
     case "$line" in
@@ -857,7 +866,9 @@ load_template() {
       BOX_CPU)         T_CPU="$val" ;;
       BOX_MEMORY)      T_MEMORY="$val" ;;
       BOX_DISK)        T_DISK="$val" ;;
-      *) die "template '$t': unknown key '$key' — a template sets image, user and resources, nothing else (there is no key for a network, on purpose)" ;;
+      BOX_REQUIRE_VM)  T_REQUIRE_VM="$val" ;;
+      BOX_AUTOSTART)   T_AUTOSTART="$val" ;;
+      *) die "template '$t': unknown key '$key' — a template sets image, user, resources and boot demands, nothing else (there is no key for a network, on purpose)" ;;
     esac
   done <"$dir/box.env"
   # Not 'A && B || die': if T_IMAGE is set but T_USER is not, that idiom still
@@ -907,6 +918,17 @@ cmd_new() {
     local t="${template:-blank}" m extra=()
     load_template "$t"
     m="$(pick_mode)"
+    # A server-class template (BOX_REQUIRE_VM, #68) has no weaker mode: the VM
+    # is its trust boundary, and its guest runs docker. Refuse the container
+    # fallback AND an explicit --container — never silently mint something
+    # lesser than what the template promises. The message holds for both
+    # tiers: /dev/kvm is a fact about the HOST, and an admin's default-project
+    # mint and a restricted user's incus-user mint go through the same daemon,
+    # so the fix is the same for both — a KVM-capable host, not a grant.
+    if [ "$T_REQUIRE_VM" = 1 ] && [ "$m" != vm ]; then
+      [ "$mode" != container ] || usage_error "template '$t' requires VM mode — it will not mint as a container (drop --container)"
+      die "template '$t' requires VM mode and this host has no /dev/kvm — mint it on a KVM-capable host (or via --remote)"
+    fi
     # shellcheck disable=SC2054 # "root,size=..." is a single incus argument
     # security.secureboot=false: Incus defaults VMs to secureboot ON, and a
     # Debian cloud image whose shim is signed with a key the host's OVMF does
@@ -916,6 +938,11 @@ cmd_new() {
     # turning it off boots reliably across image rebuilds. Container mode has
     # no firmware, so it does not apply there.
     if [ "$m" = vm ]; then extra+=(--vm --device "root,size=$T_DISK" --config security.secureboot=false); else extra+=(--config security.nesting=true); fi
+    # BOX_AUTOSTART (#68): a server-class box must come back after a host
+    # reboot without an operator. Stamped per-instance like limits.*; a --from clone
+    # needs no code — 'incus copy' keeps every non-volatile config key, the
+    # same ride the user.* stamps take (audit B2).
+    [ "$T_AUTOSTART" != 1 ] || extra+=(--config boot.autostart=true)
     # Root size is a VM launch concern; a container's root rides the pool. Say
     # so instead of silently dropping an explicit --disk.
     [ "$m" = vm ] || [ -z "$disk" ] || echo "box: note — --disk applies to VM mode only; this container's root rides the pool" >&2
