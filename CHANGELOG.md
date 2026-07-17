@@ -18,8 +18,34 @@ which records not just what changed but what each drill run proved.
   group and died further down on a bare permission error from `incus`. Argless
   `id -nG` asks the process what it actually holds.
 
+- **`setup-host` works as root, with or without `sudo`** — every privileged
+  call was a hardcoded `sudo`, so on a minimal root image (no `sudo` package)
+  it died on `sudo: command not found` before doing anything. Privilege is now
+  resolved once: nothing at UID 0, `sudo` otherwise, and a clear error if
+  neither is possible. This is what made `install.sh`'s root path real rather
+  than nominal.
+- **`setup-host` grants `incus-admin` to the human, not to root** — under
+  `sudo install.sh` it would have added `root` to the group: a no-op (UID 0
+  opens the socket regardless) that also left the actual user locked out of
+  their own boxes. It now derives the login user from `SUDO_USER`.
+- **`setup-host`'s apt calls can no longer hang** — a fresh cloud image has
+  `apt-daily`/`unattended-upgrades` holding the dpkg lock, and a plain
+  `apt-get install` waits on it silently and indefinitely. Now bounded
+  (`DPkg::Lock::Timeout=300`) and non-interactive, which matters because
+  `install.sh` runs it with nobody watching.
+
 ### Changed
 
+- **`drill.sh` proves the new contract instead of masking it** — the drill ran
+  `setup-host` itself right after installing, so the stack existed by its own
+  hand and a run passed identically whether or not `install.sh` had done a
+  thing; a fresh run converged the stack three times, while the messages still
+  described the pre-#63 "first pass may only add you to the group" behaviour.
+  It now asserts the post-install stack in-group before touching the host, and
+  runs `setup-host` exactly once more — after the clean, which deliberately
+  unsets `dns.mode` and so has to be converged back. `DRILL_OWNS_SETUP=1`
+  hands sequencing back to the drill. Pre-setup tripwires now read *before*
+  `install.sh`, since that is what triggers setup now.
 - **`install.sh` runs the host setup itself** (#64) — it printed a warning and
   left you a command to run, so the install reported success and `box new`
   failed on a host with no Incus. Since `setup-host` is idempotent, doing this
