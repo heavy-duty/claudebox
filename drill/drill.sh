@@ -202,6 +202,12 @@ EOF
     export BOX_SKIP_SETUP_HOST=1
   fi
 
+  # The installer refuses to change versions on a host that still has boxes.
+  # That hatch is for humans with work to lose; the drill's whole job is to
+  # arrive on a dirty host, wipe every box it recognises (below) and re-prove
+  # the stack from there — so it opts out, deliberately and in one place.
+  export BOX_FORCE_UPGRADE=1
+
   BOX_REPO="$REPO" BOX_REF="$REF" \
     bash -c "$(curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install.sh")" \
     || { echo "install failed"; exit 1; }

@@ -48,10 +48,17 @@ which records not just what changed but what each drill run proved.
   `install.sh`, since that is what triggers setup now.
 - **`install.sh` runs the host setup itself** (#64) — it printed a warning and
   left you a command to run, so the install reported success and `box new`
-  failed on a host with no Incus. Since `setup-host` is idempotent, doing this
-  on every install is also how an upgraded host picks up stack changes.
-  `BOX_SKIP_SETUP_HOST=1` opts out; if setup fails, the install still stands
-  and says what to re-run.
+  failed on a host with no Incus. `BOX_SKIP_SETUP_HOST=1` opts out; if setup
+  fails, the install still stands and says what to re-run.
+- **`install.sh` refuses to change versions under existing boxes** — building
+  the host stack from the installer means an upgrade reaches under every box
+  attached to that stack, so it is no longer only a tree swap. Same version and
+  ref: says so, changes nothing. Version or ref change with boxes on the host
+  (either tag generation): refuses, loudly, listing them — and refuses *before*
+  `$DEST` is touched, so the working install survives the refusal. No boxes:
+  proceeds. `BOX_FORCE_UPGRADE=1` overrides; the drill sets it, since wiping
+  boxes is its job. The version-aware upgrade that migrates instead of refusing
+  is #67.
 
 ## 0.5.0 — 2026-07-15
 

@@ -47,6 +47,77 @@ EXTRACTED="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
 [ -n "$EXTRACTED" ] || die "could not find the extracted source directory in archive"
 [ -f "$EXTRACTED/bin/box" ] || die "archive does not contain bin/box — is $REPO@$REF correct?"
 
+# --- upgrade hatch ---------------------------------------------------------
+# This installer builds the host stack itself now, and every box on the host is
+# attached to that stack — so a version change here is not just a tree swap, it
+# reaches under running boxes. Until the version-aware migration exists (#67),
+# refuse rather than guess: if this would change what is installed AND there are
+# boxes on the host, stop and let a human decide. Checked BEFORE $DEST is
+# touched, so a refusal leaves the working install exactly as it was.
+# Same version + same ref = nothing to change: say so and carry on.
+new_ver="$(cat "$EXTRACTED/VERSION" 2>/dev/null || echo unknown)"
+old_ver="$(cat "$DEST/VERSION" 2>/dev/null || true)"
+old_from="$(cat "$DEST/INSTALLED_FROM" 2>/dev/null || true)"
+
+if [ -n "$old_ver" ] && [ "$old_ver" = "$new_ver" ] && [ "$old_from" = "$REPO@$REF" ]; then
+  CHANGING=0
+else
+  CHANGING=1
+fi
+
+# How we ask incus about boxes. No incus => no boxes, and nothing to protect.
+if [ "$(id -u)" -eq 0 ]; then PRIV=""
+elif command -v sudo >/dev/null 2>&1; then PRIV="sudo"
+else PRIV=""
+fi
+
+# Unprivileged FIRST: anyone who owns boxes is already in incus-admin, so the
+# plain query answers it without making the installer demand a sudo password
+# just to look. Escalate only if the socket refuses us.
+incus_names() {  # $1 = tag filter
+  incus list "$1" --format csv --columns n 2>/dev/null && return 0
+  [ -n "$PRIV" ] && $PRIV incus list "$1" --format csv --columns n 2>/dev/null
+  return 0
+}
+
+boxes_on_host() {
+  command -v incus >/dev/null 2>&1 || return 0
+  # BOTH tags: a pre-rename box carries user.claudebox=1 and is just as much
+  # someone's work as a current one.
+  { incus_names "user.box=1"; incus_names "user.claudebox=1"; } | sed '/^$/d' | sort -u
+}
+
+if [ "$CHANGING" = 0 ]; then
+  log "already at $new_ver ($REPO@$REF) — reinstalling the same tree, nothing to migrate"
+elif [ -z "${BOX_FORCE_UPGRADE:-}" ]; then
+  found="$(boxes_on_host)"
+  if [ -n "$found" ]; then
+    printf 'box-install: ERROR: this host has boxes, and this install would change what runs them.\n' >&2
+    printf '\n  installed: %s\n  incoming:  %s\n\n  boxes on this host:\n' \
+      "${old_from:-<none>} ${old_ver:-<no version file>}" "$REPO@$REF $new_ver" >&2
+    printf '%s\n' "$found" | sed 's/^/    · /' >&2
+    cat >&2 <<EOF
+
+  Refusing, and nothing has been changed — your current install is intact.
+  The installer now builds the host stack (network, ACL, profile, firewall)
+  itself, so upgrading reaches under boxes that are attached to it.
+
+  Your options:
+    · Stay where you are. The boxes keep working. Nothing to do.
+    · Deal with the boxes, then re-run this installer.
+      NOTE: 'box rm' deletes a box AND every snapshot it has — it cannot be
+      undone, and a snapshot does NOT survive its box. Copy anything you need
+      OUT of a box first ('box shell <box>' / 'box exec <box> -- ...').
+    · Upgrade anyway, on purpose:
+        BOX_FORCE_UPGRADE=1 curl -fsSL <this url> | bash
+      Boxes are not deleted, but the stack is rebuilt underneath them.
+
+  A version-aware upgrade that migrates boxes instead of refusing is #67.
+EOF
+    exit 1
+  fi
+fi
+
 # --- atomically replace $DEST ---------------------------------------------
 log "installing into $DEST"
 rm -rf "$DEST"

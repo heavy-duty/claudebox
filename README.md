@@ -42,9 +42,18 @@ curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | ba
 
 Installs the tree to `~/.local/share/box` and links `box` onto your
 `PATH`, then runs the host setup below for you (it may ask for `sudo`; set
-`BOX_SKIP_SETUP_HOST=1` to opt out and run it yourself). Re-run any time to
-upgrade — upgrading re-applies the host stack, and from a pre-0.4.0 install
-also retires the old `claudebox` symlink. (No `git clone` needed.)
+`BOX_SKIP_SETUP_HOST=1` to opt out and run it yourself). Upgrading from a
+pre-0.4.0 install also retires the old `claudebox` symlink. (No `git clone`
+needed.)
+
+**Upgrading, and boxes.** Because the installer builds the host stack, an
+upgrade reaches under the boxes attached to it — so it is deliberate about it.
+Re-running the same version changes nothing and says so. Changing version on a
+host that has boxes **refuses**, lists them, and leaves your install exactly as
+it was; deal with the boxes and re-run, or say `BOX_FORCE_UPGRADE=1` to upgrade
+over them on purpose (boxes are not deleted, but the stack is rebuilt beneath
+them). With no boxes on the host, it just upgrades. Migrating boxes across an
+upgrade instead of refusing is [#67](https://github.com/heavy-duty/box/issues/67).
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
