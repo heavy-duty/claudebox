@@ -1,0 +1,31 @@
+#cloud-config
+# The staging template — a server, not an agent devbox: no agent, no
+# agent-context file, and (as everywhere in box) no credentials. Docker and
+# rig are preinstalled and that is all. Tailscale, openssh-server and every
+# credential are deliberately ABSENT: rig installs and hardens sshd and joins
+# the tailnet at bootstrap time ('box shell' → 'sudo rig bootstrap workload'),
+# holding the auth key in process memory — box never sees it.
+# BOX_USER in box.env must match the user created here — the file is passed
+# to Incus verbatim.
+users:
+  - name: ops
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+package_update: true
+packages:
+  - curl
+  - ca-certificates
+  # tmux is the one agent-adjacent tool a server box still carries: 'box tmux'
+  # runs 'tmux new-session' INSIDE the box on EVERY template (#65) — the
+  # operator babysits 'rig bootstrap workload' through it — and test/cli.sh
+  # asserts it for every template directory, this one included.
+  - tmux
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+  - usermod -aG docker ops
+  # rig runs as root, so install it as root: its installer lands the tree in
+  # $HOME/.local/share/rig and symlinks /usr/local/bin/rig. HOME is pinned
+  # because cloud-init's runcmd does not guarantee one, and the installer
+  # derives its install dir from it.
+  - HOME=/root bash -c 'curl -fsSL https://raw.githubusercontent.com/heavy-duty/rig/main/install.sh | bash'
