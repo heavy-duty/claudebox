@@ -28,6 +28,15 @@ which records not just what changed but what each drill run proved.
   `sudo install.sh` it would have added `root` to the group: a no-op (UID 0
   opens the socket regardless) that also left the actual user locked out of
   their own boxes. It now derives the login user from `SUDO_USER`.
+- **`box-firewall.service` now reports its state honestly** — the unit is
+  `Type=oneshot` and was missing `RemainAfterExit=yes`, so it went
+  `inactive (dead)` the instant it succeeded: a host whose isolation was
+  perfectly live read as one whose firewall unit had died. drill.sh sends you
+  to `systemctl status box-firewall` to diagnose exactly that, and
+  setup-host.sh's own comment already asserted the unit "is RemainAfterExit" —
+  it was not. Found by running the drill on a real host and mistrusting the
+  green: `nft list table bridge box` showed the drop live while the unit read
+  dead. `restart` was and remains correct either way.
 - **`setup-host`'s apt calls can no longer hang** — a fresh cloud image has
   `apt-daily`/`unattended-upgrades` holding the dpkg lock, and a plain
   `apt-get install` waits on it silently and indefinitely. Now bounded

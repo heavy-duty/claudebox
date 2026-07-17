@@ -6,6 +6,13 @@ Wants=network.target
 
 [Service]
 Type=oneshot
+# The unit's state must mean "the rules are applied", because that is the
+# question everyone asks it — drill.sh sends you to 'systemctl status
+# box-firewall' to diagnose exactly that. Without this, a oneshot goes
+# 'inactive (dead)' the moment it succeeds, so a host whose isolation is
+# perfectly live reads as a host whose firewall unit died. setup-host.sh's
+# comment already assumed this was set; it was not.
+RemainAfterExit=yes
 ExecStart=/usr/local/sbin/box-firewall
 
 [Install]
