@@ -1,0 +1,39 @@
+name: release
+# The release publisher (#83), on a bare X.Y.Z tag push (the 0.6.0 tag set
+# the precedent — no 'v' prefix). Two facts, then one act: the tag must name
+# the tree's own VERSION (a mismatch fails loudly and creates NOTHING — a
+# wrong release is worse than a missing one), and the release body is that
+# version's CHANGELOG.md section (.github/scripts/release-notes.sh, shared
+# with test/release.sh) — the curated prose, not the generated PR list. No
+# assets are uploaded: for a pure-bash tree, GitHub's source tarball for the
+# tag IS the package, and install.sh downloads exactly that.
+on:
+  push:
+    tags: ["[0-9]*.[0-9]*.[0-9]*"]
+
+permissions:
+  contents: write # gh release create
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: the tag must name the tree's VERSION
+        run: |
+          ver="$(cat VERSION)"
+          if [ "$GITHUB_REF_NAME" != "$ver" ]; then
+            echo "tag '$GITHUB_REF_NAME' does not match VERSION '$ver' — creating nothing." >&2
+            echo "A release is a PR, then a tag (#83): the release PR bumps VERSION and stamps the changelog; the tag goes on its MERGE commit. Delete this tag and re-tag the right commit." >&2
+            exit 1
+          fi
+      - name: release notes — the version's own CHANGELOG.md section
+        # release-notes.sh fails loudly on a missing/empty section, which
+        # fails the release here — before anything is created.
+        run: |
+          bash .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md"
