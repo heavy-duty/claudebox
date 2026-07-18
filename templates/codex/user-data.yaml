@@ -1,60 +1,33 @@
 #cloud-config
+# A thin, creds-free seed (#81): the tenant user, tmux (#65), and rig —
+# nothing that joins a tailnet or admits credentials, no agent CLI, no
+# docker, no context-file heredoc. Everything this box becomes comes from
+# 'rig bootstrap codex' (heavy-duty/rig#31), which box auto-runs after
+# mint; the agent-context file — including the #80 guard (never run
+# 'box setup-host' or the drill inside a box) — is rendered by that role,
+# once, instead of being copy-pasted per template.
 users:
   - name: codex
     shell: /bin/bash
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     lock_passwd: true
-write_files:
-  - path: /home/codex/.codex/AGENTS.md
-    owner: "codex:codex"
-    permissions: '0644'
-    defer: true
-    content: |
-      # You are running inside a box (template: codex)
-
-      A box is a trust-less, network-isolated, ephemeral VM created by the
-      `box` CLI. Keep this context in mind:
-
-      - **Creds-free by default.** The box starts with no OpenAI and no git
-        credentials. If you need to authenticate Codex, the operator runs the
-        login flow (`codex`) interactively. For git, the operator adds their own
-        credentials (a PAT or `gh auth login`). Never assume credentials are
-        present; never ask for or store secrets on disk beyond what the operator
-        sets up.
-      - **Isolated.** The box reaches the public internet but nothing on the host
-        or local network. There is no inbound path.
-      - **Disposable.** Nothing here is backed up. State is discarded when the box
-        is removed; the operator persists work via git push and via `box snapshot`.
-      - **Bootstrap runbook.** If the repository you are working in contains a
-        `.box/` folder (older repos may use `.claudebox/`), read it as your setup runbook — how to install
-        dependencies, start services, template environment files, seed data, and
-        smoke-test — and follow it. It is documentation for you, not a script the
-        host runs.
 package_update: true
+# tmux: 'box tmux' runs 'tmux new-session' INSIDE the box (#65).
+# curl + ca-certificates: the rig installer below rides them, and a bare
+# cloud image is not guaranteed to ship either.
 packages:
-  - git
-  - gh
+  - tmux
   - curl
   - ca-certificates
-  - gnupg
-  - ripgrep
-  - jq
-  - tmux
-  - age
-  - unzip
-  - build-essential
 runcmd:
-  - curl -fsSL https://get.docker.com | sh
-  - usermod -aG docker codex
-  # Codex CLI is an npm global and needs Node 22+ (verified upstream:
-  # npmjs.com/package/@openai/codex — the SCOPED @openai/codex, not the
-  # unrelated 2012 'codex' package).
-  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  - apt-get install -y nodejs
-  - npm install -g @openai/codex
-  # 'box exec <b> -- codex …' runs a NON-interactive shell that reads no
-  # rc files — npm's global bin must be reachable from every shell. Symlink
-  # the installed binary into /usr/local/bin (the same fix the claude
-  # template needed for its own CLI).
-  - ln -sf "$(npm prefix -g)/bin/codex" /usr/local/bin/codex
-  - echo 'export PATH="$(npm prefix -g)/bin:$PATH"' >> /home/codex/.bashrc
+  # Preinstall rig so the box can converge — and re-converge — via
+  # 'rig bootstrap codex'. @RIG_REPO@/@RIG_REF@ are the pin point (#81):
+  # box substitutes them at mint from the RIG_REPO/RIG_REF environment
+  # (default heavy-duty/rig @ main — unpinned, tracking main, the same
+  # honest edge as rig's own unpinned box install, until rig#32 ships a
+  # release flow). The pin covers both the installer fetched AND the tree
+  # it installs, so a branch under review is testable end to end.
+  # HOME=/root: cloud-init runs runcmd as root but with NO $HOME in the
+  # environment, and the rig installer (set -u) reads $HOME for its DEST —
+  # measured live: the mint died with "HOME: unbound variable" without it.
+  - curl -fsSL https://raw.githubusercontent.com/@RIG_REPO@/@RIG_REF@/install.sh | HOME=/root RIG_REPO="@RIG_REPO@" RIG_REF="@RIG_REF@" bash

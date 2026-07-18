@@ -1,61 +1,33 @@
 #cloud-config
+# A thin, creds-free seed (#81): the tenant user, tmux (#65), and rig —
+# nothing that joins a tailnet or admits credentials, no agent CLI, no
+# docker, no context-file heredoc. Everything this box becomes comes from
+# 'rig bootstrap claude' (heavy-duty/rig#31), which box auto-runs after
+# mint; the agent-context file — including the #80 guard (never run
+# 'box setup-host' or the drill inside a box) — is rendered by that role,
+# once, instead of being copy-pasted per template.
 users:
   - name: claude
     shell: /bin/bash
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     lock_passwd: true
-write_files:
-  - path: /home/claude/.claude/CLAUDE.md
-    owner: "claude:claude"
-    permissions: '0644'
-    defer: true
-    content: |
-      # You are running inside a box (template: claude)
-
-      A box is a trust-less, network-isolated, ephemeral VM created by the
-      `box` CLI. Keep this context in mind:
-
-      - **Creds-free by default.** The box starts with no Claude and no git
-        credentials. If you need to authenticate Claude, the operator runs `/login`
-        interactively. For git, the operator adds their own credentials (a PAT or
-        `gh auth login`). Never assume credentials are present; never ask for or
-        store secrets on disk beyond what the operator sets up.
-      - **Isolated.** The box reaches the public internet but nothing on the host or
-        local network. There is no inbound path.
-      - **Disposable.** Nothing here is backed up. State is discarded when the box is
-        removed; the operator persists work via git push and via `box snapshot`.
-      - **Bootstrap runbook.** If the repository you are working in contains a
-        `.box/` folder (older repos may use `.claudebox/`), read it as your setup runbook — how to install
-        dependencies, start services, template environment files, seed data, and
-        smoke-test — and follow it. It is documentation for you, not a script the
-        host runs.
 package_update: true
+# tmux: 'box tmux' runs 'tmux new-session' INSIDE the box (#65).
+# curl + ca-certificates: the rig installer below rides them, and a bare
+# cloud image is not guaranteed to ship either.
 packages:
-  - git
-  - gh
+  - tmux
   - curl
   - ca-certificates
-  - gnupg
-  - ripgrep
-  - jq
-  - tmux
-  - age
-  - unzip
-  - build-essential
-  - zsh
 runcmd:
-  - curl -fsSL https://get.docker.com | sh
-  - usermod -aG docker claude
-  - curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-  - apt-get install -y nodejs
-  - sudo -u claude bash -lc 'curl -fsSL https://claude.ai/install.sh | bash'
-  # 'box exec <box> -- claude …' runs through a NON-interactive shell, which
-  # reads no .bashrc/.zshrc — a PATH export there is invisible to it. The
-  # symlink makes claude reachable from every shell, interactive or not.
-  - ln -sf /home/claude/.local/bin/claude /usr/local/bin/claude
-  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.bashrc
-  - chsh -s /usr/bin/zsh claude
-  - sudo -u claude bash -lc 'RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"'
-  - echo 'export PATH="$HOME/.local/bin:$PATH"' >> /home/claude/.zshrc
-  - echo 'set -g mouse on' > /home/claude/.tmux.conf
-  - chown claude:claude /home/claude/.tmux.conf
+  # Preinstall rig so the box can converge — and re-converge — via
+  # 'rig bootstrap claude'. @RIG_REPO@/@RIG_REF@ are the pin point (#81):
+  # box substitutes them at mint from the RIG_REPO/RIG_REF environment
+  # (default heavy-duty/rig @ main — unpinned, tracking main, the same
+  # honest edge as rig's own unpinned box install, until rig#32 ships a
+  # release flow). The pin covers both the installer fetched AND the tree
+  # it installs, so a branch under review is testable end to end.
+  # HOME=/root: cloud-init runs runcmd as root but with NO $HOME in the
+  # environment, and the rig installer (set -u) reads $HOME for its DEST —
+  # measured live: the mint died with "HOME: unbound variable" without it.
+  - curl -fsSL https://raw.githubusercontent.com/@RIG_REPO@/@RIG_REF@/install.sh | HOME=/root RIG_REPO="@RIG_REPO@" RIG_REF="@RIG_REF@" bash

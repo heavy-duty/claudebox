@@ -150,8 +150,8 @@ tpl() {
   root="$1" bash -c '
     die() { echo "box: $*" >&2; exit 1; }
     . "$0"; load_template "$1"
-    printf "IMAGE=%s USER=%s REQUIRE_VM=%s AUTOSTART=%s\n" \
-      "$T_IMAGE" "$T_USER" "$T_REQUIRE_VM" "$T_AUTOSTART"
+    printf "IMAGE=%s USER=%s REQUIRE_VM=%s AUTOSTART=%s ROLE=%s\n" \
+      "$T_IMAGE" "$T_USER" "$T_REQUIRE_VM" "$T_AUTOSTART" "$T_BOOTSTRAP_ROLE"
   ' "$TPLFN" "$2"
 }
 
@@ -165,16 +165,63 @@ check "load_template: an unknown key dies (no template grows a network)" 1 "unkn
   tpl "$EVILROOT" evil
 printf 'BOX_USER="dev"\n' > "$EVILROOT/templates/evil/box.env"
 check "load_template: a missing BOX_IMAGE dies" 1 "required" tpl "$EVILROOT" evil
-# The green path the two new keys exist for: no in-tree template sets them yet
-# (the seed lands after rig#31), so without this fixture the case arms could be
-# deleted and the suite would stay green while the keys silently died as
-# "unknown key" at first use. Accepted AND surfaced, through the real parser.
+# The boot demands' green path, kept as a fixture even now that staging sets
+# them in-tree: fixtures survive a template rename, and a deleted case arm
+# must fail HERE, through the real parser, not at first use on a host.
 mkdir -p "$EVILROOT/templates/server"
 printf 'BOX_IMAGE="images:debian/13/cloud"\nBOX_USER="ops"\nBOX_REQUIRE_VM="1"\nBOX_AUTOSTART="1"\n' \
   > "$EVILROOT/templates/server/box.env"
 check "load_template: REQUIRE_VM and AUTOSTART round-trip (accepted + surfaced)" \
   0 "REQUIRE_VM=1 AUTOSTART=1" tpl "$EVILROOT" server
+# BOX_BOOTSTRAP_ROLE (#81): accepted and surfaced through the real parser —
+# and the value is a rig role NAME, nothing more. It is handed to
+# 'incus exec … rig bootstrap <role>' at mint, so anything shell-shaped in
+# it must die at parse time, on the host, before a guest exists.
+mkdir -p "$EVILROOT/templates/tenant"
+printf 'BOX_IMAGE="images:debian/13/cloud"\nBOX_USER="claude"\nBOX_BOOTSTRAP_ROLE="claude"\n' \
+  > "$EVILROOT/templates/tenant/box.env"
+check "load_template: BOX_BOOTSTRAP_ROLE round-trips (accepted + surfaced)" \
+  0 "ROLE=claude" tpl "$EVILROOT" tenant
+printf 'BOX_IMAGE="images:debian/13/cloud"\nBOX_USER="claude"\nBOX_BOOTSTRAP_ROLE="claude; rm -rf /"\n' \
+  > "$EVILROOT/templates/tenant/box.env"
+check "load_template: a shell-shaped BOX_BOOTSTRAP_ROLE dies at the gate" \
+  1 "not a sane role name" tpl "$EVILROOT" tenant
 rm -rf "$EVILROOT"
+
+# ---------------------------------------------------------------------------
+# render_userdata (#81) — the seed's ONE substitution, driven for real: the
+# rig pin point. Defaults resolve to heavy-duty/rig@main; RIG_REPO/RIG_REF
+# override at mint (how a rig branch under review reaches a guest); and a
+# hostile value — the tokens land inside a runcmd shell line — dies on the
+# host before touching the YAML. bash's =~ anchors the WHOLE string, so a
+# multi-line value cannot sneak one clean line past it (the line-oriented
+# grep -q failure mode).
+# ---------------------------------------------------------------------------
+RUFN="$(mktemp)"
+awk '/^render_userdata\(\) \{/,/^\}/' "$ROOT/bin/box" > "$RUFN"
+check "render_userdata: extracted from bin/box (guards the awk)" 0 "RIG_REPO" cat "$RUFN"
+check "render_userdata: the extracted function is valid bash"    0 "" bash -n "$RUFN"
+
+SEED="$(mktemp)"
+printf '#cloud-config\nruncmd:\n  - curl -fsSL https://raw.githubusercontent.com/@RIG_REPO@/@RIG_REF@/install.sh | RIG_REPO="@RIG_REPO@" RIG_REF="@RIG_REF@" bash\n' > "$SEED"
+# shellcheck disable=SC2016  # $0/$1 expand in the child shell, by design
+rud() { # rud [VAR=val ...] — render the fixture seed through the real function
+  env "$@" bash -c 'die() { echo "box: $*" >&2; exit 1; }; . "$0"; render_userdata "$1"' "$RUFN" "$SEED"
+}
+check "render_userdata: defaults pin heavy-duty/rig" 0 "githubusercontent.com/heavy-duty/rig/main/install.sh" rud
+check "render_userdata: defaults feed the installer's own env too" 0 'RIG_REPO="heavy-duty/rig" RIG_REF="main"' rud
+check "render_userdata: RIG_REPO/RIG_REF override at mint" 0 "dan-claude-bot/rig/feat/bootstrap-roles/install.sh" \
+  rud RIG_REPO=dan-claude-bot/rig RIG_REF=feat/bootstrap-roles
+# shellcheck disable=SC2016  # $0/$1 expand in the child shells, by design
+check "render_userdata: no token survives the render" 1 "" \
+  bash -c 'env bash -c "die() { echo box: \$*; exit 1; }; . \"\$0\"; render_userdata \"\$1\"" "$1" "$2" | grep -q @RIG_' _ "$RUFN" "$SEED"
+check "render_userdata: a shell-shaped RIG_REPO dies on the host" 1 "RIG_REPO" \
+  rud 'RIG_REPO=evil"; rm -rf /; "/rig'
+check "render_userdata: a spaced RIG_REF dies on the host" 1 "RIG_REF" \
+  rud 'RIG_REF=main plus junk'
+check "render_userdata: a newline-smuggled RIG_REPO dies (whole-string anchor)" 1 "RIG_REPO" \
+  rud "RIG_REPO=$(printf 'a/b\nevil')"
+rm -f "$RUFN" "$SEED"
 
 # YAML well-formedness needs python3 + pyyaml; the CI runner has both. Skip
 # gracefully (never silently) where they are missing.
@@ -189,8 +236,9 @@ for d in "$ROOT"/templates/*/; do
   check "template '$t': box.env parses against the real allowlist" 0 "USER=" tpl "$ROOT" "$t"
   check "template '$t': box.env sets BOX_IMAGE" 0 "" grep -q '^BOX_IMAGE=' "$d/box.env"
   check "template '$t': box.env sets BOX_USER"  0 "" grep -q '^BOX_USER='  "$d/box.env"
-  # cloud-init is passed to Incus verbatim, so it must exist, declare itself,
-  # and be well-formed — a mint is far too late to learn about a typo.
+  # cloud-init is passed to Incus verbatim (modulo the two rig pin tokens),
+  # so it must exist, declare itself, and be well-formed — a mint is far too
+  # late to learn about a typo.
   check "template '$t': user-data.yaml exists" 0 "" test -f "$d/user-data.yaml"
   # shellcheck disable=SC2016  # $1 expands in the child shell, by design
   check "template '$t': user-data.yaml begins with #cloud-config" 0 "" \
@@ -205,7 +253,79 @@ for d in "$ROOT"/templates/*/; do
   # template's package list must carry tmux or the verb dies inside.
   check "template '$t': installs tmux (#65)" 0 "" \
     grep -qE '^[[:space:]]*-[[:space:]]+tmux$' "$d/user-data.yaml"
+  # BOX_USER is duplicated into the cloud-init by hand (the file reaches
+  # Incus verbatim) — assert the two halves actually agree, per template.
+  tuser="$(tpl "$ROOT" "$t" | sed -n 's/.*USER=\([^ ]*\).*/\1/p')"
+  check "template '$t': user-data.yaml creates BOX_USER ('$tuser')" 0 "" \
+    grep -qE "^[[:space:]]*-[[:space:]]+name:[[:space:]]+$tuser\$" "$d/user-data.yaml"
+
+  # ------------------------------------------------------------------------
+  # The thin-template contract (#81), both halves per template:
+  #
+  # THE SEED — a template that names a tenant role (BOX_BOOTSTRAP_ROLE) must
+  # preinstall rig carrying BOTH pin tokens, on the installer URL and on the
+  # installer's own env, or the pin is a half-truth: a mint would fetch one
+  # ref's installer and install another ref's tree.
+  # ------------------------------------------------------------------------
+  trole="$(tpl "$ROOT" "$t" | sed -n 's/.*ROLE=\([^ ]*\).*/\1/p')"
+  if [ -n "$trole" ]; then
+    check "template '$t': the seed installs rig (role '$trole')" 0 "" \
+      grep -q 'install.sh' "$d/user-data.yaml"
+    # shellcheck disable=SC2016  # $1 expands in the child shell, by design
+    check "template '$t': the rig install carries the @RIG_REPO@ pin token" 0 "" \
+      bash -c 'grep "install.sh" "$1" | grep -q "@RIG_REPO@/@RIG_REF@"' _ "$d/user-data.yaml"
+    # shellcheck disable=SC2016
+    check "template '$t': the pin reaches the installer's env too" 0 "" \
+      bash -c 'grep "install.sh" "$1" | grep -q "RIG_REPO=\"@RIG_REPO@\" RIG_REF=\"@RIG_REF@\""' _ "$d/user-data.yaml"
+    # HOME=/root: a scar found live — cloud-init's runcmd has no $HOME and
+    # rig's installer (set -u) dies on it (rig#39). The pin must survive
+    # every seed rewrite.
+    # shellcheck disable=SC2016
+    check "template '$t': the rig install pins HOME=/root (runcmd has no \$HOME)" 0 "" \
+      bash -c 'grep "install.sh" "$1" | grep -q "HOME=/root "' _ "$d/user-data.yaml"
+  fi
+  # ------------------------------------------------------------------------
+  # THE ABSENCE — no tenant content in ANY template, ever again. Everything a
+  # box becomes lives in rig's roles (rig#31); a template that grows an agent
+  # CLI, docker, node, a tailnet join or a context-file heredoc is the
+  # regression this suite exists to refuse. Greps run over EFFECTIVE
+  # cloud-init lines (comments may name what they refuse — #69's idiom), and
+  # they fail CLOSED: the want-exit is 1, so re-adding any of it goes red.
+  # ------------------------------------------------------------------------
+  # shellcheck disable=SC2016  # $1 expands in the child shell, by design
+  check "template '$t': no agent CLI install (rig's job, rig#31)" 1 "" \
+    bash -c 'grep -v "^[[:space:]]*#" "$1" | grep -qiE "claude\.ai|x\.ai|@openai|npm|nodesource|nodejs"' _ "$d/user-data.yaml"
+  # shellcheck disable=SC2016
+  check "template '$t': no docker (rig's job, rig#31)" 1 "" \
+    bash -c 'grep -v "^[[:space:]]*#" "$1" | grep -qi docker' _ "$d/user-data.yaml"
+  # shellcheck disable=SC2016
+  check "template '$t': nothing that joins or admits (no tailscale/authkey/ssh)" 1 "" \
+    bash -c 'grep -v "^[[:space:]]*#" "$1" | grep -qiE "tailscale|authkey|ssh"' _ "$d/user-data.yaml"
+  # shellcheck disable=SC2016
+  check "template '$t': no context-file heredoc (the #80 guard lives in rig's roles)" 1 "" \
+    bash -c 'grep -v "^[[:space:]]*#" "$1" | grep -qiE "write_files|CLAUDE\.md|AGENTS\.md"' _ "$d/user-data.yaml"
 done
+
+# The staging seed's boot demands are part of its contract (#68/#69): the VM
+# is its trust boundary (its guest runs docker, via rig) and a server returns
+# from a host reboot without an operator. Pinned to the FILE so neither can
+# quietly vanish in a rewrite.
+check "staging: demands VM mode (BOX_REQUIRE_VM=1)" 0 "" \
+  grep -qx 'BOX_REQUIRE_VM="1"' "$ROOT/templates/staging/box.env"
+check "staging: demands autostart (BOX_AUTOSTART=1)" 0 "" \
+  grep -qx 'BOX_AUTOSTART="1"' "$ROOT/templates/staging/box.env"
+check "staging: the tenant role is 'staging'" 0 "ROLE=staging" tpl "$ROOT" staging
+check "staging: the seed user is rig's default for the role ('ops')" 0 "USER=ops" tpl "$ROOT" staging
+# The agent tenants: role = user = template name, rig's default mapping.
+for t in claude codex grok; do
+  check "$t: role and user are '$t' (rig's default tenant mapping)" 0 "USER=$t REQUIRE_VM= AUTOSTART= ROLE=$t" \
+    tpl "$ROOT" "$t"
+done
+# blank stays a box with NOBODY home: no rig, no role — same isolation, no
+# tooling, and nothing auto-runs in it.
+check "blank: names no bootstrap role" 1 "" \
+  grep -q '^BOX_BOOTSTRAP_ROLE=' "$ROOT/templates/blank/box.env"
+check "blank: does not preinstall rig" 1 "" grep -q 'install.sh' "$ROOT/templates/blank/user-data.yaml"
 
 rm -f "$TPLFN"
 
@@ -231,6 +351,35 @@ check "new: the REQUIRE_VM guard compares the effective mode (\$m)" 0 "" bash -c
 check "new: boot.autostart is stamped under the T_AUTOSTART guard" 0 "" bash -c '
   awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
     | grep -F "boot.autostart=true" | grep -q "T_AUTOSTART"'
+
+# The auto-run half of #81, grepped the same way (a daemon-free run cannot
+# mint). The seed reaches Incus through render_userdata — the pin point — not
+# through a raw cat; and the tenant convergence must order AFTER the
+# cloud-init wait (rig is installed by the seed's runcmd, so exec'ing the
+# role before cloud-init settles would race its own installer) and sit under
+# the T_BOOTSTRAP_ROLE guard (blank must never auto-run anything).
+check "new: cloud-init user-data goes through render_userdata (the rig pin)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -F "cloud-init.user-data" | grep -q "render_userdata"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the tenant auto-run orders after the cloud-init wait" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  wait="$(printf "%s\n" "$fn" | grep -n "cloud-init status --wait" | head -1 | cut -d: -f1)"
+  run="$(printf "%s\n" "$fn" | grep -n "rig bootstrap" | head -1 | cut -d: -f1)"
+  [ -n "$wait" ] && [ -n "$run" ] && [ "$wait" -lt "$run" ]'
+check "new: the auto-run sits under the T_BOOTSTRAP_ROLE guard" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -B2 "incus exec .* rig bootstrap" | grep -q "T_BOOTSTRAP_ROLE"'
+check "new: a failed tenant role names the re-run (the role converges)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -q "sudo rig bootstrap"'
+# staging's creds-holding join stays OPERATOR-run: cmd_new may print it as a
+# next step, but no template and no code path auto-runs "rig bootstrap
+# workload" — the one absence that keeps box creds-free end to end.
+check "new: the workload join is printed, never exec'd" 1 "" bash -c '
+  grep "rig bootstrap workload" "'"$ROOT"'/bin/box" | grep -q "incus exec"'
+check "templates: no template names a creds-holding role" 1 "" bash -c '
+  grep -h "^BOX_BOOTSTRAP_ROLE=" "'"$ROOT"'"/templates/*/box.env | grep -qE "workload|host|custom"'
 
 # ---------------------------------------------------------------------------
 # The restricted tier (#74). box_tier() is the decision the whole tier hangs

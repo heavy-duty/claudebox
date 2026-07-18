@@ -233,11 +233,20 @@ one of its snapshots — login state, git creds and clones carry over,
 isolation is preserved, and the clone knows its template's user without
 being told.
 
+A tenant template (claude, codex, grok, staging) is a THIN seed — the user,
+tmux, rig (#81) — and after cloud-init box auto-runs the creds-free tenant
+role inside it ('rig bootstrap <role>', rig#31): that role installs the
+agent CLI / server posture and the agent-context file. rig is preinstalled
+from RIG_REPO/RIG_REF in the mint environment (default heavy-duty/rig@main,
+unpinned — an honest edge until rig has releases). Anything that joins a
+tailnet or holds a key stays operator-run, never auto-run.
+
   --name <box>           Required. The box's name.
   --template <t>         Template to mint from; 'box templates' lists them.
-                         A template sets image, user, resources and boot
+                         A template sets image, user, resources, boot
                          demands (independently: BOX_REQUIRE_VM insists on
-                         VM mode, BOX_AUTOSTART survives host reboots) —
+                         VM mode, BOX_AUTOSTART survives host reboots) and
+                         a creds-free tenant role (BOX_BOOTSTRAP_ROLE) —
                          never the network: every template gets the same
                          isolation.
   --from <src>[/<snap>]  Clone src's live state, or its snapshot <snap>.
@@ -267,10 +276,15 @@ EOF
     templates) cat <<'EOF'
 List the templates this install can mint, with their descriptions. A template
 is a directory under templates/: a box.env (image, user, resources, boot
-demands — parsed against an allowlist, never sourced) and a user-data.yaml
-(cloud-init, passed to Incus verbatim). Templates cannot touch the network
-or security flags — the shared box-net profile is the placement contract, so
-every template gets the same isolation.
+demands, tenant role — parsed against an allowlist, never sourced) and a
+user-data.yaml (cloud-init, passed to Incus verbatim except the rig pin
+tokens @RIG_REPO@/@RIG_REF@, resolved at mint from the environment).
+Templates cannot touch the network or security flags — the shared box-net
+profile is the placement contract, so every template gets the same isolation.
+
+Templates are thin, creds-free seeds (#81): the user, tmux and rig — what a
+box BECOMES lives in rig's bootstrap roles (rig#31), auto-run at mint via
+BOX_BOOTSTRAP_ROLE. box mints; rig converges.
 
   box templates
   box new --name scratch --template blank
@@ -842,23 +856,26 @@ reset_identity() {
   wait_agent "$i"
 }
 
-# Templates set image, user, resources, boot demands and cloud-init — NOTHING
-# else. The box.env file is parsed against this allowlist, never sourced:
-# sourcing would hand every template arbitrary bash execution on the HOST at
-# mint time. And there is deliberately no key for a network or a security flag
-# — the shared box-net profile is the placement contract, so no template can
-# weaken isolation. 'blank' is a box with nobody home, not a box with the
-# safety off. The two boot demands are for server-class templates (#68):
-# BOX_REQUIRE_VM=1 refuses the container fallback (the VM is the trust
+# Templates set image, user, resources, boot demands, a tenant role and
+# cloud-init — NOTHING else. The box.env file is parsed against this allowlist,
+# never sourced: sourcing would hand every template arbitrary bash execution on
+# the HOST at mint time. And there is deliberately no key for a network or a
+# security flag — the shared box-net profile is the placement contract, so no
+# template can weaken isolation. 'blank' is a box with nobody home, not a box
+# with the safety off. The two boot demands are for server-class templates
+# (#68): BOX_REQUIRE_VM=1 refuses the container fallback (the VM is the trust
 # boundary, and a server-class guest runs docker), and BOX_AUTOSTART=1 stamps
 # boot.autostart so the box survives a host reboot without an operator.
+# BOX_BOOTSTRAP_ROLE (#81) names the rig role box auto-runs after mint — the
+# thin-template split: the seed is user + tmux + rig, and what the box BECOMES
+# is 'rig bootstrap <role>'. Only creds-free roles belong here, by contract.
 load_template() {
   local t="$1" dir line key val
   dir="$root/templates/$t"
   [ -d "$dir" ] || die "no such template: $t (see 'box templates')"
   [ -f "$dir/box.env" ] || die "template '$t' has no box.env"
   T_DESC=""; T_IMAGE=""; T_USER=""; T_CPU=""; T_MEMORY=""; T_DISK=""
-  T_REQUIRE_VM=""; T_AUTOSTART=""
+  T_REQUIRE_VM=""; T_AUTOSTART=""; T_BOOTSTRAP_ROLE=""
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in ''|\#*) continue ;; esac
     case "$line" in
@@ -882,7 +899,8 @@ load_template() {
       BOX_DISK)        T_DISK="$val" ;;
       BOX_REQUIRE_VM)  T_REQUIRE_VM="$val" ;;
       BOX_AUTOSTART)   T_AUTOSTART="$val" ;;
-      *) die "template '$t': unknown key '$key' — a template sets image, user, resources and boot demands, nothing else (there is no key for a network, on purpose)" ;;
+      BOX_BOOTSTRAP_ROLE) T_BOOTSTRAP_ROLE="$val" ;;
+      *) die "template '$t': unknown key '$key' — a template sets image, user, resources, boot demands and a tenant role, nothing else (there is no key for a network, on purpose)" ;;
     esac
   done <"$dir/box.env"
   # Not 'A && B || die': if T_IMAGE is set but T_USER is not, that idiom still
@@ -890,6 +908,12 @@ load_template() {
   # spell the guard out (SC2015).
   if [ -z "$T_IMAGE" ] || [ -z "$T_USER" ]; then
     die "template '$t': BOX_IMAGE and BOX_USER are required"
+  fi
+  # A bootstrap role is a rig role NAME and nothing more — it is handed to
+  # 'incus exec … rig bootstrap <role>' at mint, so anything shell-shaped in
+  # the value must die here, on the host, before a guest ever sees it.
+  if [ -n "$T_BOOTSTRAP_ROLE" ] && ! [[ "$T_BOOTSTRAP_ROLE" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    die "template '$t': BOX_BOOTSTRAP_ROLE is not a sane role name: $T_BOOTSTRAP_ROLE"
   fi
   # Resolution, most specific wins: inline flag (--cpu/--memory/--disk, #57)
   # > BOX_* environment (how a small host or the drill shrinks every box it
@@ -899,6 +923,31 @@ load_template() {
   T_CPU="${cpu:-${BOX_CPU:-${T_CPU:-4}}}"
   T_MEMORY="${memory:-${BOX_MEMORY:-${T_MEMORY:-8GiB}}}"
   T_DISK="${disk:-${BOX_DISK:-${T_DISK:-60GiB}}}"
+}
+
+# The ONE substitution a template gets — user-data.yaml is otherwise passed to
+# Incus verbatim. The tenant seeds preinstall rig, which inverts the rig→box
+# install edge (rig#28: rig installs box on hosts; now box guests install rig),
+# and that edge needs a pin point (#81): the seed carries @RIG_REPO@ /
+# @RIG_REF@ tokens, resolved here from the mint environment — RIG_REPO
+# (default heavy-duty/rig) and RIG_REF (default main). Both directions track
+# main unpinned today, said honestly (the same treatment rig#29 gave box's own
+# unpinned install) until a release flow exists (rig#32 / #83). The values are
+# allowlist-validated BEFORE touching the YAML: they land inside a runcmd
+# shell line, so a quote, a space or a newline smuggled through the
+# environment must die on the host, never execute in the guest. bash's =~
+# anchors to the whole string — a multi-line value cannot sneak one clean
+# line past it the way a line-oriented grep would.
+render_userdata() {
+  local f="$1" repo="${RIG_REPO:-heavy-duty/rig}" ref="${RIG_REF:-main}" data
+  [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
+    || die "RIG_REPO must look like owner/repo: $repo"
+  [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] \
+    || die "RIG_REF must be a plain ref name (letters, digits, . _ / -): $ref"
+  data="$(cat "$f")"
+  data="${data//@RIG_REPO@/$repo}"
+  data="${data//@RIG_REF@/$ref}"
+  printf '%s\n' "$data"
 }
 
 cmd_templates() {
@@ -969,7 +1018,7 @@ cmd_new() {
       --config user.box.user="$T_USER" \
       --config limits.cpu="$T_CPU" \
       --config limits.memory="$T_MEMORY" \
-      --config cloud-init.user-data="$(cat "$root/templates/$t/user-data.yaml")" \
+      --config cloud-init.user-data="$(render_userdata "$root/templates/$t/user-data.yaml")" \
       "${extra[@]}"
     wait_agent "$instance"
     echo "box: waiting for phase-1 (cloud-init)..."
@@ -1003,6 +1052,24 @@ cmd_new() {
       echo "  not serving, a VPN resolver the box inherits). Diagnose it:  box doctor" >&2
       die "cloud-init failed — the box is incomplete, so refusing to hand it over"
     fi
+    # The tenant convergence (#81): the seed above is thin — the user, tmux,
+    # rig — and what the box BECOMES is rig's job. A template that names a
+    # bootstrap role gets it auto-run here, as root inside the guest, because
+    # the tenant roles are creds-free and non-interactive BY CONTRACT
+    # (rig#31): no prompts, no tailnet, no keys — nothing that joins or
+    # admits may ever ride this hook. The creds-holding steps (staging's
+    # workload join) stay operator-run through 'box shell', and the role is
+    # idempotent, so a failed or interrupted run is re-runnable as-is.
+    if [ -n "$T_BOOTSTRAP_ROLE" ]; then
+      echo "box: converging the tenant — rig bootstrap $T_BOOTSTRAP_ROLE (rig's own narration follows)..."
+      if ! incus exec "$instance" -- rig bootstrap "$T_BOOTSTRAP_ROLE" </dev/null; then
+        echo >&2
+        echo "box: rig bootstrap $T_BOOTSTRAP_ROLE FAILED in $name." >&2
+        echo "box: the box is up and the seed is intact — the role converges, so re-run it:" >&2
+        echo "  box shell $name    # then: sudo rig bootstrap $T_BOOTSTRAP_ROLE" >&2
+        die "the tenant role did not converge — the box is incomplete, so refusing to call it ready"
+      fi
+    fi
   fi
   # The login hint belongs to the claude template — read the EFFECTIVE
   # template off the instance, so a clone of a claude box gets it too and a
@@ -1011,6 +1078,9 @@ cmd_new() {
   [ -z "$eff" ] && [ "$(incus config get "$instance" user.claudebox 2>/dev/null || true)" = 1 ] && eff=claude
   if [ "$eff" = claude ]; then
     echo "box: ready — 'box shell $name'. Log into Claude inside: run 'claude' then /login."
+  elif [ "$eff" = staging ]; then
+    echo "box: ready — 'box shell $name'. The tailnet join stays operator-run (it holds a key box must never see):"
+    echo "  box shell $name    # then: sudo rig bootstrap workload --hostname $name"
   else
     echo "box: ready — 'box shell $name'."
   fi

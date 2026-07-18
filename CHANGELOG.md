@@ -35,6 +35,30 @@ which records not just what changed but what each drill run proved.
   The agent-context guard for the templates (suggested fix 4) lands in
   heavy-duty/rig#31's bootstrap roles per the thin-templates split (#81).
 
+- **The `staging` template** (#81, the re-cut of #69's layering) — a
+  server-class, creds-free seed: Debian 13, user `ops`, tmux, rig,
+  `BOX_REQUIRE_VM=1` (the VM is its trust boundary), `BOX_AUTOSTART=1` (a
+  server returns from a host reboot without an operator), and
+  `BOX_BOOTSTRAP_ROLE="staging"` — the server posture (docker, sshd
+  hardening) converges via `rig bootstrap staging` after mint. The tailnet
+  workload join holds a pre-auth key and therefore **stays operator-run**
+  (`box shell` → `sudo rig bootstrap workload`), printed as a next step —
+  box never sees the key.
+- **`BOX_BOOTSTRAP_ROLE` template key + mint-time auto-run** (#81) — a
+  template names the **creds-free** rig tenant role box runs inside the guest
+  after cloud-init settles (`incus exec … rig bootstrap <role>`); the value
+  is a role *name* by allowlist (anything shell-shaped dies at parse time, on
+  the host). A failed role leaves the box up and names the re-run — the roles
+  are convergent by contract (rig#31). `blank` names no role and auto-runs
+  nothing.
+- **The rig pin point: `RIG_REPO` / `RIG_REF`** (#81) — the tenant seeds
+  preinstall rig, inverting the rig→box install edge (rig#28), and the new
+  edge gets the same honest treatment rig#29 gave box's unpinned install:
+  `@RIG_REPO@`/`@RIG_REF@` tokens in the seed resolve at mint from the
+  environment (default `heavy-duty/rig` @ `main` — unpinned, tracking main,
+  until a release flow exists, rig#32/#83). The pin covers both the installer
+  fetched and the tree it installs, so a rig branch under review is testable
+  end to end; values are allowlist-validated before touching the YAML.
 - **Server-posture template keys** (#81, carved from #69) — two optional
   `box.env` allowlist keys. `BOX_REQUIRE_VM=1` refuses both the silent
   container fallback (no `/dev/kvm`, exit 1) and an explicit `--container`
@@ -121,6 +145,23 @@ which records not just what changed but what each drill run proved.
   `use`, `uninstall` — boxes named), flat-tree migration, symlink healing,
   single-version and zero-residue uninstalls, and the `INCOMPLETE` scream
   into *driven* tests instead of greps (154 checks).
+
+### Changed
+
+- **Thin templates — box mints, rig converges** (#81, companion rig#31) —
+  the tenant content that lived in `claude`/`codex`/`grok`'s cloud-init (the
+  agent CLI installs, docker, node, the per-template agent-context heredocs)
+  **moves to rig's bootstrap roles**, where it is convergent, idempotent and
+  testable end to end instead of parse-only YAML. What remains per template
+  is a thin, creds-free seed: the tenant user, tmux (#65), and rig
+  preinstalled — nothing that joins a tailnet or admits credentials. The #80
+  agent-context guard ("never run `box setup-host` or the drill inside a
+  box") now lives once, in rig's roles, not copy-pasted per template. The
+  template test sweep grew the contract's teeth: per-template seed asserts
+  (user matches, rig pinned via both tokens) and fail-closed **absence
+  greps** over effective cloud-init lines — no agent CLI, no docker, no
+  tailscale/authkey/ssh, no `write_files` heredocs — so tenant content
+  cannot quietly grow back.
 
 ### Fixed
 
