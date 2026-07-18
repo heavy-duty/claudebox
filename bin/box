@@ -1112,6 +1112,21 @@ install_root() {
   dirname "$vdir"
 }
 
+# A version is a DIRECTORY NAME under versions/ — nothing else. One strict
+# gate for every caller that builds a path from one (the installer's new_ver,
+# migration's flat_ver, and bin/box's 'use'/single-version uninstall): only
+# [A-Za-z0-9._+-], no leading '.' or '-'. That forbids '/', '..'-escapes,
+# spaces and option-lookalikes by construction — a crafted version dies HERE,
+# never in an rm -rf or an ln. install.sh carries a byte-identical copy;
+# test/cli.sh diffs the two so the gates cannot drift.
+valid_version() {
+  case "$1" in
+    ''|.*|-*) return 1 ;;
+    *[!A-Za-z0-9._+-]*) return 1 ;;
+  esac
+  return 0
+}
+
 # Which boxes exist on this host, at THIS caller's tier? Prints their names
 # (both tag generations) and succeeds when at least one exists; fails when
 # none are visible — including when incus is absent or not answering, because
@@ -1188,9 +1203,12 @@ cmd_use() {
   local v="${args[0]:-}" ir eff expect out
   [ -n "$v" ] || usage_error "usage: $(synopsis_of use)"
   ir="$(install_root)" || die "this box runs from a working tree ($root), not a versioned install — nothing to switch"
+  valid_version "$v" || die "not a sane version name: '$v' (a version is a directory name under versions/ — see 'box versions')"
   [ -d "$ir/versions/$v" ] || die "no such version: $v (see 'box versions')"
   die_under_boxes "switch the default box version" "box use $v"
-  ln -sfn "versions/$v" "$ir/current"
+  # An atomic flip, not unlink+create: ln -sfn leaves a window where current
+  # is missing; a rename over it does not.
+  ln -sfn "versions/$v" "$ir/current.new.$$" && mv -Tf "$ir/current.new.$$" "$ir/current"
   converge_bin_links "$ir"
   # Assert the EFFECTIVE result, not the intent: current must resolve to the
   # version asked for, and the chain's own binary must answer that version —
@@ -1246,8 +1264,15 @@ cmd_uninstall() {
   # -- one version -----------------------------------------------------------
   if [ -n "$ver" ] && [ "$all" -eq 0 ]; then
     [ "$purge_host" -eq 0 ] || usage_error "--purge-host goes with the full uninstall, not a single version"
+    valid_version "$ver" || die "not a sane version name: '$ver' (a version is a directory name under versions/ — see 'box versions')"
     [ -d "$ir/versions/$ver" ] || die "no such version: $ver (see 'box versions')"
     cur="$(basename "$(readlink -f "$ir/current" 2>/dev/null || true)")"
+    # A broken current makes the CURRENT guard below unfireable (cur empty
+    # when the link is missing; cur naming a non-directory when it dangles —
+    # readlink -f resolves a link whose last component does not exist). Heal
+    # first, then decide; never delete around a broken default.
+    { [ -n "$cur" ] && [ -d "$ir/versions/$cur" ]; } \
+      || die "current is dangling — 'box use <version>' to repoint the default first (refusing to remove versions while it is broken)"
     [ "$ver" != "$cur" ] || die "$ver is the CURRENT version — 'box use <other>' first, or 'box uninstall --all' for everything"
     uninstall_confirm "remove box version $ver from $ir"
     # rm's exit code is not the verdict — the absence re-check below is (a
@@ -1268,8 +1293,17 @@ cmd_uninstall() {
     # 'box revoke <user> --purge' is the clean path (and asserts its absence).
     granted="$(timeout 10 incus project list --format csv 2>/dev/null </dev/null | cut -d, -f1 | grep '^user-' | tr '\n' ' ' || true)"
     [ -n "${granted% }" ] && echo "box: NOTE — granted users still have projects (${granted% }) — 'box revoke <user> --purge' removes each world cleanly first" >&2
-    bash "$root/host/teardown-host.sh" \
-      || die "teardown-host did not complete — stopping BEFORE removing the install (the tree is untouched; fix the error and re-run)"
+    # Consent forwards: --force and BOX_YES are this verb's installer-family
+    # yes, and teardown-host must hear it too — otherwise a non-interactive
+    # 'uninstall --all --purge-host --force' dies at teardown's own prompt
+    # (EOF on read) with the tree untouched but the promise broken.
+    if [ "$force" -eq 1 ] || [ -n "${BOX_YES:-}" ]; then
+      bash "$root/host/teardown-host.sh" --yes \
+        || die "teardown-host did not complete — stopping BEFORE removing the install (the tree is untouched; fix the error and re-run)"
+    else
+      bash "$root/host/teardown-host.sh" \
+        || die "teardown-host did not complete — stopping BEFORE removing the install (the tree is untouched; fix the error and re-run)"
+    fi
   else
     die_under_boxes "uninstall box" "box uninstall (or 'box uninstall --purge-host' to tear the host stack down with them)"
   fi

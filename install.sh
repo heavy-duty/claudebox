@@ -62,6 +62,21 @@ confirm() {  # $1 = question
   case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
+# A version is a DIRECTORY NAME under versions/ — nothing else. One strict
+# gate for every caller that builds a path from one (the installer's new_ver,
+# migration's flat_ver, and bin/box's 'use'/single-version uninstall): only
+# [A-Za-z0-9._+-], no leading '.' or '-'. That forbids '/', '..'-escapes,
+# spaces and option-lookalikes by construction — a crafted version dies HERE,
+# never in an rm -rf or an ln. bin/box carries a byte-identical copy;
+# test/cli.sh diffs the two so the gates cannot drift.
+valid_version() {
+  case "$1" in
+    ''|.*|-*) return 1 ;;
+    *[!A-Za-z0-9._+-]*) return 1 ;;
+  esac
+  return 0
+}
+
 # Which boxes exist on this host, at THIS caller's tier? Prints their names
 # (both tag generations) and succeeds when at least one exists; fails when
 # none are visible — including when incus is absent or not answering, because
@@ -98,6 +113,15 @@ fi
 # under my boxes" class of failures (#66).
 confirm "Install box from $SRCDESC?" || die "cancelled — nothing was changed."
 
+# Flip $DEST/current to versions/<v> atomically: build the new link beside it,
+# rename over. Plain ln -sfn is unlink+create — a window where current names
+# nothing and a concurrent 'box' invocation dies mid-chain. bin/box's cmd_use
+# flips with the same pattern.
+flip_current() {
+  ln -sfn "versions/$1" "$DEST/current.new.$$"
+  mv -Tf "$DEST/current.new.$$" "$DEST/current"
+}
+
 # --- migrate a pre-0.7.0 flat install --------------------------------------
 # 0.6.0 and earlier installed the tree FLAT at $DEST (bin/box directly under
 # it). Move such a tree to versions/<its-VERSION> BEFORE anything else, so an
@@ -106,12 +130,16 @@ confirm "Install box from $SRCDESC?" || die "cancelled — nothing was changed."
 # window with no install — and the operator's tree is preserved bit for bit.
 if [ -e "$DEST/bin/box" ] && [ ! -d "$DEST/versions" ]; then
   flat_ver="$(cat "$DEST/VERSION" 2>/dev/null || echo 0.0.0-unknown)"
+  # The flat tree's VERSION is data from disk, not from this installer — the
+  # same trust boundary as the new_ver check, so the same gate: a corrupted
+  # (or hostile) VERSION must not steer the mv/ln below out of versions/.
+  valid_version "$flat_ver" || die "the flat install's VERSION is not a sane directory name: '$flat_ver' — fix $DEST/VERSION (one line, e.g. 0.6.0), then re-run"
   log "found a pre-0.7.0 flat install at $DEST (version $flat_ver) — migrating it into the versioned layout"
   staging="$DEST.migrating.$$"
   mv "$DEST" "$staging"
   mkdir -p "$DEST/versions"
   mv "$staging" "$DEST/versions/$flat_ver"
-  ln -sfn "versions/$flat_ver" "$DEST/current"
+  flip_current "$flat_ver"
   mkdir -p "$BINDIR"
   ln -sfn "$DEST/current/bin/box" "$BINDIR/box"
   log "migrated: it now lives at $DEST/versions/$flat_ver (still current; your boxes are untouched)"
@@ -176,7 +204,7 @@ fi
 # the identity of what is being installed, and 'box versions' lists these names.
 new_ver="$(cat "$EXTRACTED/VERSION" 2>/dev/null || true)"
 [ -n "$new_ver" ] || die "source has no VERSION file — cannot install it as a version"
-case "$new_ver" in */* | *' '* | .*) die "the source's VERSION is not a sane directory name: '$new_ver'" ;; esac
+valid_version "$new_ver" || die "the source's VERSION is not a sane directory name: '$new_ver'"
 
 # --- install into $DEST/versions/<version> ---------------------------------
 VDIR="$DEST/versions/$new_ver"
@@ -186,12 +214,15 @@ if [ -d "$VDIR" ]; then
     # Replace THIS version's tree, as atomically as two renames allow — never
     # a partial overlay of new files onto an old tree.
     log "BOX_REINSTALL=1 — replacing the installed $new_ver tree"
-    stage="$VDIR.new.$$"
-    rm -rf "$stage"
+    stage="$VDIR.new.$$"; old="$VDIR.old.$$"
+    rm -rf "$stage" "$old"
     chmod +x "$EXTRACTED/bin/box"
     mv "$EXTRACTED" "$stage"
-    rm -rf "$VDIR"
+    # Swap by renames, delete LAST: rm-then-move leaves a hole the whole
+    # length of the delete where current -> this version resolves to nothing.
+    mv "$VDIR" "$old"
     mv "$stage" "$VDIR"
+    rm -rf "$old"
     printf '%s\n' "$INSTALLED_FROM" > "$VDIR/INSTALLED_FROM"
     log "reinstalled $new_ver"
   else
@@ -221,7 +252,7 @@ fi
 cur="$(readlink -f "$DEST/current" 2>/dev/null || true)"
 want="$(readlink -f "$VDIR")"
 if [ -z "$cur" ] || [ ! -d "$cur" ]; then
-  ln -sfn "versions/$new_ver" "$DEST/current"
+  flip_current "$new_ver"
   log "default version: $new_ver"
 elif [ "$cur" = "$want" ]; then
   : # already the default — nothing to flip
@@ -241,7 +272,7 @@ else
     log "      (a portable 'box export' is #70), then 'box rm <box>' when you are done"
     log "    · then flip the default:  box use $new_ver"
   else
-    ln -sfn "versions/$new_ver" "$DEST/current"
+    flip_current "$new_ver"
     log "default version switched: $old_ver -> $new_ver ('box use $old_ver' switches back)"
   fi
 fi

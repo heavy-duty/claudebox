@@ -368,6 +368,10 @@ check "versions: marks the running one" 0 "(running)" ibox "$B1/box" versions
 # --- box use ----------------------------------------------------------------
 check "use: no argument is a usage error" 2 "usage: box use" ibox "$B1/box" use
 check "use: an unknown version is refused by name" 1 "no such version" ibox "$B1/box" use 1.2.3
+# A version is a directory NAME — a crafted one must die at the gate, never
+# reach the ln (current pointing outside the root) or an rm -rf.
+check "use: a path-traversal version dies at the gate" 1 "not a sane version name" \
+  ibox "$B1/box" use '../../tmp/evil'
 check "use: refuses under existing boxes, naming them (#66)" 1 "wedged" \
   ibox FAKE_BOXES="wedged stuck" "$B1/box" use "$VER"
 check "use: the refusal points at the remedy (box rm, then re-run)" 1 "box rm" \
@@ -417,6 +421,26 @@ check "migrate+upgrade: both versions present" 0 "" \
 check "migrate+upgrade: no boxes → the new version is the default" 0 "box 9.9.9-drill" \
   ibox "$B4/box" --version
 
+# A broken current must halt the single-version path BEFORE any decision: the
+# CURRENT guard keys off what current resolves to, and a dangling link makes
+# that answer a lie. Drive the version tree's own binary — the current chain
+# is exactly what is broken. H4 has two versions; heal current afterwards.
+ln -sfn "versions/gone" "$H4/current"
+check "uninstall: refuses while current is dangling (heal before delete)" 1 "dangling" \
+  ibox "$H4/versions/$VER/bin/box" uninstall 9.9.9-drill --force
+check "uninstall: ...and both version trees survived the refusal" 0 "" \
+  bash -c "[ -d '$H4/versions/$VER' ] && [ -d '$H4/versions/9.9.9-drill' ]"
+ln -sfn "versions/9.9.9-drill" "$H4/current"
+
+# The migration reads VERSION off the old tree — disk data, not installer
+# data. A hostile value must refuse BEFORE the tree moves anywhere.
+H9="$WORK/h9"; B9="$WORK/b9"; mkdir -p "$H9/bin" "$B9"
+cp "$ROOT/bin/box" "$H9/bin/box"; chmod +x "$H9/bin/box"
+printf '%s\n' '../pwn' > "$H9/VERSION"
+check "migrate: a hostile flat VERSION refuses to migrate" 1 "not a sane directory name" \
+  inst "$H9" "$B9"
+check "migrate: ...with the flat tree untouched where it was" 0 "" test -x "$H9/bin/box"
+
 # --- healing: a wedged \$BINDIR/box must never block an install -------------
 H5="$WORK/h5"; B5="$WORK/b5"; mkdir -p "$B5"
 ln -s "$WORK/nowhere/box" "$B5/box"                    # dangling
@@ -433,6 +457,8 @@ check "uninstall: refuses to remove the CURRENT version" 1 "CURRENT" \
   ibox "$B1/box" uninstall "$VER" --force
 check "uninstall: an unknown version is refused by name" 1 "no such version" \
   ibox "$B1/box" uninstall 5.5.5 --force
+check "uninstall: a path-traversal version dies at the gate (never an rm -rf)" 1 "not a sane version name" \
+  ibox "$B1/box" uninstall '../../../../etc' --force
 check "uninstall: a version plus --all is ambiguous (usage error)" 2 "" \
   ibox "$B1/box" uninstall 9.9.9-drill --all --force
 check "uninstall: removes a non-current version" 0 "removed version" \
@@ -484,6 +510,22 @@ awk '/^existing_boxes\(\) \{/,/^\}/' "$ROOT/install.sh"  > "$EBINST"
 check "existing_boxes: extracted from bin/box (guards the awk)" 0 "user.box=1" cat "$EBBIN"
 check "existing_boxes: bin/box and install.sh copies are byte-identical" 0 "" diff "$EBBIN" "$EBINST"
 rm -f "$EBBIN" "$EBINST"
+
+# Same discipline for the version-name gate: one policy, two copies, no drift
+# — a version that install.sh would refuse must not be one 'box use' accepts.
+VVBIN="$(mktemp)"; VVINST="$(mktemp)"
+awk '/^valid_version\(\) \{/,/^\}/' "$ROOT/bin/box"     > "$VVBIN"
+awk '/^valid_version\(\) \{/,/^\}/' "$ROOT/install.sh"  > "$VVINST"
+check "valid_version: extracted from bin/box (guards the awk)" 0 "A-Za-z0-9" cat "$VVBIN"
+check "valid_version: bin/box and install.sh copies are byte-identical" 0 "" diff "$VVBIN" "$VVINST"
+rm -f "$VVBIN" "$VVINST"
+
+# --purge-host must FORWARD installer-family consent: under --force/BOX_YES
+# the teardown call carries --yes, or a non-interactive combined uninstall
+# dies at teardown's own prompt with the flag's promise broken.
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "uninstall: --purge-host forwards consent to teardown-host (--yes)" 0 "" \
+  grep -qF -- 'bash "$root/host/teardown-host.sh" --yes' "$ROOT/bin/box"
 
 # --- the help keeps its promises --------------------------------------------
 check "help: the table lists 'versions'"                0 "versions"   "$BOX" help

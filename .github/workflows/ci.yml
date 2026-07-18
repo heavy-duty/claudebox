@@ -74,8 +74,11 @@ jobs:
           sudo test ! -e "/var/lib/incus/users/$uid"
           ! sudo incus project show "user-$uid"
           ! sudo incus config trust list --format csv | grep -q "incus-user-$uid"
-          sudo BOX_YES=1 /usr/local/bin/box teardown-host
-          sudo BOX_YES=1 /usr/local/bin/box uninstall --all
+          # The COMBINED verb, --force only, deliberately no BOX_YES and no
+          # TTY: this is the exact invocation that used to die at teardown's
+          # own prompt when consent was not forwarded (--purge-host now
+          # passes --yes through under --force/BOX_YES).
+          sudo /usr/local/bin/box uninstall --all --purge-host --force
           # zero residue: the daemon's state...
           ! sudo incus network show boxnet
           ! sudo incus profile show box-net
