@@ -35,7 +35,75 @@ no()   { printf '  \033[31mDIRTY\033[0m %s\n' "$*"; bad=$((bad + 1)); }
 inf()  { printf '        %s\n' "$*"; }
 head_() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
+# --- The #80 signature: a nested box stack squatting on the gateway ---------
+# setup-host run INSIDE a box builds a nested boxnet on the guest's own uplink
+# subnet. The measured mechanism, and the two lines this function reads for:
+# hold your own gateway's address and the kernel's local table eats packets
+# meant for the real gateway (DNS, unicast DHCP renewals); carry two connected
+# routes for the uplink subnet and whichever link last has carrier wins — a
+# nested bridge gaining carrier blackholes egress instantly. Pure text in,
+# findings out (one per line, silence is clean), so test/cli.sh drives it
+# against synthetic route tables and the guest probe can feed it routes read
+# INSIDE a box. Inputs: `ip -4 route show` and `ip -4 -o addr show` output.
+gw_squat_signature() {
+  local routes="$1" addrs="$2" gw updev
+  gw="$(printf '%s\n' "$routes" | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "via") { print $(i+1); exit } }')"
+  updev="$(printf '%s\n' "$routes" | awk '$1 == "default" { for (i = 1; i < NF; i++) if ($i == "dev") { print $(i+1); exit } }')"
+  [ -n "$gw" ] || return 0    # no default route: nothing to squat on
+  printf '%s\n' "$addrs" | awk -v gw="$gw" '
+    { split($4, a, "/")
+      if (a[1] == gw) { print "the default gateway " gw " is held as a LOCAL address (on " $2 ") — the kernel delivers packets meant for the gateway to this machine itself"; exit } }'
+  printf '%s\n' "$routes" | awk -v updev="$updev" '
+    / proto kernel / && $2 == "dev" {
+      cnt[$1]++; devs[$1] = devs[$1] (devs[$1] ? ", " : "") $3
+      if ($3 == updev) up = $1
+    }
+    END { if (up != "" && cnt[up] > 1)
+      print "duplicate connected routes for the uplink subnet " up " (" devs[up] ") — whichever link last gains carrier wins, and a nested bridge with carrier blackholes egress" }'
+}
+
+# The signature, probed INSIDE a box: its routes, read where they live. A
+# poisoned guest looks healthy from every host-side config check — the nested
+# bridge and the captured gateway exist only in the guest's kernel.
+probe_sig() {
+  local b="$1" routes addrs sig line
+  routes="$(timeout -k 5 20 incus exec "$b" -- ip -4 route show </dev/null 2>/dev/null)"
+  addrs="$(timeout -k 5 20 incus exec "$b" -- ip -4 -o addr show </dev/null 2>/dev/null)"
+  if [ -z "$routes" ]; then
+    inf "could not read routes inside '$b' — the #80 signature was not probed"
+    return 0
+  fi
+  sig="$(gw_squat_signature "$routes" "$addrs")"
+  if [ -n "$sig" ]; then
+    while IFS= read -r line; do no "inside '$b': $line"; done <<<"$sig"
+    inf "a box stack was installed INSIDE this box — its nested bridge claims the"
+    inf "box's own uplink subnet, and egress blacks out intermittently (issue #80)."
+    inf "fix, inside the box:  sudo incus network set boxnet ipv4.address 10.89.0.1/24"
+    inf "      (or remove the nested stack there:  box teardown-host)"
+  else
+    ok "no #80 signature inside '$b' — nothing is squatting on its gateway"
+  fi
+}
+
 command -v incus >/dev/null || { echo "doctor: incus is not installed on this host."; exit 1; }
+
+# THIS MACHINE first, both tiers, before anything that needs the daemon: the
+# #80 signature is a fact about the kernel's routing tables, not about incus —
+# and a poisoned guest is exactly where the daemon answering below may be the
+# WRONG (nested) one, judging its own impostor stack clean.
+head_ "This machine — is a nested box stack squatting on the gateway? (#80)"
+sig="$(gw_squat_signature "$(ip -4 route show 2>/dev/null)" "$(ip -4 -o addr show 2>/dev/null)")"
+if [ -n "$sig" ]; then
+  while IFS= read -r line; do no "$line"; done <<<"$sig"
+  inf "a box stack was built on a machine whose uplink already owns its subnet —"
+  inf "run inside a box, that is issue #80: egress blacks out intermittently while"
+  inf "everything looks healthy. setup-host now refuses this; this machine already has it."
+  inf "fix:  move the nested bridge off the uplink's subnet:"
+  inf "        sudo incus network set boxnet ipv4.address 10.89.0.1/24"
+  inf "      (or remove the nested stack:  box teardown-host)"
+else
+  ok "the default gateway is not held locally, and the uplink subnet has one connected route"
+fi
 timeout 10 incus list >/dev/null 2>&1 || {
   echo "doctor: the incus daemon is not answering (see issue #26 for recovery):"
   echo "  sudo pkill -9 -f 'incusd shutdown'"
@@ -85,12 +153,21 @@ if [ "$TIER" = restricted ]; then
            | awk -F, '$2 == "RUNNING" { print $1; exit }')"
   if [ -n "$probe" ]; then
     inf "probing inside '$probe':"
-    timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null \
-      && ok "reaches 1.1.1.1 by address — egress routing is fine" \
-      || no "cannot reach 1.1.1.1 by address — egress routing is broken (an admin problem: box doctor as admin)"
-    timeout -k 5 25 incus exec "$probe" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1 \
-      && ok "resolves deb.debian.org — DNS works" \
-      || no "CANNOT resolve deb.debian.org — an admin problem (the resolver pin lives on the host): box doctor as admin"
+    if timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null; then
+      routing=1; ok "reaches 1.1.1.1 by address — egress routing is fine"
+    else
+      routing=0; no "cannot reach 1.1.1.1 by address — egress routing is broken (an admin problem: box doctor as admin)"
+    fi
+    if timeout -k 5 25 incus exec "$probe" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1; then
+      ok "resolves deb.debian.org — DNS works"
+      # Egress broken while DNS resolves is #80's fingerprint: an impostor
+      # dnsmasq on a captured gateway address answers names happily (it
+      # forwards upstream via the default route) while direct IP egress dies.
+      [ "$routing" = 0 ] && inf "…egress broken while DNS resolves is #80's fingerprint — the signature probe below answers whether something inside this box squats on its gateway"
+    else
+      no "CANNOT resolve deb.debian.org — an admin problem (the resolver pin lives on the host): box doctor as admin"
+    fi
+    probe_sig "$probe"
   else
     inf "no running box to probe with (mint one: box new --name work)"
   fi
@@ -208,6 +285,22 @@ if incus network acl show box-isolate >/dev/null 2>&1; then
   if incus network acl show box-isolate | grep -q '@internal'; then
     no "an @internal rule survived phase D"
     [ "$FIX" = 1 ] && { incus network acl rule remove box-isolate egress action=drop destination=@internal && inf "reverted: @internal rule removed"; }
+  fi
+  # The gateway carve-out must track the BRIDGE. #80's escape hatch moves
+  # boxnet off a colliding subnet — and the stale /32 then strands box DNS
+  # inside the 10.0.0.0/8 drop, which presents as a dead resolver, never as
+  # a stale ACL. Compare the allow rule to boxnet's actual gateway.
+  gwaddr="$(incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1)"
+  carve="$(incus network acl show box-isolate 2>/dev/null \
+           | awk '/- action: allow/ { hit = 1; next } hit && /destination:/ { sub("/32", "", $2); print $2; exit } { hit = 0 }')"
+  if [ -n "$gwaddr" ] && [ -n "$carve" ]; then
+    if [ "$carve" = "$gwaddr" ]; then
+      ok "the gateway carve-out matches boxnet's gateway ($gwaddr) — box DNS survives the 10/8 drop"
+    else
+      no "the gateway carve-out ($carve/32) does NOT match boxnet's gateway ($gwaddr) — box DNS to the gateway dies inside the 10.0.0.0/8 drop"
+      inf "the bridge moved (#80's escape hatch) and the ACL did not follow"
+      inf "fix:  BOX_SUBNET=${gwaddr%.*}.0/24 box setup-host   (it converges the ACL now)"
+    fi
   fi
 else
   inf "box-isolate does not exist (a fresh host)"
@@ -329,6 +422,11 @@ if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
 
   if timeout -k 5 25 incus exec "$probe" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1; then
     ok "resolves deb.debian.org — DNS works"
+    # The OTHER split from the one below: egress broken while DNS resolves is
+    # #80's fingerprint — an impostor dnsmasq on a captured gateway address
+    # keeps answering names (it forwards upstream via the default route)
+    # while direct IP egress dies. The signature probe underneath answers it.
+    [ "$routing" = 0 ] && inf "…egress broken while DNS resolves is #80's fingerprint — see the signature probe below"
   else
     no "CANNOT resolve deb.debian.org — this is exactly what kills cloud-init on every cold mint"
     # Egress by address was probed above. If it worked, the fault is purely
@@ -341,6 +439,8 @@ if [ -n "$probe" ] && [ "$FIX" != 1 ]; then
       inf "…and it cannot reach 1.1.1.1 by address either — so egress itself is broken, not just DNS."
     fi
   fi
+
+  probe_sig "$probe"
 else
   inf "no box to probe with (mint one, or run without --fix after a run)"
 fi
