@@ -3,10 +3,25 @@ set -euo pipefail
 
 # box installer — intended for: curl -fsSL .../install.sh | bash
 #
-# Downloads the box source tarball from its GitHub repo (heavy-duty/box),
-# installs the whole tree under $DEST, and puts a `box` symlink on PATH via
-# $BINDIR. (GitHub redirects the repo's pre-rename URLs, so an old install
-# script keeps working; BOX_REPO overrides.)
+# Downloads the box source tarball from its GitHub repo (heavy-duty/box) and
+# installs it into the VERSIONED layout under $DEST:
+#
+#   $DEST/versions/<version>/    one full tree per installed version
+#   $DEST/current -> versions/<version>       the default version
+#   $BINDIR/box   -> $DEST/current/bin/box    the PATH entry
+#
+# Versions install side by side, the way plenty of CLIs manage theirs: `box
+# versions` lists them, `box use <v>` switches the default, `box uninstall`
+# removes them. Re-running with an already-installed version is a converging
+# no-op (BOX_REINSTALL=1 replaces that version's tree); a NEW version installs
+# beside the old one and becomes the default only when NO boxes exist — #66's
+# stance (never change versions under a user's boxes) now guards the FLIP, not
+# the whole install. A pre-0.7.0 flat tree is migrated in place, so upgrading
+# from 0.6.0 is seamless. (GitHub redirects the repo's pre-rename URLs, so an
+# old install script keeps working; BOX_REPO overrides.)
+#
+# BOX_INSTALL_SOURCE=<dir-or-tarball> installs from a local tree instead of
+# downloading — for CI and the drill, so what lands is the code under review.
 
 REPO="${BOX_REPO:-heavy-duty/box}"
 REF="${BOX_REF:-main}"
@@ -47,30 +62,68 @@ confirm() {  # $1 = question
   case "$reply" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
+# Which boxes exist on this host, at THIS caller's tier? Prints their names
+# (both tag generations) and succeeds when at least one exists; fails when
+# none are visible — including when incus is absent or not answering, because
+# #66's stance protects BOXES from a version change, and a daemon that cannot
+# answer has none to protect. bin/box carries a byte-identical copy (the CLI
+# needs the same gate for 'box use' / 'box uninstall'); test/cli.sh diffs the
+# two so they cannot drift.
+existing_boxes() {
+  command -v incus >/dev/null 2>&1 || return 1
+  { timeout 10 incus list user.box=1 --format csv --columns n </dev/null
+    timeout 10 incus list user.claudebox=1 --format csv --columns n </dev/null
+  } 2>/dev/null | awk -F, 'NF && !seen[$1]++ { print $1 }' | grep .
+}
+
 # --- prerequisites ---------------------------------------------------------
-command -v curl >/dev/null 2>&1 || die "curl is required but was not found. Please install curl and re-run."
+# curl only when something must be downloaded — a local BOX_INSTALL_SOURCE
+# needs none, which is what lets test/cli.sh drive REAL installs offline.
+if [ -z "${BOX_INSTALL_SOURCE:-}" ]; then
+  command -v curl >/dev/null 2>&1 || die "curl is required but was not found. Please install curl and re-run."
+fi
 command -v tar  >/dev/null 2>&1 || die "tar is required but was not found. Please install tar and re-run."
 
-# --- confirm, then no-op if already installed ------------------------------
-# Prompt BEFORE downloading anything: the first thing a curl|bash should do is
-# ask whether you meant to. Then, if box is already installed, this run changes
-# nothing and says so — a re-run is a safe no-op, which dissolves the whole
-# "curl clobbered my working install / rebuilt the stack under my boxes" class
-# of failures. Upgrading is deliberately NOT an in-place overwrite: you uninstall
-# what you have (dealing with your boxes as you do) and install fresh.
-confirm "Install box from $REPO@$REF?" || die "cancelled — nothing was changed."
+if [ -n "${BOX_INSTALL_SOURCE:-}" ]; then
+  SRCDESC="local source $BOX_INSTALL_SOURCE"
+else
+  SRCDESC="$REPO@$REF"
+fi
 
-if [ -e "$BINDIR/box" ] || [ -x "$DEST/bin/box" ]; then
-  cur="$(cat "$DEST/INSTALLED_FROM" 2>/dev/null || echo '<unknown source>')"
-  cur_ver="$(cat "$DEST/VERSION" 2>/dev/null || echo '?')"
-  log "box is already installed ($cur, version $cur_ver) — nothing to do."
-  log "To install a different version, remove the current one first:"
-  log "    · preserve any boxes you care about — 'box down <box>', then keep them"
-  log "      (a portable 'box export' is #70; for now copy what you need OUT via"
-  log "      'box shell'/'box exec'), and 'box rm <box>' when you are done"
-  log "    · uninstall:  rm -rf \"$DEST\" \"$BINDIR/box\""
-  log "    · then re-run this installer"
-  exit 0
+# --- confirm first ---------------------------------------------------------
+# Prompt BEFORE downloading anything: the first thing a curl|bash should do is
+# ask whether you meant to. Everything after this converges: re-running with a
+# version that is already installed changes nothing and says so, which
+# dissolves the whole "curl clobbered my working install / rebuilt the stack
+# under my boxes" class of failures (#66).
+confirm "Install box from $SRCDESC?" || die "cancelled — nothing was changed."
+
+# --- migrate a pre-0.7.0 flat install --------------------------------------
+# 0.6.0 and earlier installed the tree FLAT at $DEST (bin/box directly under
+# it). Move such a tree to versions/<its-VERSION> BEFORE anything else, so an
+# upgrade from 0.6.0 is seamless and the version comparison below sees the
+# truth. The move is two renames inside one parent directory — no copying, no
+# window with no install — and the operator's tree is preserved bit for bit.
+if [ -e "$DEST/bin/box" ] && [ ! -d "$DEST/versions" ]; then
+  flat_ver="$(cat "$DEST/VERSION" 2>/dev/null || echo 0.0.0-unknown)"
+  log "found a pre-0.7.0 flat install at $DEST (version $flat_ver) — migrating it into the versioned layout"
+  staging="$DEST.migrating.$$"
+  mv "$DEST" "$staging"
+  mkdir -p "$DEST/versions"
+  mv "$staging" "$DEST/versions/$flat_ver"
+  ln -sfn "versions/$flat_ver" "$DEST/current"
+  mkdir -p "$BINDIR"
+  ln -sfn "$DEST/current/bin/box" "$BINDIR/box"
+  log "migrated: it now lives at $DEST/versions/$flat_ver (still current; your boxes are untouched)"
+fi
+
+# Whether ANY version was installed before this run — read before we add one.
+# It gates the host-setup offer below: a host that already ran box has made
+# that decision (and may have live boxes the stack must not be rebuilt under,
+# #66); after an upgrade, 'box setup-host' re-applies stack changes on purpose.
+had_install=0
+if [ -d "$DEST/versions" ] && [ -n "$(ls -A "$DEST/versions" 2>/dev/null)" ]; then
+  had_install=1
 fi
 
 # --- temp workspace --------------------------------------------------------
@@ -78,50 +131,128 @@ TMPDIR="$(mktemp -d)"
 cleanup() { rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 
-URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
+# --- acquire the tree ------------------------------------------------------
+if [ -n "${BOX_INSTALL_SOURCE:-}" ]; then
+  SRC="$BOX_INSTALL_SOURCE"
+  INSTALLED_FROM="local:$SRC"
+  if [ -d "$SRC" ]; then
+    log "copying local tree $SRC"
+    mkdir -p "$TMPDIR/tree"
+    # tar, not cp -a: --exclude=.git, so a working checkout never carries its
+    # VCS state (or its size) into the install tree.
+    tar -C "$SRC" --exclude=.git -cf - . | tar -xf - -C "$TMPDIR/tree"
+    EXTRACTED="$TMPDIR/tree"
+  elif [ -f "$SRC" ]; then
+    log "extracting local tarball $SRC"
+    tar -xzf "$SRC" -C "$TMPDIR" || die "failed to extract $SRC"
+    EXTRACTED="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+  else
+    die "BOX_INSTALL_SOURCE is set but is neither a directory nor a tarball: $SRC"
+  fi
+else
+  INSTALLED_FROM="$REPO@$REF"
+  URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
+  log "installing box from $REPO@$REF"
+  log "downloading $URL"
+  curl -fsSL "$URL" -o "$TMPDIR/box.tar.gz" \
+    || die "failed to download $URL"
 
-log "installing box from $REPO@$REF"
-log "downloading $URL"
-curl -fsSL "$URL" -o "$TMPDIR/box.tar.gz" \
-  || die "failed to download $URL"
+  log "extracting archive"
+  tar -xzf "$TMPDIR/box.tar.gz" -C "$TMPDIR" \
+    || die "failed to extract archive"
 
-log "extracting archive"
-tar -xzf "$TMPDIR/box.tar.gz" -C "$TMPDIR" \
-  || die "failed to extract archive"
+  # GitHub names the archive's top dir <repo>-<ref> (slashes in a ref become
+  # dashes) — deriving that name is guesswork, and it broke for real at the
+  # claudebox → box rename, when this glob kept looking for claudebox-* and the
+  # installer died on every host. The tarball has exactly ONE top-level
+  # directory: take the directory, whatever it is called, and let the bin/box
+  # check below judge whether it is the right tree.
+  EXTRACTED="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
+fi
+[ -n "${EXTRACTED:-}" ] || die "could not find the source tree in $SRCDESC"
+[ -f "$EXTRACTED/bin/box" ] || die "source does not contain bin/box — is $SRCDESC correct?"
 
-# GitHub names the archive's top dir <repo>-<ref> (slashes in a ref become
-# dashes) — deriving that name is guesswork, and it broke for real at the
-# claudebox → box rename, when this glob kept looking for claudebox-* and the
-# installer died on every host. The tarball has exactly ONE top-level
-# directory: take the directory, whatever it is called, and let the bin/box
-# check below judge whether it is the right tree.
-EXTRACTED="$(find "$TMPDIR" -mindepth 1 -maxdepth 1 -type d | head -n1)"
-[ -n "$EXTRACTED" ] || die "could not find the extracted source directory in archive"
-[ -f "$EXTRACTED/bin/box" ] || die "archive does not contain bin/box — is $REPO@$REF correct?"
+# The tree's own VERSION file names the directory it lands in — the version IS
+# the identity of what is being installed, and 'box versions' lists these names.
+new_ver="$(cat "$EXTRACTED/VERSION" 2>/dev/null || true)"
+[ -n "$new_ver" ] || die "source has no VERSION file — cannot install it as a version"
+case "$new_ver" in */* | *' '* | .*) die "the source's VERSION is not a sane directory name: '$new_ver'" ;; esac
 
-# --- install into $DEST ----------------------------------------------------
-# Reached only on a host with no existing install (the no-op check above
-# exits otherwise), so this is always a fresh tree, never an overwrite.
-log "installing into $DEST"
-mkdir -p "$(dirname "$DEST")"
-mv "$EXTRACTED" "$DEST"
+# --- install into $DEST/versions/<version> ---------------------------------
+VDIR="$DEST/versions/$new_ver"
+newly_installed=0
+if [ -d "$VDIR" ]; then
+  if [ -n "${BOX_REINSTALL:-}" ]; then
+    # Replace THIS version's tree, as atomically as two renames allow — never
+    # a partial overlay of new files onto an old tree.
+    log "BOX_REINSTALL=1 — replacing the installed $new_ver tree"
+    stage="$VDIR.new.$$"
+    rm -rf "$stage"
+    chmod +x "$EXTRACTED/bin/box"
+    mv "$EXTRACTED" "$stage"
+    rm -rf "$VDIR"
+    mv "$stage" "$VDIR"
+    printf '%s\n' "$INSTALLED_FROM" > "$VDIR/INSTALLED_FROM"
+    log "reinstalled $new_ver"
+  else
+    cur_from="$(cat "$VDIR/INSTALLED_FROM" 2>/dev/null || echo '<unknown source>')"
+    log "box $new_ver is already installed ($cur_from) — nothing to do."
+    log "(BOX_REINSTALL=1 replaces this version's tree; 'box versions' lists what is installed.)"
+  fi
+else
+  log "installing $new_ver into $VDIR"
+  mkdir -p "$DEST/versions"
+  chmod +x "$EXTRACTED/bin/box"
+  mv "$EXTRACTED" "$VDIR"
+  newly_installed=1
+  # Record WHAT was installed, so a caller can assert it got what it asked for.
+  # Without this, an installer invoked with stale env vars (the CLAUDEBOX_* names
+  # retired in 0.5.0) silently falls back to the defaults and installs main —
+  # and the caller drills the wrong tree, believing it drilled its branch.
+  printf '%s\n' "$INSTALLED_FROM" > "$VDIR/INSTALLED_FROM"
+fi
 
-chmod +x "$DEST/bin/box"
-
-# A global (root) install is run by OTHER users, but mv preserves the tarball's
-# root:root ownership and GitHub's archives carry no world bits on some paths — so
-# without this, a non-root caller cannot even traverse into $DEST to reach bin/box.
-# Root owns the tree, nobody else writes it, everybody reads it. a+rX: read on
-# files, +search (x) on directories only. Guarded on root so the per-user install
-# stays byte-identical to before.
-if [ "$(id -u)" -eq 0 ]; then
-  chmod -R a+rX "$DEST"
+# --- which version is the default? -----------------------------------------
+# 'current' is the tracked default; flipping it is the ONLY step that changes
+# what an operator's `box` runs. #66's stance, kept exactly here: never change
+# versions under existing boxes. A fresh host (or a dangling current) is
+# claimed outright; an upgrade flips only when no box exists — otherwise the
+# new version sits installed side-by-side and 'box use' is the deliberate act.
+cur="$(readlink -f "$DEST/current" 2>/dev/null || true)"
+want="$(readlink -f "$VDIR")"
+if [ -z "$cur" ] || [ ! -d "$cur" ]; then
+  ln -sfn "versions/$new_ver" "$DEST/current"
+  log "default version: $new_ver"
+elif [ "$cur" = "$want" ]; then
+  : # already the default — nothing to flip
+elif [ "$newly_installed" -eq 0 ]; then
+  # A converge/no-op (or BOX_REINSTALL) of a version that is NOT the default
+  # never moves the default — a re-run must change nothing (#66); switching is
+  # 'box use', a deliberate act.
+  log "the default stays $(basename "$cur") — 'box use $new_ver' switches."
+else
+  old_ver="$(basename "$cur")"
+  if names="$(existing_boxes)"; then
+    warn "this host has existing boxes:"
+    while IFS= read -r n; do warn "  · $n"; done <<<"$names"
+    warn "refusing to change the default box version under them (#66) — the default stays at $old_ver."
+    log "box $new_ver is installed side-by-side. To switch:"
+    log "    · preserve what you care about — 'box down <box>', copy out via 'box shell'/'box exec'"
+    log "      (a portable 'box export' is #70), then 'box rm <box>' when you are done"
+    log "    · then flip the default:  box use $new_ver"
+  else
+    ln -sfn "versions/$new_ver" "$DEST/current"
+    log "default version switched: $old_ver -> $new_ver ('box use $old_ver' switches back)"
+  fi
 fi
 
 # --- put box on PATH -------------------------------------------------------
+# ln -sfn converges, and that includes HEALING: a stale or dangling
+# $BINDIR/box (say, its tree half-removed by hand) must never block or wedge
+# an install — it gets repointed at the current chain, whatever it said before.
 mkdir -p "$BINDIR"
-ln -sf "$DEST/bin/box" "$BINDIR/box"
-log "linked $BINDIR/box -> $DEST/bin/box"
+ln -sfn "$DEST/current/bin/box" "$BINDIR/box"
+log "linked $BINDIR/box -> $DEST/current/bin/box"
 # 0.4.0 renamed the binary (clean cut): clear a stale claudebox symlink so it
 # cannot dangle at the old bin path forever. Old BOXES keep working — the CLI
 # honors their legacy tag — it is only the old command name that retires.
@@ -137,6 +268,34 @@ if [ -d "$OLD_DEST" ] && [ "$OLD_DEST" != "$DEST" ]; then
   log "removed the old install tree at $OLD_DEST (it now lives at $DEST)"
 fi
 
+# A global (root) install is run by OTHER users, but mv preserves the tarball's
+# root:root ownership and GitHub's archives carry no world bits on some paths — so
+# without this, a non-root caller cannot even traverse into $DEST to reach bin/box.
+# Root owns the tree, nobody else writes it, everybody reads it. a+rX: read on
+# files, +search (x) on directories only. Guarded on root so the per-user install
+# stays byte-identical to before.
+if [ "$(id -u)" -eq 0 ]; then
+  chmod -R a+rX "$DEST"
+fi
+
+# --- the OTHER tier's install, if any --------------------------------------
+# A root (/opt/box) and a per-user (~/.local/share/box) install coexist by
+# PATH order alone, which is easy to be surprised by — say so out loud rather
+# than let two versions silently shadow each other (#71's layout, both sides).
+if [ "$(id -u)" -ne 0 ]; then
+  if [ -e /opt/box/current/bin/box ] || [ -e /opt/box/bin/box ]; then
+    warn "a GLOBAL install also exists at /opt/box — PATH order decides which 'box' you run (check: command -v box)"
+  fi
+else
+  sudo_home=""
+  if [ -n "${SUDO_USER:-}" ]; then
+    sudo_home="$(getent passwd "$SUDO_USER" | cut -d: -f6)" || sudo_home=""
+  fi
+  if [ -n "$sudo_home" ] && { [ -e "$sudo_home/.local/share/box/current/bin/box" ] || [ -e "$sudo_home/.local/share/box/bin/box" ]; }; then
+    warn "a PER-USER install also exists at $sudo_home/.local/share/box — PATH order decides which 'box' $SUDO_USER runs"
+  fi
+fi
+
 # --- PATH check ------------------------------------------------------------
 case ":$PATH:" in
   *":$BINDIR:"*) : ;;
@@ -147,29 +306,27 @@ case ":$PATH:" in
     ;;
 esac
 
-# Record WHAT was installed, so a caller can assert it got what it asked for.
-# Without this, an installer invoked with stale env vars (the CLAUDEBOX_* names
-# retired in 0.5.0) silently falls back to the defaults and installs main —
-# and the caller drills the wrong tree, believing it drilled its branch.
-# Written BEFORE host setup: this records the install, which has now happened,
-# and it must not hinge on whether the host stack came up.
-printf '%s@%s\n' "$REPO" "$REF" > "$DEST/INSTALLED_FROM"
-
 # --- host setup (second prompt) --------------------------------------------
 # The tool is installed; the machine is not yet a box host. Offer to finish the
 # job — build Incus and the isolation stack — rather than leave 'box new' to die
 # later on a host with no boxnet and no profile (#64). This is its own decision:
 # you might be installing the CLI on a workstation and hosting boxes elsewhere.
+# Offered on a FRESH host only: a host that already had a box install has made
+# this decision (and may have live boxes the stack must not be rebuilt under);
+# 'box setup-host' re-applies stack changes deliberately, after an upgrade.
 # BOX_SKIP_SETUP_HOST=1 answers "no" without prompting (image builds, a host set
 # up by hand); BOX_YES answers "yes".
 setup_ok=""
 setup_declined=""
-if [ -n "${BOX_SKIP_SETUP_HOST:-}" ]; then
+if [ "$had_install" -eq 1 ]; then
+  log "this host already had a box install — skipping host setup (re-apply stack changes any time: box setup-host)"
+  setup_declined=1
+elif [ -n "${BOX_SKIP_SETUP_HOST:-}" ]; then
   log "skipping host setup (BOX_SKIP_SETUP_HOST is set)."
   setup_declined=1
 elif [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
   warn "cannot set up the host: it needs root and sudo was not found."
-  warn "  run this as root to finish: $DEST/host/setup-host.sh"
+  warn "  run this as root to finish: $DEST/current/host/setup-host.sh"
   setup_declined=1
 elif confirm "Set up this machine as a box host now? (installs Incus + the isolation stack; needs sudo)"; then
   # </dev/null because under 'curl … | bash' this script IS stdin: a child that
@@ -177,7 +334,7 @@ elif confirm "Set up this machine as a box host now? (installs Incus + the isola
   # it prompts on /dev/tty, so an interactive host can still authenticate.
   # setup-host re-execs itself under sg incus-admin if it must add you to the
   # group; that re-exec is a child here and completes the whole setup in one go.
-  if bash "$DEST/host/setup-host.sh" </dev/null; then
+  if bash "$DEST/current/host/setup-host.sh" </dev/null; then
     setup_ok=1
   else
     warn "host setup did not complete — box is installed, the host is not ready."
@@ -189,9 +346,9 @@ else
 fi
 
 if [ -n "$setup_ok" ]; then
-  log "done ($REPO@$REF) — try: box new --name test"
+  log "done ($SRCDESC, version $new_ver) — try: box new --name test"
 elif [ -n "$setup_declined" ]; then
-  log "done ($REPO@$REF) — when you want this machine to host boxes: box setup-host"
+  log "done ($SRCDESC, version $new_ver) — when you want this machine to host boxes: box setup-host"
 else
-  log "done ($REPO@$REF) — finish with 'box setup-host', then: box new --name test"
+  log "done ($SRCDESC, version $new_ver) — finish with 'box setup-host', then: box new --name test"
 fi
