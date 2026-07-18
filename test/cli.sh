@@ -165,6 +165,15 @@ check "load_template: an unknown key dies (no template grows a network)" 1 "unkn
   tpl "$EVILROOT" evil
 printf 'BOX_USER="dev"\n' > "$EVILROOT/templates/evil/box.env"
 check "load_template: a missing BOX_IMAGE dies" 1 "required" tpl "$EVILROOT" evil
+# The green path the two new keys exist for: no in-tree template sets them yet
+# (the seed lands after rig#31), so without this fixture the case arms could be
+# deleted and the suite would stay green while the keys silently died as
+# "unknown key" at first use. Accepted AND surfaced, through the real parser.
+mkdir -p "$EVILROOT/templates/server"
+printf 'BOX_IMAGE="images:debian/13/cloud"\nBOX_USER="ops"\nBOX_REQUIRE_VM="1"\nBOX_AUTOSTART="1"\n' \
+  > "$EVILROOT/templates/server/box.env"
+check "load_template: REQUIRE_VM and AUTOSTART round-trip (accepted + surfaced)" \
+  0 "REQUIRE_VM=1 AUTOSTART=1" tpl "$EVILROOT" server
 rm -rf "$EVILROOT"
 
 # YAML well-formedness needs python3 + pyyaml; the CI runner has both. Skip
@@ -211,6 +220,14 @@ check "new: the REQUIRE_VM refusal orders after pick_mode" 0 "" bash -c '
   pick="$(printf "%s\n" "$fn" | grep -n "pick_mode"    | head -1 | cut -d: -f1)"
   guard="$(printf "%s\n" "$fn" | grep -n "T_REQUIRE_VM" | head -1 | cut -d: -f1)"
   [ -n "$pick" ] && [ -n "$guard" ] && [ "$pick" -lt "$guard" ]'
+# Order is necessary, not sufficient: a regression to the RAW flag
+# ([ "$mode" != vm ]) would still sit after pick_mode — and would refuse every
+# auto mint on a valid VM host. Pin the guard to the EFFECTIVE operand: the
+# T_REQUIRE_VM line itself must compare $m, the pick_mode result.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the REQUIRE_VM guard compares the effective mode (\$m)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "T_REQUIRE_VM" | grep -qF "\"\$m\" != vm"'
 check "new: boot.autostart is stamped under the T_AUTOSTART guard" 0 "" bash -c '
   awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
     | grep -F "boot.autostart=true" | grep -q "T_AUTOSTART"'

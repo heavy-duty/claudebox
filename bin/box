@@ -236,9 +236,10 @@ being told.
   --name <box>           Required. The box's name.
   --template <t>         Template to mint from; 'box templates' lists them.
                          A template sets image, user, resources and boot
-                         demands (a server-class one insists on VM mode and
-                         autostart) — never the network: every template gets
-                         the same isolation.
+                         demands (independently: BOX_REQUIRE_VM insists on
+                         VM mode, BOX_AUTOSTART survives host reboots) —
+                         never the network: every template gets the same
+                         isolation.
   --from <src>[/<snap>]  Clone src's live state, or its snapshot <snap>.
   --cpu <n>              CPUs for this mint (limits.cpu, verbatim to Incus).
   --memory <size>        RAM for this mint, e.g. 3GiB (limits.memory).
