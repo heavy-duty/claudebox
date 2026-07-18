@@ -3,7 +3,7 @@
 #
 # The zero-ceremony transition is just install.sh + setup-host.sh: that leaves
 # a DUAL-STACK host where legacy boxes (tag user.claudebox=1, claudenet/10.87,
-# claude-dev) keep working while new mints land on boxnet/10.88. This script is
+# claude-dev) keep working while new mints land on boxnet. This script is
 # the two things that path does not do:
 #
 #   migrate-host.sh --box <name>       re-home ONE legacy box onto the new stack
@@ -88,17 +88,19 @@ rehome_one() {
   incus start "$b" >/dev/null 2>&1 || { warn "$b: did not restart — start it by hand"; return 1; }
 
   # 3. VERIFY THE EFFECT, not the exit codes (the whole repo's lesson). The box
-  #    must be on 10.88 and actually resolve+reach the internet on its new leg
-  #    before we call it migrated.
-  local _i ip
+  #    must be on boxnet's subnet (read off the network — BOX_SUBNET moves it,
+  #    #80) and actually resolve+reach the internet on its new leg before we
+  #    call it migrated.
+  local _i ip pfx
+  pfx="$(incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1)"; pfx="${pfx%.*}."
   ip=""
   for _i in $(seq 1 30); do
     ip="$(incus exec "$b" -- ip -4 -o addr show scope global </dev/null 2>/dev/null \
-          | awk '{for(i=1;i<NF;i++) if($i=="inet" && $(i+1)~/^10\.88\./){split($(i+1),a,"/"); print a[1]; exit}}')"
+          | awk -v p="$pfx" '{for(i=1;i<NF;i++) if($i=="inet" && index($(i+1),p)==1){split($(i+1),a,"/"); print a[1]; exit}}')"
     [ -n "$ip" ] && break
     sleep 2
   done
-  [ -n "$ip" ] || { warn "$b: never got a 10.88 address after restart — re-home INCOMPLETE, inspect: incus console $b"; return 1; }
+  [ -n "$ip" ] || { warn "$b: never got a boxnet address after restart — re-home INCOMPLETE, inspect: incus console $b"; return 1; }
   if incus exec "$b" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1; then
     # LAST, and only once the move is VERIFIED: drop the legacy tag. Until this
     # point the box wears both tags, so a failure anywhere above leaves it a

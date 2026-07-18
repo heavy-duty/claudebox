@@ -45,6 +45,88 @@ else
   exit 1
 fi
 
+# --- The subnet, and the refusal to build on one something already owns -----
+# (#80.) The stack's subnet was hardcoded, and running setup-host INSIDE a box
+# gave the guest a nested boxnet claiming the exact subnet and gateway of its
+# own uplink: the guest then held its gateway's address as a LOCAL address,
+# carried two connected routes for the subnet, and suffered intermittent,
+# self-recovering egress blackouts nobody could attribute — the host looked
+# clean the whole time. The flagship use case funnels agents toward doing
+# exactly this (working on box, in a box), so the guard must refuse BEFORE
+# any mutation, and name the way out (BOX_SUBNET).
+
+# BOX_SUBNET must be a /24 with a zero host octet — a.b.c.0/24. Everything
+# the stack derives (the bridge address, the gateway carve-out, the firewall)
+# assumes that shape, and a garbage value must die HERE, never inside an
+# incus create or an nft rule.
+valid_subnet() {
+  local o a="" b="" c="" rest=""
+  case "$1" in *.0/24) ;; *) return 1 ;; esac
+  IFS=. read -r a b c rest <<<"${1%/24}"
+  [ "$rest" = 0 ] || return 1
+  for o in "$a" "$b" "$c"; do
+    case "$o" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#o}" -le 3 ] && [ "$o" -le 255 ] || return 1
+  done
+}
+
+# Who, other than box's own bridge, already owns an address inside $1?
+# Prints the claimant and succeeds when the subnet is claimed by a FOREIGNER;
+# stays silent and fails when it is free — or held only by boxnet, which is
+# the legitimate re-run, converging a stack this script built before. The
+# most telling claimant is the default route's gateway: if it sits inside the
+# target subnet, this machine's own uplink lives there — i.e. this is almost
+# certainly the inside of a box. Pure over `ip` output, so test/cli.sh can
+# drive it against canned tables with a shim ip.
+subnet_claimant() {
+  local pfx hit
+  pfx="${1%0/24}"
+  hit="$(ip -4 route show default 2>/dev/null | awk -v p="$pfx" '
+    { gw = ""; dev = ""
+      for (i = 1; i < NF; i++) { if ($i == "via") gw = $(i+1); if ($i == "dev") dev = $(i+1) }
+      if (index(gw, p) == 1 && dev != "boxnet") {
+        print "this machine\047s own DEFAULT GATEWAY (" gw " via " dev ")"; exit } }')"
+  if [ -z "$hit" ]; then
+    hit="$(ip -4 -o addr show 2>/dev/null | awk -v p="$pfx" '
+      $2 != "boxnet" && index($4, p) == 1 { print "interface " $2 " (" $4 ")"; exit }')"
+  fi
+  [ -n "$hit" ] && printf '%s\n' "$hit"
+}
+
+BOX_SUBNET="${BOX_SUBNET:-10.88.0.0/24}"
+if ! valid_subnet "$BOX_SUBNET"; then
+  echo "ERROR: BOX_SUBNET='$BOX_SUBNET' is not a sane subnet — the stack takes a" >&2
+  echo "       /24 with a zero host octet, e.g. BOX_SUBNET=10.89.0.0/24" >&2
+  exit 1
+fi
+BOX_GW="${BOX_SUBNET%.0/24}.1"
+
+if hit="$(subnet_claimant "$BOX_SUBNET")"; then
+  echo "ERROR: refusing to build boxnet on $BOX_SUBNET — that subnet is already" >&2
+  echo "       claimed here by $hit." >&2
+  echo "       If that is this machine's uplink, you are INSIDE a box: a nested" >&2
+  echo "       stack on the guest's own subnet captures its gateway address and" >&2
+  echo "       blackholes its egress, intermittently (issue #80)." >&2
+  echo "       Nothing was changed. To build a nested stack anyway, pick a free" >&2
+  echo "       subnet:  BOX_SUBNET=10.89.0.0/24 box setup-host" >&2
+  exit 1
+fi
+
+# A bridge this script built before is the one claimant that is NOT a
+# collision — but it must AGREE with the target: setup-host converges an
+# existing bridge, it never re-addresses one (boxes hold leases on it).
+# ('|| true': under pipefail, `ip … dev boxnet` on a fresh host — no such
+# device — would kill the script right here instead of answering "no bridge".)
+have_gw="$(ip -4 -o addr show dev boxnet 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
+if [ -n "$have_gw" ] && [ "$have_gw" != "$BOX_GW" ]; then
+  echo "ERROR: boxnet already exists on ${have_gw%.*}.0/24 and the target is $BOX_SUBNET —" >&2
+  echo "       setup-host converges an existing bridge, it never re-addresses one." >&2
+  echo "       Re-run with the bridge's own subnet:" >&2
+  echo "         BOX_SUBNET=${have_gw%.*}.0/24 box setup-host" >&2
+  echo "       (or move the bridge first:  incus network set boxnet ipv4.address $BOX_GW/24)" >&2
+  exit 1
+fi
+
 # apt, unattended-safe. install.sh now runs us without a human watching, and
 # a fresh cloud image has apt-daily/unattended-upgrades holding the dpkg lock
 # for the first minutes of its life — plain 'apt-get install' then waits on it
@@ -145,22 +227,45 @@ PRESEED
 fi
 
 # Isolated NAT network. IPv6 off: one less egress path to reason about.
-# 10.88, not 10.87: a pre-rename host may still carry claudenet on 10.87 with
-# legacy boxes attached — two bridges must not claim one subnet.
+# The default is 10.88 — not 10.87: a pre-rename host may still carry
+# claudenet on 10.87 with legacy boxes attached — two bridges must not claim
+# one subnet. BOX_SUBNET (validated and cleared by the #80 guard above) picks
+# another /24; the gateway and every rule below derive from it.
 incus network show boxnet >/dev/null 2>&1 || incus network create boxnet \
-  ipv4.address=10.88.0.1/24 ipv4.nat=true ipv6.address=none
+  ipv4.address="$BOX_GW/24" ipv4.nat=true ipv6.address=none
 
 # ACL: default egress allow (internet), explicit drops for private space.
-# Gateway carve-out first so instance DNS (dnsmasq on 10.88.0.1) survives.
-if ! incus network acl show box-isolate >/dev/null 2>&1; then
-  incus network acl create box-isolate
-  incus network acl rule add box-isolate egress action=allow destination=10.88.0.1/32
-  incus network acl rule add box-isolate egress action=drop destination=10.0.0.0/8
-  incus network acl rule add box-isolate egress action=drop destination=172.16.0.0/12
-  incus network acl rule add box-isolate egress action=drop destination=192.168.0.0/16
-  incus network acl rule add box-isolate egress action=drop destination=169.254.0.0/16
-  incus network acl rule add box-isolate egress action=drop destination=100.64.0.0/10
-fi
+# Gateway carve-out first so instance DNS (dnsmasq on the gateway) survives.
+# 'edit' the full shipped ruleset, not create-once: the carve-out derives
+# from BOX_SUBNET now, and a bridge moved off a colliding subnet (#80's
+# escape hatch) left the OLD /32 behind — box DNS to the new gateway then
+# died inside the 10.0.0.0/8 drop, looking like a dead resolver, not a stale
+# ACL. A conditional 'rule add' cannot converge that (the stale carve-out
+# would survive beside the new one); replacing the ruleset does, idempotently.
+incus network acl show box-isolate >/dev/null 2>&1 || incus network acl create box-isolate
+incus network acl edit box-isolate <<ACL
+description: ""
+egress:
+- action: allow
+  destination: $BOX_GW/32
+  state: enabled
+- action: drop
+  destination: 10.0.0.0/8
+  state: enabled
+- action: drop
+  destination: 172.16.0.0/12
+  state: enabled
+- action: drop
+  destination: 192.168.0.0/16
+  state: enabled
+- action: drop
+  destination: 169.254.0.0/16
+  state: enabled
+- action: drop
+  destination: 100.64.0.0/10
+  state: enabled
+ingress: []
+ACL
 incus network set boxnet security.acls=box-isolate \
   security.acls.default.egress.action=allow \
   security.acls.default.ingress.action=drop

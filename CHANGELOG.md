@@ -7,6 +7,34 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **`setup-host` refuses a claimed subnet, and `BOX_SUBNET` picks another**
+  (#80) — run inside a box, `setup-host` used to build a nested `boxnet` on
+  the exact subnet and gateway of the guest's own uplink: the guest then held
+  its gateway's address as a *local* address, carried duplicate connected
+  routes for its uplink subnet, and suffered intermittent, self-recovering
+  egress blackouts that looked like flaky internet (measured live: ~24–36 s
+  outages, roughly hourly, with the host clean throughout). `setup-host` now
+  scans the target subnet **before any mutation** — the default route's
+  gateway inside it, or any non-`boxnet` interface holding an address in it —
+  and refuses, naming the way out. A prior `boxnet` owning the subnet is the
+  legitimate converge path and does not trip it. `BOX_SUBNET=<a.b.c.0/24>`
+  (validated, alongside the existing `BOX_DNS`) moves the whole stack: the
+  bridge address, the ACL's gateway carve-out (now converged via
+  `network acl edit`, so a bridge moved off a colliding subnet no longer
+  strands box DNS behind a stale `/32`), the firewall (`box-firewall` reads
+  the gateway off the live bridge), and every drill/migrate probe that used
+  to hardcode `10.88`.
+- **`box doctor` knows the #80 signature** — a default gateway held as a
+  LOCAL address, and duplicate connected routes for the uplink subnet, judged
+  from `ip route`/`ip addr` on the machine doctor runs on (both tiers, before
+  any daemon check — the nested daemon answering could be the impostor) and
+  probed *inside* every box it examines. The existing "egress broken but DNS
+  fine" split now names itself as #80's fingerprint (the impostor dnsmasq on
+  a captured gateway keeps resolving while IP egress dies), and the admin ACL
+  section verifies the gateway carve-out matches `boxnet`'s actual gateway.
+  The agent-context guard for the templates (suggested fix 4) lands in
+  heavy-duty/rig#31's bootstrap roles per the thin-templates split (#81).
+
 - **Server-posture template keys** (#81, carved from #69) — two optional
   `box.env` allowlist keys. `BOX_REQUIRE_VM=1` refuses both the silent
   container fallback (no `/dev/kvm`, exit 1) and an explicit `--container`
