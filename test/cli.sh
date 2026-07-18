@@ -130,14 +130,109 @@ check "install.sh: still no-ops on an existing install (#66)" 0 "" \
   grep -qF 'already installed' "$ROOT/install.sh"
 
 # ---------------------------------------------------------------------------
-# Templates — #65 tmux. `box tmux` runs `tmux new-session` INSIDE the box, so a
-# template that never installs tmux fails with "tmux: command not found". Every
-# template must carry it in its cloud-init package list.
+# Templates — DYNAMIC over templates/*/ (#68): the loop discovers every
+# template directory, so a new template cannot ship without passing these (the
+# old hardcoded blank/claude/codex/grok list let exactly that happen). The
+# box.env parse is proven against the REAL allowlist: load_template is
+# extracted from bin/box and DRIVEN against each template — the same
+# source-the-pure-function trick install.sh's DEST block and box_tier get
+# below — so an unknown key, a missing BOX_IMAGE/BOX_USER, or a line that is
+# not KEY="value" fails HERE, not at mint time on a host.
 # ---------------------------------------------------------------------------
-for t in blank claude codex grok; do
+TPLFN="$(mktemp)"
+awk '/^load_template\(\) \{/,/^\}/' "$ROOT/bin/box" > "$TPLFN"
+check "load_template: extracted from bin/box (guards the awk)" 0 "unknown key" cat "$TPLFN"
+check "load_template: the extracted function is valid bash"    0 "" bash -n "$TPLFN"
+
+# tpl <root> <template> — run the real parser against <root>/templates/, print
+# what it resolved. $0 carries the extracted-function file into the subshell.
+tpl() {
+  root="$1" bash -c '
+    die() { echo "box: $*" >&2; exit 1; }
+    . "$0"; load_template "$1"
+    printf "IMAGE=%s USER=%s REQUIRE_VM=%s AUTOSTART=%s\n" \
+      "$T_IMAGE" "$T_USER" "$T_REQUIRE_VM" "$T_AUTOSTART"
+  ' "$TPLFN" "$2"
+}
+
+# The allowlist itself is load-bearing: a template must not be able to grow a
+# network key, and the required keys must still be required. Fixture-driven,
+# against a throwaway root — exactly the dies a green parse cannot prove.
+EVILROOT="$(mktemp -d)"; mkdir -p "$EVILROOT/templates/evil"
+printf 'BOX_IMAGE="images:debian/13/cloud"\nBOX_USER="dev"\nBOX_NETWORK="lan"\n' \
+  > "$EVILROOT/templates/evil/box.env"
+check "load_template: an unknown key dies (no template grows a network)" 1 "unknown key" \
+  tpl "$EVILROOT" evil
+printf 'BOX_USER="dev"\n' > "$EVILROOT/templates/evil/box.env"
+check "load_template: a missing BOX_IMAGE dies" 1 "required" tpl "$EVILROOT" evil
+rm -rf "$EVILROOT"
+
+# YAML well-formedness needs python3 + pyyaml; the CI runner has both. Skip
+# gracefully (never silently) where they are missing.
+HAVE_YAML=0
+command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' 2>/dev/null && HAVE_YAML=1
+
+for d in "$ROOT"/templates/*/; do
+  t="$(basename "$d")"
+  # The parse itself asserts the allowlist AND the required keys (the driven
+  # function dies without BOX_IMAGE/BOX_USER); the greps pin both keys to the
+  # FILE, so neither can quietly become an inherited default.
+  check "template '$t': box.env parses against the real allowlist" 0 "USER=" tpl "$ROOT" "$t"
+  check "template '$t': box.env sets BOX_IMAGE" 0 "" grep -q '^BOX_IMAGE=' "$d/box.env"
+  check "template '$t': box.env sets BOX_USER"  0 "" grep -q '^BOX_USER='  "$d/box.env"
+  # cloud-init is passed to Incus verbatim, so it must exist, declare itself,
+  # and be well-formed — a mint is far too late to learn about a typo.
+  check "template '$t': user-data.yaml exists" 0 "" test -f "$d/user-data.yaml"
+  # shellcheck disable=SC2016  # $1 expands in the child shell, by design
+  check "template '$t': user-data.yaml begins with #cloud-config" 0 "" \
+    bash -c 'head -1 "$1" | grep -qx "#cloud-config"' _ "$d/user-data.yaml"
+  if [ "$HAVE_YAML" = 1 ]; then
+    check "template '$t': user-data.yaml is well-formed YAML" 0 "" \
+      python3 -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' "$d/user-data.yaml"
+  else
+    echo "skip: template '$t' YAML well-formedness (no python3+pyyaml here; CI has both)"
+  fi
+  # #65: 'box tmux' runs 'tmux new-session' INSIDE the box, so every
+  # template's package list must carry tmux or the verb dies inside.
   check "template '$t': installs tmux (#65)" 0 "" \
-    grep -qE '^[[:space:]]*-[[:space:]]+tmux$' "$ROOT/templates/$t/user-data.yaml"
+    grep -qE '^[[:space:]]*-[[:space:]]+tmux$' "$d/user-data.yaml"
 done
+
+# ---------------------------------------------------------------------------
+# The staging template (#68) — server-class, still creds-free. Its posture in
+# full: both boot demands set (proven through the real parser, not a grep),
+# docker + rig preinstalled, and NOTHING that joins or admits — tailscale,
+# auth keys and ssh in any spelling are rig's to install at bootstrap time,
+# inside the guest, so their absence from the shipped cloud-init IS the
+# creds-free contract. Comments may name them (to say why they are absent);
+# effective lines must not.
+# ---------------------------------------------------------------------------
+STG="$ROOT/templates/staging"
+check "staging: demands VM mode and autostart (via the real parser)" \
+  0 "REQUIRE_VM=1 AUTOSTART=1" tpl "$ROOT" staging
+check "staging: installs docker (get.docker.com)" 0 "" \
+  grep -qF 'get.docker.com' "$STG/user-data.yaml"
+check "staging: preinstalls rig" 0 "" \
+  grep -qF 'rig/main/install.sh' "$STG/user-data.yaml"
+# shellcheck disable=SC2016  # $1 expands in the child shell, by design
+check "staging: no tailscale/authkey/ssh outside comments (creds-free)" 1 "" \
+  bash -c 'grep -v "^[[:space:]]*#" "$1" | grep -qiE "tailscale|authkey|ssh"' _ "$STG/user-data.yaml"
+rm -f "$TPLFN"
+
+# The keys' cmd_new half, grepped the way the expose guard is (line order —
+# a daemon-free run cannot mint). The REQUIRE_VM refusal must read the
+# EFFECTIVE mode, i.e. come after pick_mode: refusing on the template key
+# alone would refuse valid VM mints, and a guard deleted in a refactor must
+# not ship green.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the REQUIRE_VM refusal orders after pick_mode" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  pick="$(printf "%s\n" "$fn" | grep -n "pick_mode"    | head -1 | cut -d: -f1)"
+  guard="$(printf "%s\n" "$fn" | grep -n "T_REQUIRE_VM" | head -1 | cut -d: -f1)"
+  [ -n "$pick" ] && [ -n "$guard" ] && [ "$pick" -lt "$guard" ]'
+check "new: boot.autostart is stamped under the T_AUTOSTART guard" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -F "boot.autostart=true" | grep -q "T_AUTOSTART"'
 
 # ---------------------------------------------------------------------------
 # The restricted tier (#74). box_tier() is the decision the whole tier hangs
