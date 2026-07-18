@@ -64,6 +64,25 @@ A version-aware upgrade that migrates boxes instead of asking you to is
 (CI, images), `BOX_YES=1` answers every prompt yes and `BOX_SKIP_SETUP_HOST=1`
 declines the host-setup step.
 
+### Global vs per-user install
+
+Where box lands depends on **who runs the installer**, because on a shared host
+box's tree is *executed by other users* — so it cannot hide in one user's home:
+
+- **As root → global.** The tree goes to `/opt/box` (world-readable) and the
+  `box` symlink to `/usr/local/bin` (already on every login `PATH`). One
+  install, every operator on the host runs the same `box`. This is the fleet
+  path: [rig](https://github.com/heavy-duty/rig)'s `box` role
+  ([rig#24](https://github.com/heavy-duty/rig/issues/24)) installs box once at
+  host bootstrap ([#71](https://github.com/heavy-duty/box/issues/71)).
+- **As a normal user → per-user.** The tree goes to `~/.local/share/box` and
+  the symlink to `~/.local/bin` — the solo path, unchanged. Nobody else needs
+  to run your box.
+
+`BOX_HOME` / `BOX_BIN` override the destination on either path. A per-user
+install under `/root` would be `0700` and unreadable to everyone else — which
+is exactly the bug the root branch fixes.
+
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
 The installer already does this. Run it directly to set up a host you

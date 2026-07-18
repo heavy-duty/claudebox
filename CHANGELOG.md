@@ -5,7 +5,29 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Added
+
+- **Global / root install** (#71) — run as root, box installs *once* to
+  `/opt/box` (world-readable) with the `box` symlink on `/usr/local/bin`, so
+  every operator on a shared host runs the same tree. Per-user installs are
+  unchanged (`$HOME/.local`); `BOX_HOME`/`BOX_BIN` still override. A per-user
+  tree under `/root` is `0700` and unreadable to everyone else — the whole fleet
+  got `command not found` — so the root branch lands in a system location and
+  `chmod -R a+rX`'s it (read for files, +search on dirs), guarded on root. This
+  unblocks "rig installs box" (rig#24's `box` role).
+- **CI + a test suite** — `.github/workflows/ci.yml` (a `check` job: globstar
+  `shellcheck -x` over `bin/* **/*.sh`, then `bash test/cli.sh`) and `test/cli.sh`,
+  dependency-free and runnable by a non-root user with no Incus. It exercises the
+  `install.sh` DEST/BINDIR branch functionally (both tiers + `BOX_HOME`/`BOX_BIN`
+  overrides), the CLI contract, and grep-guards the daemon-gated invariants and
+  tmux in every template — the box was the repo with "no tests and no CI".
+
 ### Fixed
+
+- **`box tmux` works on every template** (#65) — `box tmux` runs
+  `tmux new-session` *inside* the box, but the templates did not install tmux, so
+  it failed with `tmux: command not found`. `tmux` is now in each template's
+  cloud-init package list (`blank`/`claude`/`codex`/`grok`).
 
 - **`box setup-host` finishes in one run** (#63). When it had to add you to
   `incus-admin` it stopped there and told you to re-login and re-run — an

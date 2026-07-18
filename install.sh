@@ -10,8 +10,20 @@ set -euo pipefail
 
 REPO="${BOX_REPO:-heavy-duty/box}"
 REF="${BOX_REF:-main}"
-DEST="${BOX_HOME:-$HOME/.local/share/box}"
-BINDIR="${BOX_BIN:-$HOME/.local/bin}"
+# Root installs GLOBALLY, non-root installs per-user. box's install tree is
+# EXECUTED by other users (the multi-user host path: rig installs box once, every
+# incus-group operator runs it) — unlike rig, which is root-only and can hide in
+# /root. So a root install must land in a system location, not $HOME: /root is
+# 0700, so a $HOME/.local tree there is unreadable to everyone else and the whole
+# fleet gets 'command not found' (#71). /opt/box is the world-readable system
+# tree; /usr/local/bin is already on every login PATH. BOX_HOME/BOX_BIN still win.
+if [ "$(id -u)" -eq 0 ]; then
+  DEST="${BOX_HOME:-/opt/box}"
+  BINDIR="${BOX_BIN:-/usr/local/bin}"
+else
+  DEST="${BOX_HOME:-$HOME/.local/share/box}"
+  BINDIR="${BOX_BIN:-$HOME/.local/bin}"
+fi
 
 log() { printf 'box-install: %s\n' "$*"; }
 warn() { printf 'box-install: WARNING: %s\n' "$*" >&2; }
@@ -95,6 +107,16 @@ mkdir -p "$(dirname "$DEST")"
 mv "$EXTRACTED" "$DEST"
 
 chmod +x "$DEST/bin/box"
+
+# A global (root) install is run by OTHER users, but mv preserves the tarball's
+# root:root ownership and GitHub's archives carry no world bits on some paths — so
+# without this, a non-root caller cannot even traverse into $DEST to reach bin/box.
+# Root owns the tree, nobody else writes it, everybody reads it. a+rX: read on
+# files, +search (x) on directories only. Guarded on root so the per-user install
+# stays byte-identical to before.
+if [ "$(id -u)" -eq 0 ]; then
+  chmod -R a+rX "$DEST"
+fi
 
 # --- put box on PATH -------------------------------------------------------
 mkdir -p "$BINDIR"
