@@ -459,6 +459,252 @@ check "revoke: the state checks go through \$SUDO test (an unprivileged stat lie
   grep -qF '$SUDO test -d "/var/lib/incus/users/$uid"' "$ROOT/host/revoke-user.sh"
 
 # ---------------------------------------------------------------------------
+# The #80 guard and BOX_SUBNET. setup-host run inside a box used to build a
+# nested boxnet on the guest's own uplink subnet — captured gateway, duplicate
+# routes, intermittent egress blackouts. The guard's two pure functions are
+# extracted and DRIVEN (a shim ip serves canned route tables, the same seam as
+# the shim id), and then the WHOLE script is driven end to end under shims:
+# the refusal paths must exit 1 having touched nothing (the incus/sudo shims
+# log every call, and the log must not exist), the converge path must still
+# run, and BOX_SUBNET must plumb through to every derived value.
+# ---------------------------------------------------------------------------
+cat > "$SHIMDIR/ip" <<'SHIM'
+#!/usr/bin/env bash
+# Fake `ip`: canned tables for the #80 guard and signature — just the reads
+# setup-host and doctor make. Specific patterns first: case takes the first hit.
+case "$*" in
+  "-4 -o addr show dev boxnet") printf '%s\n' "${FAKE_IP4_BOXNET:-}" ;;
+  "-4 route show default")      printf '%s\n' "${FAKE_IP4_DEFAULT:-}" ;;
+  "-4 route show")              printf '%s\n' "${FAKE_IP4_ROUTES:-}" ;;
+  "-4 -o addr show")            printf '%s\n' "${FAKE_IP4_ADDRS:-}" ;;
+esac
+exit 0
+SHIM
+chmod +x "$SHIMDIR/ip"
+
+# The route tables, verbatim from issue #80's capture (the poisoned guest) and
+# from the states around it.
+D_INBOX='default via 10.88.0.1 dev enp5s0 proto dhcp src 10.88.0.202 metric 1024'
+D_LAN='default via 192.168.1.1 dev eno1 proto dhcp metric 100'
+A_GUEST='2: enp5s0    inet 10.88.0.202/24 metric 1024 brd 10.88.0.255 scope global dynamic enp5s0'
+A_HOSTSTACK='2: eno1    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic eno1
+5: boxnet    inet 10.88.0.1/24 scope global boxnet'
+A_FOREIGN='2: eno1    inet 192.168.1.50/24 brd 192.168.1.255 scope global dynamic eno1
+3: virbr7    inet 10.88.0.7/24 brd 10.88.0.255 scope global virbr7'
+
+SUBFN="$(mktemp)"
+awk '/^valid_subnet\(\) \{/,/^\}/' "$ROOT/host/setup-host.sh" > "$SUBFN"
+check "valid_subnet: extracted from setup-host.sh (guards the awk)" 0 "return 1" cat "$SUBFN"
+check "valid_subnet: the extracted function is valid bash" 0 "" bash -n "$SUBFN"
+vsub() { bash -c ". '$SUBFN'; valid_subnet \"\$1\"" _ "$1"; }
+check "valid_subnet: the default is valid"                 0 "" vsub 10.88.0.0/24
+check "valid_subnet: the documented escape hatch is valid" 0 "" vsub 10.89.0.0/24
+check "valid_subnet: any a.b.c.0/24 is valid"              0 "" vsub 192.168.7.0/24
+check "valid_subnet: not-a-/24 is refused"                 1 "" vsub 10.88.0.0/16
+check "valid_subnet: a nonzero host octet is refused"      1 "" vsub 10.88.0.5/24
+check "valid_subnet: an octet past 255 is refused"         1 "" vsub 300.88.0.0/24
+check "valid_subnet: a bare address is refused"            1 "" vsub 10.88.0.0
+check "valid_subnet: garbage is refused"                   1 "" vsub banana
+check "valid_subnet: an empty value is refused"            1 "" vsub ""
+rm -f "$SUBFN"
+
+CLMFN="$(mktemp)"
+awk '/^subnet_claimant\(\) \{/,/^\}/' "$ROOT/host/setup-host.sh" > "$CLMFN"
+check "subnet_claimant: extracted from setup-host.sh (guards the awk)" 0 "DEFAULT GATEWAY" cat "$CLMFN"
+check "subnet_claimant: the extracted function is valid bash" 0 "" bash -n "$CLMFN"
+claim() { # claim <subnet> <default-route> <addrs>
+  FAKE_IP4_DEFAULT="$2" FAKE_IP4_ADDRS="$3" PATH="$SHIMDIR:$PATH" \
+    bash -c ". '$CLMFN'; subnet_claimant \"\$1\"" _ "$1"
+}
+check "claimant: the default gateway inside the target is the smoking gun" \
+  0 "DEFAULT GATEWAY" claim 10.88.0.0/24 "$D_INBOX" "$A_GUEST"
+check "claimant: a foreign interface inside the target is named" \
+  0 "virbr7" claim 10.88.0.0/24 "$D_LAN" "$A_FOREIGN"
+check "claimant: boxnet's own prior claim is the converge path — CLEAN" \
+  1 "" claim 10.88.0.0/24 "$D_LAN" "$A_HOSTSTACK"
+check "claimant: a free subnet is clean" \
+  1 "" claim 10.89.0.0/24 "$D_LAN" "$A_HOSTSTACK"
+check "claimant: 10.8.0.0/24 does not prefix-match 10.88.x (the dot terminates)" \
+  1 "" claim 10.8.0.0/24 "$D_INBOX" "$A_GUEST"
+rm -f "$CLMFN"
+
+# --- the whole script, driven: refuse-before-mutation, converge, plumb-through
+SETUPSHIM="$(mktemp -d)"
+cat > "$SETUPSHIM/incus" <<'SHIM'
+#!/usr/bin/env bash
+# Fake incus for the driven setup-host: records every call (and, for the
+# stdin verbs, the stdin) to $FAKE_INCUS_LOG, answers the existence probes
+# from FAKE_HAVE_*, and never goes near a daemon.
+[ -n "${FAKE_INCUS_LOG:-}" ] && printf 'incus %s\n' "$*" >> "$FAKE_INCUS_LOG"
+case "$*" in
+  *"admin init --preseed"*|*"acl edit"*|*"profile edit"*)
+    if [ -n "${FAKE_INCUS_LOG:-}" ]; then sed 's/^/  | /' >> "$FAKE_INCUS_LOG"; else cat >/dev/null; fi ;;
+esac
+case "$*" in
+  "storage show default")         [ -n "${FAKE_HAVE_STORAGE:-}" ] || exit 1 ;;
+  "network show boxnet")          [ -n "${FAKE_HAVE_BOXNET:-}" ]  || exit 1 ;;
+  "network acl show box-isolate") [ -n "${FAKE_HAVE_ACL:-}" ]     || exit 1 ;;
+  "profile show box-net")         [ -n "${FAKE_HAVE_PROFILE:-}" ] || exit 1 ;;
+esac
+exit 0
+SHIM
+cat > "$SETUPSHIM/sudo" <<'SHIM'
+#!/usr/bin/env bash
+# Fake sudo: logs to $FAKE_SUDO_LOG and swallows everything — the driven
+# setup-host must never mutate the machine running this suite.
+[ -n "${FAKE_SUDO_LOG:-}" ] && printf 'sudo %s\n' "$*" >> "$FAKE_SUDO_LOG"
+exit 0
+SHIM
+chmod +x "$SETUPSHIM/incus" "$SETUPSHIM/sudo"
+
+runsetup() { # runsetup [VAR=val ...] — the real setup-host, under shims
+  env FAKE_UID=1000 FAKE_GROUPS="users incus-admin" \
+      PATH="$SETUPSHIM:$SHIMDIR:$PATH" "$@" bash "$ROOT/host/setup-host.sh"
+}
+
+W80="$(mktemp -d)"
+# Refusal 1: the default gateway sits inside the target — the inside of a box.
+check "setup-host: gw-in-subnet REFUSES and names issue #80" 1 "issue #80" \
+  runsetup FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST" \
+           FAKE_INCUS_LOG="$W80/g1.log" FAKE_SUDO_LOG="$W80/s1.log"
+check "setup-host: ...naming BOX_SUBNET as the way out" 1 "BOX_SUBNET" \
+  runsetup FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST"
+check "setup-host: the refusal made NO incus call (refuse precedes mutation)" 1 "" \
+  test -e "$W80/g1.log"
+check "setup-host: the refusal made NO sudo call either" 1 "" \
+  test -e "$W80/s1.log"
+# Refusal 2: a foreign interface owns an address inside the target.
+check "setup-host: a foreign interface in the subnet REFUSES" 1 "virbr7" \
+  runsetup FAKE_IP4_DEFAULT="$D_LAN" FAKE_IP4_ADDRS="$A_FOREIGN"
+# Refusal 3: garbage BOX_SUBNET dies at the gate.
+check "setup-host: a garbage BOX_SUBNET is refused by name" 1 "not a sane subnet" \
+  runsetup BOX_SUBNET=banana
+check "setup-host: a /16 BOX_SUBNET is refused" 1 "not a sane subnet" \
+  runsetup BOX_SUBNET=10.88.0.0/16
+# Refusal 4: an existing bridge on ANOTHER subnet is never re-addressed.
+check "setup-host: a bridge on another subnet refuses (converge, don't re-address)" \
+  1 "never re-addresses" \
+  runsetup FAKE_IP4_DEFAULT="$D_LAN" FAKE_IP4_ADDRS="$A_HOSTSTACK" \
+           FAKE_IP4_BOXNET='5: boxnet    inet 10.89.0.1/24 scope global boxnet' \
+           BOX_SUBNET=10.88.0.0/24
+# The legitimate re-run: boxnet itself owns the subnet — setup-host converges.
+check "setup-host: a prior boxnet claiming the subnet CONVERGES (no false positive)" \
+  0 "Host ready" \
+  runsetup FAKE_IP4_DEFAULT="$D_LAN" FAKE_IP4_ADDRS="$A_HOSTSTACK" \
+           FAKE_IP4_BOXNET='5: boxnet    inet 10.88.0.1/24 scope global boxnet' \
+           FAKE_HAVE_STORAGE=1 FAKE_HAVE_BOXNET=1 FAKE_HAVE_ACL=1 FAKE_HAVE_PROFILE=1
+# BOX_SUBNET plumbs through: a fresh build on 10.89.0.0/24 must derive EVERY
+# value from it — the bridge address and the ACL's gateway carve-out.
+check "setup-host: BOX_SUBNET drives a fresh build to completion" 0 "Host ready" \
+  runsetup BOX_SUBNET=10.89.0.0/24 FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST" \
+           FAKE_INCUS_LOG="$W80/g2.log" FAKE_SUDO_LOG="$W80/s2.log"
+check "setup-host: ...the bridge derives from BOX_SUBNET" 0 "" \
+  grep -qF 'network create boxnet ipv4.address=10.89.0.1/24' "$W80/g2.log"
+check "setup-host: ...and so does the ACL's gateway carve-out" 0 "" \
+  grep -qF 'destination: 10.89.0.1/32' "$W80/g2.log"
+# ...which also proves the guard scans the TARGET subnet: the same tables that
+# refused the default (gw 10.88.0.1) pass once BOX_SUBNET moves off it — the
+# issue's workaround host, sanctioned.
+rm -rf "$W80" "$SETUPSHIM"
+
+# The guard must be the FIRST effective act — before the incus install, the
+# usermod, every apt call. Line order, fail-closed on either grep missing.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "setup-host: the subnet guard precedes the first mutation" 0 "" bash -c '
+  guard="$(grep -n "subnet_claimant \"\$BOX_SUBNET\"" "'"$ROOT"'/host/setup-host.sh" | head -1 | cut -d: -f1)"
+  mut="$(grep -n "^if ! command -v incus" "'"$ROOT"'/host/setup-host.sh" | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$mut" ] && [ "$guard" -lt "$mut" ]'
+# box-firewall follows the bridge, wherever BOX_SUBNET put it.
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "box-firewall: the gateway is read off the live bridge, not hardcoded" 0 "" \
+  grep -qF 'addr show dev "$NET"' "$ROOT/host/box-firewall.sh"
+# The drill and migrate probes derive the prefix from the network — a
+# BOX_SUBNET host must not fail its own rehearsals.
+check "drill: derives the boxnet prefix from the network" 0 "" \
+  grep -qF 'network get boxnet ipv4.address' "$ROOT/drill/drill.sh"
+check "multiuser: derives the boxnet prefix from the network" 0 "" \
+  grep -qF 'network get boxnet ipv4.address' "$ROOT/drill/multiuser.sh"
+check "migrate-host: derives the boxnet prefix from the network" 0 "" \
+  grep -qF 'network get boxnet ipv4.address' "$ROOT/host/migrate-host.sh"
+
+# ---------------------------------------------------------------------------
+# The doctor's #80 signature. gw_squat_signature is pure text → findings, so
+# it is extracted and driven against synthetic route tables — including the
+# EXACT poisoned state from the issue, the workaround state (bridge remapped:
+# clean), and a healthy host running the stack (clean).
+# ---------------------------------------------------------------------------
+SIGFN="$(mktemp)"
+awk '/^gw_squat_signature\(\) \{/,/^\}/' "$ROOT/drill/doctor.sh" > "$SIGFN"
+check "gw_squat_signature: extracted from doctor.sh (guards the awk)" 0 "default" cat "$SIGFN"
+check "gw_squat_signature: the extracted function is valid bash" 0 "" bash -n "$SIGFN"
+sig()   { bash -c ". '$SIGFN'; gw_squat_signature \"\$1\" \"\$2\"" _ "$1" "$2"; }
+nosig() { [ -z "$(sig "$1" "$2")" ]; }
+
+# The poisoned guest, verbatim from #80: gateway held locally AND duplicated
+# connected routes for the uplink subnet.
+R_POISON="$D_INBOX
+10.88.0.0/24 dev boxnet proto kernel scope link src 10.88.0.1 linkdown
+10.88.0.0/24 dev enp5s0 proto kernel scope link src 10.88.0.202 metric 1024
+10.88.0.1 dev enp5s0 proto dhcp scope link src 10.88.0.202 metric 1024"
+A_POISON="$A_GUEST
+17: boxnet    inet 10.88.0.1/24 scope global boxnet"
+check "signature: poisoned guest — the gateway is held as a LOCAL address" \
+  0 "held as a LOCAL address" sig "$R_POISON" "$A_POISON"
+check "signature: poisoned guest — duplicate connected routes for the uplink" \
+  0 "duplicate connected routes" sig "$R_POISON" "$A_POISON"
+# The workaround state (#80's fix: bridge remapped off the uplink subnet) —
+# both signature lines must be ABSENT.
+R_REMAP="$D_INBOX
+10.88.0.0/24 dev enp5s0 proto kernel scope link src 10.88.0.202 metric 1024
+10.88.0.1 dev enp5s0 proto dhcp scope link src 10.88.0.202 metric 1024
+10.89.0.0/24 dev boxnet proto kernel scope link src 10.89.0.1 linkdown"
+A_REMAP="$A_GUEST
+17: boxnet    inet 10.89.0.1/24 scope global boxnet"
+check "signature: the remapped-bridge workaround is CLEAN" 0 "" nosig "$R_REMAP" "$A_REMAP"
+# A healthy HOST running the stack: boxnet legitimately owns its subnet, and
+# the uplink is elsewhere — clean, or every host would cry wolf.
+R_HOST="$D_LAN
+192.168.1.0/24 dev eno1 proto kernel scope link src 192.168.1.50
+10.88.0.0/24 dev boxnet proto kernel scope link src 10.88.0.1"
+check "signature: a healthy host running the stack is CLEAN" 0 "" nosig "$R_HOST" "$A_HOSTSTACK"
+check "signature: no default route → nothing to judge (clean)" 0 "" \
+  nosig "10.88.0.0/24 dev boxnet proto kernel scope link src 10.88.0.1" "$A_HOSTSTACK"
+# Each line fires on its own: a captured gateway without duplicate routes...
+R_GWONLY="$D_INBOX
+10.88.0.0/24 dev enp5s0 proto kernel scope link src 10.88.0.202 metric 1024"
+check "signature: a captured gateway alone still fires" \
+  0 "held as a LOCAL address" sig "$R_GWONLY" "$A_POISON"
+# ...and duplicate routes without the gateway captured (nested bridge on .5).
+A_DUPONLY="$A_GUEST
+17: boxnet    inet 10.88.0.5/24 scope global boxnet"
+check "signature: duplicate routes alone still fire" \
+  0 "duplicate connected routes" sig "$R_POISON" "$A_DUPONLY"
+rm -f "$SIGFN"
+
+# The wiring: the signature is judged on THIS machine before any daemon call
+# (the daemon answering could be the nested impostor), probed INSIDE boxes on
+# both tiers, and the egress-broken-DNS-fine split names the fingerprint.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "doctor: this machine's signature precedes the daemon checks" 0 "" bash -c '
+  sig="$(grep -n "is a nested box stack squatting" "'"$ROOT"'/drill/doctor.sh" | head -1 | cut -d: -f1)"
+  daemon="$(grep -n "timeout 10 incus list" "'"$ROOT"'/drill/doctor.sh" | head -1 | cut -d: -f1)"
+  [ -n "$sig" ] && [ -n "$daemon" ] && [ "$sig" -lt "$daemon" ]'
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "doctor: the signature is probed inside boxes on BOTH tiers" 0 "" bash -c '
+  [ "$(grep -c "probe_sig \"\$probe\"" "'"$ROOT"'/drill/doctor.sh")" -eq 2 ]'
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "doctor: the egress-broken-DNS-fine fingerprint is named on both tiers" 0 "" bash -c '
+  [ "$(grep -c "fingerprint" "'"$ROOT"'/drill/doctor.sh")" -ge 2 ]'
+check "doctor: the ACL carve-out is checked against the live gateway" 0 "" \
+  grep -qF "does NOT match boxnet's gateway" "$ROOT/drill/doctor.sh"
+
+# The docs keep the new promises.
+check "help setup-host names BOX_SUBNET" 0 "BOX_SUBNET" "$BOX" help setup-host
+check "help setup-host names the refusal" 0 "REFUSES" "$BOX" help setup-host
+check "help doctor names the #80 signature" 0 "#80" "$BOX" help doctor
+check "README documents BOX_SUBNET" 0 "" grep -qF 'BOX_SUBNET' "$ROOT/README.md"
+
+# ---------------------------------------------------------------------------
 # The versioned install (#66 → 0.7.0). BOX_INSTALL_SOURCE bypasses the network,
 # so these are REAL runs of install.sh against throwaway BOX_HOME/BOX_BIN
 # roots — layout, symlink chain, flat-tree migration, symlink healing, use and
