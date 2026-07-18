@@ -124,6 +124,30 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **UFW's gateway carve-out converges with the bridge, and the doctor can
+  see it** (the #86 review's blind spot) — `box-firewall` gated its whole
+  UFW block behind "a `DENY on boxnet` rule exists", pinning every UFW host
+  to the gateway of the *first* run: a bridge remapped off a colliding
+  subnet (#80's escape hatch) kept its stale `allow … to <old-gw> port 53`
+  and never gained the live gateway's, so box→gateway DNS died at box's own
+  deny — while the doctor's carve-out check read only the incus ACL (which
+  setup-host converges) and called the host clean. The UFW allows now
+  converge off the live bridge address on every run (stale DNS allows
+  deleted, the live set ensured — ufw skips existing rules, so a fresh host
+  gets the identical rule set and a re-run is a no-op), and `box doctor`
+  reads UFW's own table wherever UFW is active, flagging a DNS allow that
+  does not match `boxnet`'s gateway (and stale allows left beside a live
+  one). The no-UFW nft carve-out never had this failure mode: it is
+  interface-scoped, no gateway address to go stale.
+- **The boot-time gateway fallback is gone — no rule beats a wrong one** —
+  with the bridge not yet addressed when `box-firewall.service` ran,
+  `box-firewall` guessed `GW=10.88.0.1`; on a `BOX_SUBNET` host that hit
+  that window the UFW carve-out was built for the wrong gateway, a latent
+  DNS drop (#86 review). It now fails closed: an unaddressed bridge leaves
+  the persisted UFW rules exactly as they are (they survive boots on their
+  own, and nothing else in the script needs the gateway) and says so on
+  stderr; the next setup-host run or service restart converges them once
+  the bridge is addressed.
 - **`revoke --purge` re-checks the incus-user state** — the purge removed
   `/var/lib/incus/users/<uid>` without ever asserting its absence, the one
   path its own absence block did not cover; and the stat now rides
