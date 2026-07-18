@@ -195,11 +195,15 @@ check "expose: the restricted guard precedes the first incus call" 0 "" bash -c 
   [ -n "$guard" ] && [ -n "$first" ] && [ "$guard" -lt "$first" ]'
 # cmd_new refuses before minting when the placement contract is absent, and
 # the message is tier-aware (a restricted user is sent to 'box grant', not
-# to setup-host they cannot run).
-check "new: pre-flights the box-net profile" 0 "" bash -c '
-  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "incus profile show box-net"'
-check "new: the restricted fix names box grant" 0 "" bash -c '
-  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "box grant"'
+# to setup-host they cannot run). The pre-flight lives in require_stack()
+# since #70 gave it a second caller (import lands on the same contract), so
+# assert both halves: the helper holds the probe, and cmd_new calls it.
+check "require_stack: probes the box-net profile" 0 "" bash -c '
+  awk "/^require_stack\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "incus profile show box-net"'
+check "require_stack: the restricted fix names box grant" 0 "" bash -c '
+  awk "/^require_stack\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "box grant"'
+check "new: pre-flights the stack (require_stack)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "require_stack"'
 # grant converges to boxnet and ONLY boxnet — "boxnet,incusbr" would keep the
 # unhardened private bridge one --network flag away (the #74 measured hole).
 check "grant: narrows access to boxnet alone" 0 "" \
@@ -270,6 +274,74 @@ check "box exports BOX_TIER to the doctor" 0 "" \
 # does not exist and the verb was broken for everyone until #74's rehearsal hit it.
 check "restore: dispatches 'incus snapshot restore'" 0 "" \
   grep -qF '^incus:snapshot restore^' "$ROOT/bin/box"
+# ---------------------------------------------------------------------------
+# export / import (#70) — a box's state that survives the box and the host.
+# Usage errors and the pure pre-incus refusals are DRIVEN; every daemon-gated
+# invariant is grep-guarded or line-order-asserted (fail-closed: an empty
+# grep is a FAIL, so a deleted guard cannot ship green).
+# ---------------------------------------------------------------------------
+check "export without a box exits 2"           2 "usage: box export" "$BOX" export
+check "export of an unknown box exits 1"       1 "no such box"       "$BOX" export nosuchbox
+check "import without a file exits 2"          2 "usage: box import" "$BOX" import
+check "import of a missing file exits 1"       1 "no such file"      "$BOX" import /nope/nothing.tar.gz
+check "import --name with no value exits 2"    2 "--name needs a value" "$BOX" import x.tar.gz --name
+# A file that is not an export artifact is named as such, before any incus
+# call — pure (tar + awk), so it is driven, not grepped.
+NOTATARBALL="$(mktemp)"; echo "not a tarball" > "$NOTATARBALL"
+check "import: a non-artifact file is refused" 1 "not an incus/box export" "$BOX" import "$NOTATARBALL"
+rm -f "$NOTATARBALL"
+check "help export names the credential risk"  0 "CREDENTIAL"        "$BOX" help export
+check "help import names the re-stamping"      0 "user.box=1"        "$BOX" help import
+# Export refuses a running box — require_stopped fires BEFORE incus export
+# (line order inside cmd_export, fail-closed on either grep missing).
+# shellcheck disable=SC2016  # the $-strings are literals inside bash -c
+check "export: requires the box stopped, before exporting" 0 "" bash -c '
+  fn="$(awk "/^cmd_export\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  guard="$(printf "%s\n" "$fn" | grep -n "require_stopped" | head -1 | cut -d: -f1)"
+  run="$(printf "%s\n" "$fn" | grep -n "incus export" | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$run" ] && [ "$guard" -lt "$run" ]'
+# Snapshots ride along by default; --instance-only is the explicit opt-out.
+check "export: snapshots included unless --instance-only" 0 "" bash -c '
+  awk "/^cmd_export\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q -- "--instance-only"'
+# The credential SHOUT (#70's scrub-or-shout decision: box shouts).
+check "export: shouts that the file is a credential" 0 "" bash -c '
+  awk "/^cmd_export\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "treat the file itself as a credential"'
+# Import re-stamps the boundary tag onto the current stack.
+check "import: re-stamps user.box=1" 0 "" bash -c '
+  awk "/^cmd_import\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "user.box=1"'
+# The name-collision guard fires BEFORE incus import — the resolve_box
+# boundary from the other side: never occupy an existing instance's name.
+# shellcheck disable=SC2016  # the $-strings are literals inside bash -c
+check "import: the collision guard precedes the import" 0 "" bash -c '
+  fn="$(awk "/^cmd_import\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  guard="$(printf "%s\n" "$fn" | grep -n "already exists" | head -1 | cut -d: -f1)"
+  run="$(printf "%s\n" "$fn" | grep -n "incus import" | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$run" ] && [ "$guard" -lt "$run" ]'
+# Import lands on the placement contract: same pre-flight as a mint.
+check "import: pre-flights the stack (require_stack)" 0 "" bash -c '
+  awk "/^cmd_import\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "require_stack"'
+# The artifact's MAC comes back verbatim, and a re-import beside a sibling
+# collides at start (measured live: "MAC address already defined on another
+# NIC") — the hwaddr unset must precede the start. Line order, fail-closed.
+# shellcheck disable=SC2016  # the $-strings are literals inside bash -c
+check "import: regenerates the NIC MAC before the start" 0 "" bash -c '
+  fn="$(awk "/^cmd_import\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  mac="$(printf "%s\n" "$fn" | grep -n "hwaddr" | head -1 | cut -d: -f1)"
+  start="$(printf "%s\n" "$fn" | grep -n "incus start" | head -1 | cut -d: -f1)"
+  [ -n "$mac" ] && [ -n "$start" ] && [ "$mac" -lt "$start" ]'
+# reset_identity runs AFTER the imported box is started — the clone trust
+# boundary (machine-id → DHCP lease), line-order-asserted, fail-closed.
+# shellcheck disable=SC2016  # the $-strings are literals inside bash -c
+check "import: reset_identity follows the start" 0 "" bash -c '
+  fn="$(awk "/^cmd_import\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  start="$(printf "%s\n" "$fn" | grep -n "incus start" | head -1 | cut -d: -f1)"
+  reset="$(printf "%s\n" "$fn" | grep -n "reset_identity" | head -1 | cut -d: -f1)"
+  [ -n "$start" ] && [ -n "$reset" ] && [ "$start" -lt "$reset" ]'
+# The restricted tier can export: grant converges restricted.backups (the
+# backup API is what 'incus export' rides; blocked by default — #70).
+check "grant: allows backups (the export workflow)" 0 "" \
+  grep -qF 'restricted.backups allow' "$ROOT/host/grant-user.sh"
+
 # The rehearsal itself stays runnable: syntax-checked here, run on real hosts.
 check "multiuser.sh is valid bash" 0 "" bash -n "$ROOT/drill/multiuser.sh"
 check "multiuser.sh refuses without the env gate" 2 "opt in" \

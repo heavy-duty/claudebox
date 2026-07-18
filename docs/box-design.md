@@ -43,6 +43,18 @@ snapshots, not a secrets store:
 
 Log in once → snapshot → spin up authed boxes from it.
 
+Snapshots are in-box state: `box rm` deletes a box *and* its snapshots, and a
+clone still lives on the same host. The off-host mechanism is `box export` /
+`box import` (#70) — one portable backup tarball, snapshots included by
+default, that survives `rm`, a host teardown, an upgrade, a move. The split
+of truths is the design: everything `incus import` restores is the artifact's
+(disk, config, snapshots); everything box re-stamps on import is the current
+host's (the `user.box=1` boundary tag, the `box-net` placement, a fresh
+machine identity via the same `reset_identity` a clone gets). Auth state
+rides along deliberately — and because scrubbing a disk image is a promise
+tarball surgery cannot keep, export shouts that the file is a credential
+instead of pretending to sanitize it.
+
 ## The box announces itself to the agent
 
 cloud-init installs a global agent-context file in every coding-agent box

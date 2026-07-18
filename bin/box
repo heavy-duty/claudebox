@@ -7,7 +7,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 remote=""; mode="auto"; name=""; from=""; template=""; force=0; json=0; want_help=0
-cpu=""; memory=""; disk=""
+cpu=""; memory=""; disk=""; instance_only=0
 inst=""   # the resolved Incus instance, set by the 'box' precondition
 
 die() { echo "box: $*" >&2; exit 1; }         # 1 = it went wrong
@@ -65,6 +65,8 @@ CMDS=(
   "tmux^<box> [<session>]^box^Attach or create a tmux session in a box — survives disconnects^fn:cmd_tmux^"
   "snapshot^<box> [<label>]^box^Checkpoint a box (label defaults to manual-<epoch>)^fn:cmd_snapshot^"
   "restore^<box> <snapshot>^box,arg2^Roll a box back to one of its snapshots^incus:snapshot restore^restored {} to {1}"
+  "export^<box> [<file>] [--instance-only]^box^Export a stopped box to one portable file — it survives 'box rm' and this host^fn:cmd_export^"
+  "import^<file> [--name <box>]^^Mint a box from an exported file, re-stamped onto this host's stack^fn:cmd_import^"
   "rename^<box> <new-name>^box,arg2,stopped^Rename a box (it must be stopped first)^incus:rename^renamed {} to {1}"
   "down^<box>^box^Stop a box, keeping its state ('start' resumes it)^incus:stop^stopped {}"
   "start^<box>^box^Start a stopped box^incus:start^started {}"
@@ -151,13 +153,14 @@ EOF
   cat <<'EOF'
 
 OPTIONS
-  --name <box>          Name for the new box                          (new)
+  --name <box>          Name for the new box                  (new, import)
   --template <t>        Template to mint from (default: blank)        (new)
   --from <src>[/<snap>] Clone from box <src>, or from its snapshot    (new)
   --vm                  Force VM mode: the trust-less target          (new)
   --container           Force container mode: weaker isolation,       (new)
                           dev/test only. Default where /dev/kvm is absent.
   --json                Emit Incus JSON instead of a table     (list, info)
+  --instance-only       Export the live state only, no snapshots   (export)
   --force, -f           Delete without the confirmation prompt        (rm)
   --remote <r>          Act on Incus remote <r>                       (any)
   --help, -h            Help; after a command, help for that command
@@ -181,6 +184,11 @@ EXAMPLES
   # what have I got, and what can I clone?
   box list
   box info work
+
+  # a box that outlives this host: one portable file, credentials inside
+  box down work
+  box export work                   # → work-<UTC stamp>.tar.gz — guard it like a credential
+  box import work-<stamp>.tar.gz --name work2
 
   # run something without opening a shell
   box exec work -- git -C project pull
@@ -330,6 +338,56 @@ that snapshot is lost. 'box info <box>' lists the labels.
   box restore work authed
 EOF
 ;;
+    export) cat <<'EOF'
+One portable file that outlives the box AND the host. 'box rm' deletes a box
+and every snapshot it has; 'box new --from' clones, but the clone still lives
+on the same host. Export is the way out (#70): it wraps 'incus export' into a
+backup tarball of the whole instance — snapshots included by default, because
+the reuse workflow (log in once, snapshot, clone forever) lives in them.
+
+  box export <box> [<file>]   # default file: <box>-<UTC timestamp>.tar.gz
+  --instance-only             # live state only, leave the snapshots behind
+
+The box must be stopped first ('box down <box>'). Incus can back up a running
+instance, but a live root disk is a moving target — and this artifact's whole
+job is to be trusted later, on a host that no longer has the box.
+
+THE FILE IS A CREDENTIAL. A box's disk carries everything inside it — agent
+logins, git PATs, SSH keys, shell history. Export scrubs nothing (a
+"scrubbed" disk image is a promise tarball surgery cannot keep) and says so
+loudly instead. Store and move the file like the secret it is.
+
+The upgrade flow this unblocks (#66):
+
+  box down work && box export work    # one file per box
+  box rm work                         # nothing is lost anymore
+  # ...upgrade box / rebuild the host / move machines...
+  box import work-<stamp>.tar.gz      # the box is back, snapshots and all
+EOF
+;;
+    import) cat <<'EOF'
+Mint a box from a 'box export' file — on this host or any other that has the
+box stack ('box setup-host' builds it). The name inside the tarball is used
+unless --name picks another; either way the name must be free: import will
+not occupy a name ANY existing instance holds, box or not.
+
+Everything 'incus import' restores is the artifact's truth (disk, config,
+snapshots). What box then re-stamps is THIS host's truth:
+
+  · the user.box=1 boundary tag (a legacy user.claudebox=1 stays honored)
+  · the box-net placement — re-assigned if the artifact's profile list
+    differs, the same move migrate-host makes re-homing a legacy box
+  · a fresh machine identity (reset_identity, exactly like a clone), so its
+    DHCP lease can never collide with the box it was exported from
+
+Auth state rides along by design — the artifact carries the box's whole disk,
+logins included. That is the point (log in once, keep the file), and the same
+trust boundary as cloning an authed snapshot.
+
+  box import work-20260718T120000Z.tar.gz
+  box import work-20260718T120000Z.tar.gz --name work2
+EOF
+;;
     rename) cat <<'EOF'
 Rename a box. Incus cannot rename a running instance, so stop it first:
 
@@ -439,12 +497,13 @@ What it converges, idempotently (safe to re-run, and re-run after upgrades):
   · points the project at boxnet and ONLY boxnet — the private incusbr-<uid>
     bridge incus-user auto-creates carries none of box's hardening, so it is
     unreferenced and unreachable, not just unused
-  · allows snapshots (incus-user blocks them; box's clone workflow needs them)
+  · allows snapshots and backups (incus-user blocks both; the clone workflow
+    rides snapshots, 'box export' rides backups — #70)
   · installs the box-net profile into their project
 
-The user's surface: new/list/info/shell/exec/tmux/snapshot/restore/rm on
-their own boxes. Not theirs: expose (edits daemon-global state), setup-host,
-grant. Admin boxes and other users' boxes are invisible to them, and the
+The user's surface: new/list/info/shell/exec/tmux/snapshot/restore/export/
+import/rm on their own boxes. Not theirs: expose (edits daemon-global
+state), setup-host, grant. Admin boxes and other users' boxes are invisible to them, and the
 existing box-to-box drop means even their instances cannot reach a sibling.
 
   box grant dev1
@@ -577,6 +636,7 @@ while [ $# -gt 0 ]; do
     --remote) [ $# -ge 2 ] || usage_error "--remote needs a value"; remote="$2:"; shift 2 ;;
     --vm) mode=vm; shift ;;
     --container) mode=container; shift ;;
+    --instance-only) instance_only=1; shift ;;
     --force|-f) force=1; shift ;;
     --json) json=1; shift ;;
     --help|-h) want_help=1; shift ;;
@@ -622,12 +682,33 @@ resolve_box() {
 
 box_state() { incus list "$1" --format csv --columns s 2>/dev/null | head -n1; }
 
+# $3, when given, replaces the default "why" — the table's 'stopped' rows are
+# stopped because INCUS insists (rename), but export is stopped by OUR
+# decision (a consistent artifact), and the refusal should say the true reason.
 require_stopped() {
-  local i="$1" box="$2" st; st="$(box_state "$i")"
+  local i="$1" box="$2" why="${3:-Incus needs it stopped for this}" st; st="$(box_state "$i")"
   case "$st" in
     STOPPED|Stopped|stopped) return 0 ;;
-    *) die "box '$box' is ${st:-not stopped} — Incus needs it stopped for this. Stop it: box down $box" ;;
+    *) die "box '$box' is ${st:-not stopped} — $why. Stop it: box down $box" ;;
   esac
+}
+
+# The placement contract must exist before a mint OR an import lands — in the
+# DEFAULT project for an admin (setup-host builds it), in YOUR project for a
+# restricted user (box grant converges it). Its absence has a different fix
+# per tier, and incus's own "Profile not found" at launch time names neither.
+require_stack() {
+  if [ -z "$remote" ] && ! timeout 10 incus profile show box-net >/dev/null 2>&1 </dev/null; then
+    # A missing profile and a daemon that is not answering are different
+    # faults with different fixes — "run setup-host" at a wedged daemon
+    # (the #26 shape) is wrong advice. Separate them before diagnosing.
+    timeout 10 incus list >/dev/null 2>&1 </dev/null \
+      || die "the incus daemon is not answering — diagnose it: box doctor"
+    if [ "$(box_tier)" = restricted ]; then
+      die "your project has no box-net profile — the restricted tier is granted per user, by an admin: box grant $(id -un)"
+    fi
+    die "no box-net profile — the host stack is missing. Build it: box setup-host"
+  fi
 }
 
 need_name() {
@@ -808,21 +889,7 @@ cmd_templates() {
 
 cmd_new() {
   [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
-  # The placement contract must exist before any mint — in the DEFAULT project
-  # for an admin (setup-host builds it), in YOUR project for a restricted user
-  # (box grant converges it). Its absence has a different fix per tier, and
-  # incus's own "Profile not found" at launch time names neither.
-  if [ -z "$remote" ] && ! timeout 10 incus profile show box-net >/dev/null 2>&1 </dev/null; then
-    # A missing profile and a daemon that is not answering are different
-    # faults with different fixes — "run setup-host" at a wedged daemon
-    # (the #26 shape) is wrong advice. Separate them before diagnosing.
-    timeout 10 incus list >/dev/null 2>&1 </dev/null \
-      || die "the incus daemon is not answering — diagnose it: box doctor"
-    if [ "$(box_tier)" = restricted ]; then
-      die "your project has no box-net profile — the restricted tier is granted per user, by an admin: box grant $(id -un)"
-    fi
-    die "no box-net profile — the host stack is missing. Build it: box setup-host"
-  fi
+  require_stack
   local instance; instance="$(iname_of "$name")"
   if [ -n "$from" ]; then
     [ -z "$template" ] || usage_error "--from clones an existing box; its template rides along (drop --template)"
@@ -1066,6 +1133,130 @@ cmd_snapshot() {
 cmd_status() {
   echo "box: 'status' is deprecated — use 'box list'." >&2
   list_all
+}
+
+# --- export / import (#70): state that survives the box and the host --------
+#
+# 'box rm' deletes a box and every snapshot it has; 'box new --from' clones,
+# but the clone still lives on the same host under the same stack. So until
+# now, nothing a box held could outlive a host teardown — and #66's installer
+# refusal ("stop, export, remove every box before you upgrade") was only
+# honest advice once a real export existed. 'incus export' is the primitive:
+# a backup tarball of the instance and (by default) its snapshots.
+cmd_export() {
+  local box="${args[0]}" file="${args[1]:-}"
+  # Down first, by OUR decision, not incus's necessity: incus can back up a
+  # running instance, but a live root disk is a moving target, and this
+  # artifact's whole job is to be trusted later, on a host that no longer
+  # has the box (#70 settled on require-down over snapshot-then-export).
+  require_stopped "$inst" "$box" "export wants a settled disk, so the artifact can be trusted later"
+  # Default filename: the box's name plus a UTC stamp. Sortable, never
+  # colliding across repeated exports, and it answers the question you will
+  # actually ask the file six months from now — WHEN is this state from?
+  [ -n "$file" ] || file="$box-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
+  if [ -e "$file" ] && [ "$force" -ne 1 ]; then
+    die "$file already exists — pick another name, or --force to overwrite"
+  fi
+  local extra=()
+  # Snapshots ride along by DEFAULT (#70's call): the reuse workflow lives in
+  # them (log in once, snapshot, clone forever), and an artifact that quietly
+  # dropped the authed checkpoint would defeat its own purpose. --instance-only
+  # is the explicit opt-out, passed through to incus verbatim.
+  [ "$instance_only" -eq 1 ] && extra+=(--instance-only)
+  echo "box: exporting $box → $file ..."
+  incus export "$inst" "$file" "${extra[@]}"
+  echo "box: exported $box → $file"
+  [ "$instance_only" -eq 1 ] || echo "box: (snapshots included — 'box import' brings them back too)"
+  # #70's credential decision: scrub or SHOUT — and box shouts. Scrubbing a
+  # disk image is a promise no tarball surgery can keep (dotfiles, keychains,
+  # tokens in shell history, deleted-but-unwiped blocks); handing someone a
+  # "sanitized" file that is not sanitized would be worse than the risk it
+  # hides. So the artifact carries everything, and box says so every time.
+  {
+    echo "box: ============================== WARNING =============================="
+    echo "box: this file contains the box's ENTIRE disk: agent logins (Claude,"
+    echo "box: Codex, Grok), git credentials, SSH keys, shell history — everything"
+    echo "box: that was inside the box. Nothing in it was scrubbed."
+    echo "box: treat the file itself as a credential: private storage, trusted"
+    echo "box: channels only."
+    echo "box: ====================================================================="
+  } >&2
+}
+
+# The way back in. Everything 'incus import' restores is the ARTIFACT's truth
+# (disk, config, devices, snapshots); everything box then re-stamps is THIS
+# host's truth (the boundary tag, the placement contract, a fresh machine
+# identity). That split is the design (#70): state is portable, the trust
+# boundary is not — it is re-established on the current stack, every time.
+cmd_import() {
+  local file="${args[0]:-}"
+  [ -n "$file" ] || usage_error "usage: $(synopsis_of import)"
+  [ -f "$file" ] || die "no such file: $file"
+  # The artifact names its instance in backup/index.yaml — read it up front:
+  # the collision check and the re-stamping both need the final name BEFORE
+  # incus acts. GNU tar auto-detects the compression on read. '|| true'
+  # because pipefail would otherwise kill the script on a non-tarball with
+  # tar's status instead of reaching the die below that names the problem.
+  local embedded
+  embedded="$(tar -xOf "$file" backup/index.yaml 2>/dev/null | awk '$1 == "name:" { print $2; exit }' || true)"
+  [ -n "$embedded" ] || die "$file is not an incus/box export (no backup/index.yaml inside)"
+  local target="${name:-$embedded}"
+  # The boundary resolve_box enforces, seen from the other side: box will not
+  # occupy a name ANY existing instance holds — not a box's (import is not
+  # restore), and not an unmanaged VM's (not ours to shadow or clobber).
+  if incus config show "$target" >/dev/null 2>&1 </dev/null; then
+    die "an instance named '$target' already exists — import under another name: box import $file --name <new>"
+  fi
+  # The stack this lands on must exist first (a fresh host runs setup-host
+  # before it re-imports) — same pre-flight as a mint, same tier-aware fix.
+  require_stack
+  echo "box: importing $file as $target..."
+  if [ -n "$name" ]; then incus import "$file" "$name"; else incus import "$file"; fi
+  # Re-stamp the boundary tag. user.* keys ride inside the artifact, so a box
+  # export brings its template/user stamps back on its own, and a legacy
+  # user.claudebox=1 stays honored as it is everywhere else. Only an instance
+  # carrying NEITHER tag is stamped user.box=1 now — importing is minting,
+  # and a minted box is ours to manage.
+  local tag
+  tag="$(incus config get "$target" user.box 2>/dev/null || true)"
+  [ "$tag" = 1 ] || tag="$(incus config get "$target" user.claudebox 2>/dev/null || true)"
+  [ "$tag" = 1 ] || incus config set "$target" user.box=1
+  # Placement: the artifact carries its profile list, but the isolation
+  # contract is THIS host's box-net profile. A box export already says
+  # box-net; anything else (a pre-0.4.0 artifact, a hand-rolled export) gets
+  # re-assigned — the same move migrate-host makes re-homing a legacy box.
+  # (An artifact naming a profile this host lacks fails inside 'incus import'
+  # above, with incus's own error naming the profile — honest enough.)
+  # Two traps in reading the list: a bare name filter PREFIX-matches (asking
+  # for 'work' also returns 'work2'), so anchor it; and the P column joins
+  # multiple profiles with newlines, so join the whole (quoted, multi-line)
+  # cell back into one comparable token instead of trusting the first line.
+  local profs
+  profs="$(incus list "^${target}\$" --format csv --columns P 2>/dev/null | tr -d '" ' | paste -sd, -)"
+  if [ "$profs" != box-net ]; then
+    incus profile assign "$target" box-net
+    echo "box: re-homed onto the box-net profile (the artifact said '${profs:-none}')"
+  fi
+  # The artifact's volatile.* config comes back verbatim too — including the
+  # NIC's MAC address. Importing an artifact twice, or beside the box it was
+  # exported from, then collides at start: "MAC address already defined on
+  # another NIC" (measured live), and the second box is left half-imported.
+  # 'incus copy' regenerates the MAC on clone; import does not — so unset
+  # every volatile hwaddr and let incus mint fresh ones at start. Host-side
+  # identity, the same reasoning as the in-guest machine-id reset below.
+  local k
+  for k in $(incus config show "$target" 2>/dev/null | awk -F: '/^ *volatile\..*\.hwaddr:/ { gsub(/ /, "", $1); print $1 }'); do
+    incus config unset "$target" "$k"
+  done
+  incus start "$target"
+  wait_agent "$target"
+  # The same trust boundary as a clone: the artifact's machine-id rides in
+  # its disk, and the box it was exported from may still exist somewhere. A
+  # fresh identity (machine-id → DHCP client-id → lease) before handover,
+  # always — reset_identity's comment has the collision this prevents.
+  reset_identity "$target"
+  echo "box: imported $target — auth state (agent logins, git creds) came back with it, by design."
+  echo "box: ready — 'box shell $target'."
 }
 
 # The host-health checks live in drill/doctor.sh — grown by the drill, but

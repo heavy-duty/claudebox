@@ -17,7 +17,8 @@
 #      '--network' flag away from any box they mint
 #   5. allow snapshots (incus-user blocks them; box's clone workflow is built
 #      on them)
-#   6. install the shipped box-net profile into their project
+#   6. allow backups (blocked too; 'box export' rides the backup API — #70)
+#   7. install the shipped box-net profile into their project
 #
 # Idempotent: every step converges, so re-running (including after a box
 # upgrade, to refresh the profile) is safe. incus-user never rewrites a
@@ -183,7 +184,18 @@ echo "network: $project restricted to boxnet (the private $bridge is unreference
 incus project set "$project" restricted.snapshots allow </dev/null
 echo "snapshots: allowed"
 
-# 6. The placement contract itself, installed into their project. Created if
+# 6. Backups. 'box export' rides incus's backup API — an export IS "create a
+# backup, download it, delete it" — and a restricted project blocks that by
+# default: restricted.backups=block the moment restricted=true (incus 6.0,
+# internal/server/project/permissions.go, enforced by AllowBackupCreation).
+# 'box import' needs no key of its own — restoring a backup file is plain
+# instance creation. Same convergence as snapshots, for the same reason: the
+# tier is the same workflows on your own boxes, and export/import are
+# workflows (#70).
+incus project set "$project" restricted.backups allow </dev/null
+echo "backups: allowed ('box export' rides them, #70)"
+
+# 7. The placement contract itself, installed into their project. Created if
 # missing, refreshed unconditionally — same convergence discipline as
 # setup-host's own profile handling, so a box upgrade propagates by re-run.
 incus --project "$project" profile show box-net >/dev/null 2>&1 </dev/null \
