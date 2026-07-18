@@ -268,8 +268,8 @@ else
     while IFS= read -r n; do warn "  · $n"; done <<<"$names"
     warn "refusing to change the default box version under them (#66) — the default stays at $old_ver."
     log "box $new_ver is installed side-by-side. To switch:"
-    log "    · preserve what you care about — 'box down <box>', copy out via 'box shell'/'box exec'"
-    log "      (a portable 'box export' is #70), then 'box rm <box>' when you are done"
+    log "    · preserve what you care about — 'box down <box>', 'box export <box>'"
+    log "      (one portable file per box, #70), then 'box rm <box>' when you are done"
     log "    · then flip the default:  box use $new_ver"
   else
     flip_current "$new_ver"

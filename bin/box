@@ -560,8 +560,8 @@ EOF
 Switch the default box version — repoint the 'current' symlink (and the PATH
 symlink riding it) at an installed version. Refuses while ANY box exists:
 never change versions under a user's boxes (#66) — 'box down' what you keep,
-copy out what you need via 'box shell'/'box exec' (a portable 'box export'
-is #70), 'box rm' each box, then switch. The flip is asserted afterwards:
+'box export' what you keep (one
+portable file per box, #70), 'box rm' each box, then switch. The flip is asserted afterwards:
 current must resolve to the version you asked for, and the chain's
 'box --version' must answer it.
 
@@ -1343,8 +1343,8 @@ die_under_boxes() {   # $1 = the act being refused, $2 = the retry command
     echo "box: this host has existing boxes:"
     while IFS= read -r n; do echo "box:   · $n"; done <<<"$names"
     echo "box: refusing to $1 under them (#66: never change versions under a user's boxes)."
-    echo "box: preserve what you care about — 'box down <box>', copy out via 'box shell'/'box exec'"
-    echo "box: (a portable 'box export' is #70) — then 'box rm <box>' each, and re-run: $2"
+    echo "box: preserve what you care about — 'box down <box>', 'box export <box>' (one"
+    echo "box: portable file per box, #70) — then 'box rm <box>' each, and re-run: $2"
   } >&2
   exit 1
 }
