@@ -7,6 +7,22 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **Server-posture template keys** (#81, carved from #69) — two optional
+  `box.env` allowlist keys. `BOX_REQUIRE_VM=1` refuses both the silent
+  container fallback (no `/dev/kvm`, exit 1) and an explicit `--container`
+  (exit 2): such a template's trust boundary is the VM. `BOX_AUTOSTART=1`
+  stamps `boot.autostart=true` at launch, per-instance like `limits.*`, so
+  the box returns from a host reboot without an operator; clones inherit it
+  via `incus copy`. Still no key for a network or a `security.*` flag, on
+  purpose.
+- **Dynamic template test suite** (#81, carved from #69) — `test/cli.sh`
+  discovers `templates/*/` instead of hardcoding the list, so a new template
+  cannot ship unseen. Per template: `box.env` is driven through the real,
+  extracted `load_template` (unknown keys and missing `BOX_IMAGE`/`BOX_USER`
+  fail, fixtures proving both dies); `user-data.yaml` exists, declares
+  `#cloud-config`, parses as YAML, and installs tmux (#65). Grep guards pin
+  the `cmd_new` half: the `REQUIRE_VM` refusal orders after `pick_mode`, and
+  `boot.autostart` is stamped only under the `T_AUTOSTART` guard.
 - **`box export` / `box import`** (#70) — a box's state that survives the box
   _and_ the host, unblocking #66's humane upgrade flow (down, export, rm,
   upgrade, re-import). `box export <box> [<file>]` wraps `incus export` into
