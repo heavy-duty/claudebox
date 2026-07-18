@@ -9,12 +9,24 @@ set -euo pipefail
 # comments, reviews — never from label churn, or the sweep would un-stale its
 # own mark every tick.
 #
+# The verdict contract (CONTRIBUTING.md): reviews end in approve or
+# request-changes. Reality check (#85 round 1): at least one live bot posts
+# its agreement as a COMMENTED review and can never formally approve, which
+# would park every fully-agreed PR in state:addressing forever. So COMMENTED
+# reviews whose body carries a durable agreement signal count as approval —
+# the workaround the state machine owes the fleet until every bot speaks the
+# formal contract. Any verdict that counts toward needs-human must be bound
+# to the CURRENT head SHA: GitHub keeps approvals alive across pushes, and a
+# stale approval must never promote unreviewed code to the human.
+#
 # DRY_RUN=1 narrates every mutation instead of performing it (how this script
 # is rehearsed against the live repo). A workflow_dispatch run also bootstraps
-# the taxonomy (label create --force), which is how a fresh repo — or a label
-# someone deleted — self-heals.
+# the taxonomy (label create --force) — that heal is dispatch-only; the cron
+# sweep tolerates a missing label rather than recreating it.
+#
+# The state machine below is pure (globals in, state out) and covered by
+# fixture tests in test/labels-reconcile.sh.
 
-REPO="${REPO:?set REPO to owner/name}"
 HUMAN="${HUMAN_REVIEWER:-danmt}"
 BOTS=(claude-bot-andresmgsl codex-bot-andresmgsl grok-bot-andresmgsl)
 STATES=(state:building state:bots-reviewing state:addressing state:needs-human)
@@ -25,6 +37,83 @@ log() { printf 'labels: %s\n' "$*"; }
 run() { # every mutation goes through here — DRY_RUN=1 logs instead of doing
   if [ -n "${DRY_RUN:-}" ]; then log "DRY_RUN: $*"; else "$@"; fi
 }
+
+# ---------------------------------------------------------------------------
+# The state machine. Pure functions over four globals, set per PR:
+#   DRAFT        true|false
+#   HEAD_SHA     the PR's current head commit
+#   REQUESTED    newline-separated logins with a review currently requested
+#   REVIEWS_JSON JSON array of submitted (non-PENDING) reviews
+# ---------------------------------------------------------------------------
+
+requested() { grep -qxF "$1" <<<"$REQUESTED"; }
+
+agreement_signal() { # $1 = review body → 0 when it carries a durable agreement
+  # the signals the live bots actually emit: grok "**Verdict: Approve**",
+  # codex "Verdict: I agree with everything", claude "✅ … I agree with
+  # everything". Conservative on purpose: "I agree with most" is NOT a match.
+  grep -qiE 'verdict:? ?\**approve|i agree with everything|^✅' <<<"$1"
+}
+
+bot_verdict() { # $1 = login → MISSING | BLOCK | APPROVE | STALE | FEEDBACK
+  local review state commit body
+  review="$(jq -c --arg u "$1" \
+    '[.[] | select(.user.login == $u)] | sort_by(.submitted_at) | last // empty' \
+    <<<"$REVIEWS_JSON")"
+  if [ -z "$review" ]; then echo MISSING; return; fi
+  state="$(jq -r '.state' <<<"$review")"
+  commit="$(jq -r '.commit_id' <<<"$review")"
+  body="$(jq -r '.body // ""' <<<"$review")"
+  case "$state" in
+    CHANGES_REQUESTED)
+      # blocks at ANY head — GitHub's own semantic: only a newer review
+      # from the same reviewer clears it
+      echo BLOCK ;;
+    APPROVED)
+      if [ "$commit" = "$HEAD_SHA" ]; then echo APPROVE; else echo STALE; fi ;;
+    COMMENTED)
+      if agreement_signal "$body"; then
+        if [ "$commit" = "$HEAD_SHA" ]; then echo APPROVE; else echo STALE; fi
+      else
+        echo FEEDBACK
+      fi ;;
+    *) echo FEEDBACK ;;
+  esac
+}
+
+decide_state() { # → the one state:* label this PR should carry
+  if [ "$DRAFT" = true ]; then echo state:building; return; fi
+  # an explicit human request outranks the bot rounds — it is the final
+  # gate, and a maintainer pulling a PR to themselves early counts too
+  if requested "$HUMAN"; then echo state:needs-human; return; fi
+  local b v verdicts=""
+  for b in "${BOTS[@]}"; do
+    if requested "$b"; then echo state:bots-reviewing; return; fi
+  done
+  for b in "${BOTS[@]}"; do
+    v="$(bot_verdict "$b")"
+    if [ "$v" = MISSING ]; then echo state:bots-reviewing; return; fi
+    verdicts="$verdicts $v"
+  done
+  case "$verdicts" in
+    # FEEDBACK = a comment with no verdict → the agent owes the round-reply.
+    # STALE = a verdict for an older head → the agent owes a re-request.
+    *BLOCK* | *FEEDBACK* | *STALE*) echo state:addressing; return ;;
+  esac
+  # the bots all approve — but if the human's standing word is
+  # changes-requested (and nobody re-requested them yet), the agent owes
+  # fixes, not the human a nag
+  if [ "$(bot_verdict "$HUMAN")" = BLOCK ]; then
+    echo state:addressing
+  else
+    echo state:needs-human
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# The sweep: fetch facts, decide, converge. One PR's failure never aborts the
+# others — each PR reconciles in a subshell and a failure just logs.
+# ---------------------------------------------------------------------------
 
 bootstrap_labels() { # dispatch-only: ~20 upserts is too chatty for every cron tick
   while IFS='|' read -r name color desc; do
@@ -47,68 +136,20 @@ scope:drill|C5DEF5|drill/ — rehearsals, doctor, RUNS.md
 EOF
 }
 
-if [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ]; then
-  log "workflow_dispatch: bootstrapping the taxonomy"
-  bootstrap_labels
-fi
+has_label() { grep -qxF "$1" <<<"$LABELS"; }
 
-now="$(date +%s)"
+reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
+  local n="$1" desired remove s args last_activity age
 
-for n in $(gh pr list -R "$REPO" --state open --limit 100 --json number --jq '.[].number'); do
-  pr="$(gh api "repos/$REPO/pulls/$n")"
-  draft="$(jq -r '.draft' <<<"$pr")"
-  labels="$(jq -r '.labels[].name' <<<"$pr")"
-  requested_logins="$(jq -r '.requested_reviewers[].login' <<<"$pr")"
-  # PENDING reviews are unsubmitted drafts sitting in someone's browser — not a verdict
-  reviews="$(gh api --paginate "repos/$REPO/pulls/$n/reviews" --jq '.[]' \
-    | jq -s '[.[] | select(.state != "PENDING")]')"
+  desired="$(decide_state)"
 
-  latest() { # $1 = login → their latest submitted review state, or empty
-    jq -r --arg u "$1" \
-      '[.[] | select(.user.login == $u)] | sort_by(.submitted_at) | last | .state // empty' \
-      <<<"$reviews"
-  }
-  requested() { grep -qxF "$1" <<<"$requested_logins"; }
-  has_label() { grep -qxF "$1" <<<"$labels"; }
-
-  # ---- who is the ball with? (the LABELS.md state machine) ----
-  desired=""
-  if [ "$draft" = true ]; then
-    desired=state:building
-  elif requested "$HUMAN"; then
-    # an explicit human request outranks the bot rounds — it is the final
-    # gate, and a maintainer pulling a PR to themselves early counts too
-    desired=state:needs-human
-  else
-    for b in "${BOTS[@]}"; do
-      # in requested_reviewers = round (re-)requested and unanswered; never
-      # reviewed at all = the round hasn't even started for this bot
-      if requested "$b" || [ -z "$(latest "$b")" ]; then desired=state:bots-reviewing; fi
-    done
-    if [ -z "$desired" ]; then
-      all_approved=1
-      for b in "${BOTS[@]}"; do
-        [ "$(latest "$b")" = APPROVED ] || all_approved=0
-      done
-      if [ "$all_approved" = 1 ]; then
-        # the ball is the human's — unless their last word was CHANGES_REQUESTED
-        # and nobody has re-requested them since (then the agent owes fixes)
-        if ! requested "$HUMAN" && [ "$(latest "$HUMAN")" = CHANGES_REQUESTED ]; then
-          desired=state:addressing
-        else
-          desired=state:needs-human
-        fi
-      else
-        desired=state:addressing
-      fi
-    fi
-  fi
-
-  # encode the runbook's last step: all bots approve → the human is asked, once.
-  # The guard (never requested, never reviewed) is what makes this idempotent.
-  if [ "$desired" = state:needs-human ] && ! requested "$HUMAN" && [ -z "$(latest "$HUMAN")" ]; then
+  # encode the runbook's last step: the round passed → the human is asked,
+  # once. The guard (never requested, never reviewed) makes it idempotent —
+  # and the shared concurrency group in labels.yml makes it race-free.
+  if [ "$desired" = state:needs-human ] && ! requested "$HUMAN" \
+    && [ -z "$(jq -r --arg u "$HUMAN" '[.[] | select(.user.login == $u)] | last | .state // empty' <<<"$REVIEWS_JSON")" ]; then
     run gh api "repos/$REPO/pulls/$n/requested_reviewers" -f "reviewers[]=$HUMAN" --silent
-    log "#$n: requested $HUMAN (all bots approve)"
+    log "#$n: requested $HUMAN (round passed)"
   fi
 
   # ---- converge the state:* labels ----
@@ -120,21 +161,25 @@ for n in $(gh pr list -R "$REPO" --state open --limit 100 --json number --jq '.[
   if ! has_label "$desired" || [ -n "$remove" ]; then
     args=(--add-label "$desired")
     [ -n "$remove" ] && args+=(--remove-label "$remove")
-    run gh issue edit "$n" -R "$REPO" "${args[@]}" >/dev/null
-    log "#$n: state -> $desired${remove:+ (cleared $remove)}"
+    if run gh issue edit "$n" -R "$REPO" "${args[@]}" >/dev/null; then
+      log "#$n: state -> $desired${remove:+ (cleared $remove)}"
+    else
+      # a deleted label must not wedge the sweep — dispatch heals the taxonomy
+      log "#$n: WARNING: label edit failed (missing label? run the workflow manually to bootstrap)"
+    fi
   fi
 
   # ---- stale: real activity only, and blocked is legitimately quiet ----
   last_activity="$(
     {
-      jq -r '.created_at' <<<"$pr"
-      jq -r '.[].submitted_at' <<<"$reviews"
+      jq -r '.created_at' <<<"$PR_JSON"
+      jq -r '.[].submitted_at' <<<"$REVIEWS_JSON"
       gh api --paginate "repos/$REPO/issues/$n/comments" --jq '.[].created_at'
       gh api --paginate "repos/$REPO/pulls/$n/comments" --jq '.[].created_at'
       gh api --paginate "repos/$REPO/pulls/$n/commits" --jq '.[].commit.committer.date'
     } | sort | tail -n1
   )"
-  age=$((now - $(date -d "$last_activity" +%s)))
+  age=$((NOW - $(date -d "$last_activity" +%s)))
   if has_label blocked || [ "$age" -le "$STALE_AFTER" ]; then
     if has_label stale; then
       run gh issue edit "$n" -R "$REPO" --remove-label stale >/dev/null
@@ -144,6 +189,35 @@ for n in $(gh pr list -R "$REPO" --state open --limit 100 --json number --jq '.[
     run gh issue edit "$n" -R "$REPO" --add-label stale >/dev/null
     log "#$n: stale ($((age / 3600))h quiet)"
   fi
-done
+}
 
-log "reconciled."
+main() {
+  REPO="${REPO:?set REPO to owner/name}"
+  NOW="$(date +%s)"
+
+  if [ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch ]; then
+    log "workflow_dispatch: bootstrapping the taxonomy"
+    bootstrap_labels
+  fi
+
+  local n
+  for n in $(gh pr list -R "$REPO" --state open --limit 100 --json number --jq '.[].number'); do
+    (
+      PR_JSON="$(gh api "repos/$REPO/pulls/$n")"
+      DRAFT="$(jq -r '.draft' <<<"$PR_JSON")"
+      HEAD_SHA="$(jq -r '.head.sha' <<<"$PR_JSON")"
+      LABELS="$(jq -r '.labels[].name' <<<"$PR_JSON")"
+      REQUESTED="$(jq -r '.requested_reviewers[].login' <<<"$PR_JSON")"
+      # PENDING reviews are unsubmitted drafts in someone's browser — not a verdict
+      REVIEWS_JSON="$(gh api --paginate "repos/$REPO/pulls/$n/reviews" --jq '.[]' \
+        | jq -s '[.[] | select(.state != "PENDING")]')"
+      reconcile_pr "$n"
+    ) || log "#$n: reconcile failed — continuing with the remaining PRs"
+  done
+  log "reconciled."
+}
+
+# sourced by test/labels-reconcile.sh for the fixture tests; executed in CI
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

@@ -24,14 +24,13 @@ permissions:
   issues: write
   pull-requests: write
 
-concurrency:
-  group: labels-${{ github.event.pull_request.number || 'cron' }}
-  cancel-in-progress: false
-
 jobs:
   scope:
     if: github.event_name == 'pull_request_target'
     runs-on: ubuntu-latest
+    concurrency:
+      group: labels-scope-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - uses: actions/labeler@v5
         with:
@@ -40,6 +39,14 @@ jobs:
 
   reconcile:
     runs-on: ubuntu-latest
+    # ONE shared group: every reconcile sweeps every open PR, so cron and
+    # PR-event runs must serialize or two sweeps race the same PR's labels
+    # and both pass the request-the-human-once guard. GitHub keeps at most
+    # one queued run per group (older queued runs are superseded), which
+    # coalesces bursts instead of piling them up.
+    concurrency:
+      group: labels-reconcile
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4 # base branch only — never the PR's code
       - name: reconcile state + stale

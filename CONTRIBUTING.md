@@ -28,7 +28,11 @@ labels tell you where everything is without opening anything.
    them at their discretion; anything blocking — including a question that
    gates the verdict — is **request changes**, saying what unblocks it. The
    reconciler treats a comment-only review as not-approved, so commenting
-   without a verdict only stalls the PR.
+   without a verdict only stalls the PR. (Transitional workaround: until
+   every bot speaks the formal contract, the reconciler counts a COMMENTED
+   review whose body carries a durable agreement signal — "Verdict: Approve",
+   "I agree with everything", a leading ✅ — as an approval, bound to the
+   current head SHA.)
 6. **When all three approve**, the final review goes to the maintainer — the
    labels workflow requests it automatically.
 7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
