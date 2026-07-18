@@ -54,13 +54,16 @@ would just say the same thing twice, drifting apart eventually.
 
 State labels are written by automation, never by hand. Every state above is
 derivable from GitHub's own facts — the draft flag, requested reviewers,
-review states, push timestamps — so a scheduled workflow recomputes the state
-and reconciles labels statelessly. A hand-moved label is a lie waiting to
-happen; the workflow asserts the effective state instead. Until that workflow
-lands, treat `state:` labels as advisory.
+review states, push timestamps — so the labels workflow
+([.github/workflows/labels.yml](.github/workflows/labels.yml)) recomputes the
+state and reconciles labels statelessly, on a 15-minute cron plus PR events.
+A hand-moved label is a lie waiting to happen; the workflow asserts the
+effective state instead. `scope:` labels on PRs are applied from the changed
+paths by actions/labeler ([.github/labeler.yml](.github/labeler.yml));
+[CONTRIBUTING.md](CONTRIBUTING.md) says who sets what.
 
-The same workflow bootstraps the taxonomy: it creates any missing label
-idempotently. To create them by hand (needs push access):
+The same workflow bootstraps the taxonomy: a manual dispatch creates any
+missing label idempotently. To create them by hand (needs push access):
 
 ```sh
 gh label create "state:building"       --color FBCA04 --description "PR is a draft — the coding agent is still building" --force

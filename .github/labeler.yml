@@ -1,0 +1,22 @@
+# path → scope:* map for actions/labeler — the PR half of LABELS.md's scope
+# story (issues are hand-scoped at triage; paths only exist on PRs). Additive
+# only: sync-labels stays off in labels.yml, so a hand-applied scope survives.
+"scope:cli":
+  - changed-files:
+      - any-glob-to-any-file: ["bin/**", "test/cli.sh"]
+"scope:installer":
+  - changed-files:
+      - any-glob-to-any-file: ["install.sh"]
+"scope:host":
+  - changed-files:
+      - any-glob-to-any-file: ["host/**"]
+"scope:tiers":
+  - changed-files:
+      - any-glob-to-any-file:
+          ["host/grant-user.sh", "host/revoke-user.sh", "drill/multiuser.sh"]
+"scope:templates":
+  - changed-files:
+      - any-glob-to-any-file: ["templates/**", "profiles/**"]
+"scope:drill":
+  - changed-files:
+      - any-glob-to-any-file: ["drill/**"]
