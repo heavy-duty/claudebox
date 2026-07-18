@@ -24,7 +24,11 @@ set -euo pipefail
 # downloading — for CI and the drill, so what lands is the code under review.
 
 REPO="${BOX_REPO:-heavy-duty/box}"
-REF="${BOX_REF:-main}"
+# Three install channels, one knob (#83): BOX_REF unset installs the LATEST
+# RELEASE (the tag resolved from GitHub's releases/latest redirect, below);
+# BOX_REF=<tag> pins a release; BOX_REF=<branch> (say, main) is the dev
+# channel. A set ref is tried as a tag first, then as a branch.
+REF="${BOX_REF:-}"
 # Root installs GLOBALLY, non-root installs per-user. box's install tree is
 # EXECUTED by other users (the multi-user host path: rig installs box once, every
 # incus-group operator runs it) — unlike rig, which is root-only and can hide in
@@ -91,6 +95,23 @@ existing_boxes() {
   } 2>/dev/null | awk -F, 'NF && !seen[$1]++ { print $1 }' | grep .
 }
 
+# The latest release, resolved the no-API way (#83): GitHub answers
+# https://github.com/<repo>/releases/latest with a redirect to
+# .../releases/tag/<tag>, so one HEAD request reads the tag off the Location
+# header — no API, no token, no rate-limit pain. Prints the bare tag; fails
+# when the redirect does not answer or does not name a tag (a repo with no
+# releases redirects to /releases), so the caller can refuse LOUDLY instead
+# of silently installing main. test/release.sh drives this against a shim
+# curl serving canned redirects.
+latest_release_tag() {
+  local loc
+  loc="$(curl -fsSI -o /dev/null -w '%{redirect_url}' "https://github.com/$REPO/releases/latest")" || return 1
+  case "$loc" in
+    */releases/tag/?*) printf '%s\n' "${loc##*/releases/tag/}" ;;
+    *) return 1 ;;
+  esac
+}
+
 # --- prerequisites ---------------------------------------------------------
 # curl only when something must be downloaded — a local BOX_INSTALL_SOURCE
 # needs none, which is what lets test/cli.sh drive REAL installs offline.
@@ -102,7 +123,7 @@ command -v tar  >/dev/null 2>&1 || die "tar is required but was not found. Pleas
 if [ -n "${BOX_INSTALL_SOURCE:-}" ]; then
   SRCDESC="local source $BOX_INSTALL_SOURCE"
 else
-  SRCDESC="$REPO@$REF"
+  SRCDESC="$REPO@${REF:-latest release}"
 fi
 
 # --- confirm first ---------------------------------------------------------
@@ -178,12 +199,30 @@ if [ -n "${BOX_INSTALL_SOURCE:-}" ]; then
     die "BOX_INSTALL_SOURCE is set but is neither a directory nor a tarball: $SRC"
   fi
 else
+  # No BOX_REF → the latest release, resolved only now (AFTER the confirm:
+  # even a redirect probe is network the operator has not yet said yes to).
+  # A failed resolution REFUSES with the way out — it must never hang, and
+  # never silently hand out main when the operator asked for a release (#83).
+  if [ -z "$REF" ]; then
+    REF="$(latest_release_tag)" \
+      || die "could not resolve the latest release (no release tag behind https://github.com/$REPO/releases/latest). Check the network, and that $REPO has releases — or pick the ref yourself: BOX_REF=<tag> pins a release, BOX_REF=main installs the development tip."
+    SRCDESC="$REPO@$REF"
+    log "latest release: $REF"
+  fi
   INSTALLED_FROM="$REPO@$REF"
-  URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
   log "installing box from $REPO@$REF"
+  # A ref is a TAG first (the pinned-release channel), a branch second (the
+  # dev channel, BOX_REF=main) — and the fallback only exists for a ref the
+  # OPERATOR named: a resolved latest tag has no branch to fall through to.
+  URL="https://github.com/$REPO/archive/refs/tags/$REF.tar.gz"
   log "downloading $URL"
-  curl -fsSL "$URL" -o "$TMPDIR/box.tar.gz" \
-    || die "failed to download $URL"
+  if ! curl -fsSL "$URL" -o "$TMPDIR/box.tar.gz"; then
+    [ -n "${BOX_REF:-}" ] || die "failed to download $URL"
+    URL="https://github.com/$REPO/archive/refs/heads/$REF.tar.gz"
+    log "no tag '$REF' — trying it as a branch: $URL"
+    curl -fsSL "$URL" -o "$TMPDIR/box.tar.gz" \
+      || die "failed to download it as either — '$REF' is neither a tag nor a branch of $REPO"
+  fi
 
   log "extracting archive"
   tar -xzf "$TMPDIR/box.tar.gz" -C "$TMPDIR" \
