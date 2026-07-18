@@ -135,19 +135,26 @@ done < <(incus config trust list --format csv --columns nf 2>/dev/null)
 
 # incus-user's per-user client state (their key pair). Removed so a future
 # re-grant starts clean instead of trusting a key the purge revoked.
-if [ -d "/var/lib/incus/users/$uid" ]; then
+# $SUDO test, not a bare [ -d ]: /var/lib/incus is not traversable by a
+# non-root admin, so an unprivileged stat answers "absent" for a directory
+# that is very much there — the same lie the absence assert below must dodge.
+if $SUDO test -d "/var/lib/incus/users/$uid" 2>/dev/null; then
   $SUDO rm -rf "/var/lib/incus/users/$uid"
   echo "purge: incus-user state for uid $uid removed"
 fi
 
 # Assert absence rather than trusting exit codes — the wipe.sh discipline.
 # The certificate included: its removal above is set -e-exempt (left of &&),
-# and a promise the header makes is a promise this block checks.
+# and a promise the header makes is a promise this block checks. The
+# incus-user state directory too — it was purged for releases without being
+# re-checked, which is exactly the gap this block exists to close.
 leftover=""
 incus project show "$project" >/dev/null 2>&1 </dev/null && leftover="$leftover $project"
 incus network show "$bridge" >/dev/null 2>&1 </dev/null && leftover="$leftover $bridge"
 incus config trust list --format csv --columns nf 2>/dev/null | grep -q "^incus-user-$uid," \
   && leftover="$leftover cert:incus-user-$uid"
+$SUDO test -d "/var/lib/incus/users/$uid" 2>/dev/null \
+  && leftover="$leftover /var/lib/incus/users/$uid"
 if [ -n "$leftover" ]; then
   echo "box revoke: purge INCOMPLETE — still present:$leftover" >&2
   exit 1
