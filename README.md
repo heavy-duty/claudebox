@@ -206,7 +206,8 @@ form; flags win). The template's identity (name, user) is stamped onto the insta
 so `shell`, `exec` and `tmux` land in the right user — and a clone still
 knows, because `incus copy` carries the metadata.
 
-## Log in once, reuse via snapshots
+## Log in once, reuse via snapshotsrm -rf ~/.local/share/box ~/.local/bin/box          # per-user install
+sudo rm -rf /opt/box /usr/local/bin/box             # global (root) install
 
 Because every fresh box is creds-free, re-authenticating each time would be
 toil. Snapshot an authenticated box and clone from it instead:
@@ -388,9 +389,10 @@ documentation, not a host-executed script. See
 ## Uninstall
 
 ```sh
-box teardown-host                # boxes, network, ACL, profile, firewall
-box teardown-host --purge-incus  # ...and Incus itself
-rm -rf ~/.local/share/box ~/.local/bin/box   # the CLI itself
+box teardown-host                                    # boxes, network, ACL, profile, firewall
+box teardown-host --purge-incus                      # ...and Incus itself
+rm -rf ~/.local/share/box ~/.local/bin/box           # per-user install
+sudo rm -rf /opt/box /usr/local/bin/box              # global (root) install
 ```
 
 ## Non-goals
