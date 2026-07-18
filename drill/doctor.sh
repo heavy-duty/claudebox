@@ -62,6 +62,38 @@ gw_squat_signature() {
       print "duplicate connected routes for the uplink subnet " up " (" devs[up] ") — whichever link last gains carrier wins, and a nested bridge with carrier blackholes egress" }'
 }
 
+# --- The UFW half of the gateway carve-out (#86 review) ---------------------
+# setup-host converges the ACL's gateway allow and box-firewall converges
+# UFW's — but a doctor that reads only the ACL hands a remapped UFW host a
+# clean bill while a stale 'allow … to <old-gw> port 53' quietly drops
+# box→gateway DNS. This reads UFW's own table. Pure text in (`ufw status`
+# output, the network, the live gateway), findings out (one per line,
+# silence is agreement) — the gw_squat_signature seam, so test/cli.sh drives
+# it against canned tables. Judged only where UFW is active: the no-UFW nft
+# carve-out is interface-scoped (no gateway address to go stale).
+ufw_dns_findings() {
+  local status="$1" net="$2" gw="$3" allows stale
+  allows="$(printf '%s\n' "$status" | awk -v net="$net" '
+    $2 ~ /^53\// && $3 == "on" && $4 == net { print $1 }' | sort -u)"
+  if [ -z "$allows" ]; then
+    # No DNS allow at all is a drop only if OUR deny is there to do the
+    # dropping — a UFW host box-firewall never touched has nothing to judge.
+    printf '%s\n' "$status" | grep " on $net" | grep -q "DENY" \
+      && printf 'UFW denies in on %s with NO DNS allow at all — box DNS to the gateway is dropped\n' "$net"
+    return 0
+  fi
+  if ! printf '%s\n' "$allows" | grep -qxF "$gw"; then
+    printf "UFW's DNS allow points at %s — NOT %s's live gateway (%s): box DNS dies at UFW's deny\n" \
+      "$(printf '%s' "$allows" | tr '\n' ' ')" "$net" "$gw"
+    return 0
+  fi
+  stale="$(printf '%s\n' "$allows" | grep -vxF "$gw")" || true
+  [ -n "$stale" ] \
+    && printf "stale UFW DNS allow(s) for %s left beside the live gateway's — box-firewall converges these away now\n" \
+         "$(printf '%s' "$stale" | tr '\n' ' ')"
+  return 0
+}
+
 # The signature, probed INSIDE a box: its routes, read where they live. A
 # poisoned guest looks healthy from every host-side config check — the nested
 # bridge and the captured gateway exist only in the guest's kernel.
@@ -241,6 +273,26 @@ else
   inf "the drop is an nft BRIDGE-family rule, and without it siblings are wide open."
   inf "fix:  sudo /usr/local/sbin/box-firewall"
   inf "      (or: sudo systemctl restart box-firewall.service)"
+fi
+
+# The UFW blind spot: the ACL check further down compares the ACL's carve-out
+# to the live gateway, but on a UFW host the SAME stale-carve-out failure can
+# live in UFW's own table — and did, invisibly (#86 review). Judge it here,
+# from `ufw status`, wherever UFW is the active firewall and a bridge exists
+# to compare against (a fresh host has neither).
+if command -v ufw >/dev/null 2>&1; then
+  ufw_out="$(sudo ufw status 2>/dev/null)"
+  ufw_gw="$(incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1)"
+  if printf '%s\n' "$ufw_out" | grep -q "Status: active" && [ -n "$ufw_gw" ]; then
+    findings="$(ufw_dns_findings "$ufw_out" boxnet "$ufw_gw")"
+    if [ -n "$findings" ]; then
+      while IFS= read -r line; do no "$line"; done <<<"$findings"
+      inf "the bridge moved (#80's escape hatch) and UFW did not follow"
+      inf "fix:  sudo /usr/local/sbin/box-firewall   (it converges the UFW allows off the live bridge now)"
+    else
+      ok "no stale UFW DNS carve-out — box DNS to the gateway ($ufw_gw) survives UFW"
+    fi
+  fi
 fi
 
 # box-net is the placement contract since the 0.4.0 rename; claude-dev is its
