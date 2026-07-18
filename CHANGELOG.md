@@ -7,6 +7,23 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **`setup-host` auto-picks a free subnet — nested box-in-box with zero
+  flags** (#80, completing its fix #1: "refuse … or automatically select a
+  non-colliding subnet"). A bare `box setup-host` now decides the subnet
+  itself, in four deliberate cases: an explicit `BOX_SUBNET` is honored or
+  refused, never silently overridden (scripted hosts keep exact semantics);
+  an existing `boxnet` bridge is converged on as-is — the bridge IS the pin —
+  turning the old bare-re-run agree-gate refusal into plain convergence
+  (unless a foreigner *also* claims the bridge's subnet: that is #80's
+  poisoned state, and converging would rebuild on it, so it still refuses and
+  names the bridge move); a free `10.88.0.0/24` stays the default; and a
+  *claimed* default — the nested case: a drill or rehearsal running inside a
+  box, whose own uplink owns 10.88 — scans `10.89.0.0/24` … `10.127.0.0/24`
+  in order, takes the first free candidate, announces the pick and the
+  claimant loudly, and only refuses when every candidate is claimed. The
+  decision happens before any mutation, and everything downstream (the
+  bridge, `BOX_GW`, the ACL's gateway carve-out, the firewall, the doctor's
+  expectations) derives from it.
 - **`setup-host` refuses a claimed subnet, and `BOX_SUBNET` picks another**
   (#80) — run inside a box, `setup-host` used to build a nested `boxnet` on
   the exact subnet and gateway of the guest's own uplink: the guest then held

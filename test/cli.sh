@@ -677,6 +677,101 @@ check "claimant: 10.8.0.0/24 does not prefix-match 10.88.x (the dot terminates)"
   1 "" claim 10.8.0.0/24 "$D_INBOX" "$A_GUEST"
 rm -f "$CLMFN"
 
+# --- choose_subnet: the four-case decision, driven case by case -------------
+# 1 explicit pin: honored or refused, never overridden. 2 no pin + bridge:
+# converge to the bridge (the bridge IS the pin) — the scan never runs with a
+# bridge present. 3 no pin, no bridge, default free: default. 4 default
+# claimed: scan 10.89…10.127, first free wins, loudly; refuse when all claimed.
+PICKFN="$(mktemp)"
+awk '/^(valid_subnet|subnet_claimant|choose_subnet)\(\) \{/,/^\}/' \
+  "$ROOT/host/setup-host.sh" > "$PICKFN"
+check "choose_subnet: extracted with its helpers (guards the awk)" 0 "auto-picked" cat "$PICKFN"
+check "choose_subnet: subnet_claimant came along" 0 "DEFAULT GATEWAY" cat "$PICKFN"
+check "choose_subnet: the extracted functions are valid bash" 0 "" bash -n "$PICKFN"
+pick() { # pick <pin> <default-route> <addrs> [boxnet-addr]
+  FAKE_IP4_DEFAULT="$2" FAKE_IP4_ADDRS="$3" FAKE_IP4_BOXNET="${4:-}" PATH="$SHIMDIR:$PATH" \
+    bash -c ". '$PICKFN'; choose_subnet \"\$1\"" _ "$1"
+}
+pickout()   { pick "$@" 2>/dev/null; }          # stdout only: the choice itself
+pickquiet() { [ -z "$(pick "$@" 2>&1 >/dev/null)" ]; }  # stderr must be EMPTY
+picknoscan(){ ! pick "$@" 2>&1 | grep -qF auto-picked; }
+
+# The bridge lines and the both-claimed / all-claimed address tables.
+B_88='5: boxnet    inet 10.88.0.1/24 scope global boxnet'
+B_89='5: boxnet    inet 10.89.0.1/24 scope global boxnet'
+A_TWOCLAIM="$A_GUEST
+3: virbr7    inet 10.89.0.7/24 brd 10.89.0.255 scope global virbr7"
+A_ALLCLAIM="$(for b in $(seq 88 127); do
+  printf '%d: virbr%d    inet 10.%d.0.7/24 brd 10.%d.0.255 scope global virbr%d\n' \
+    "$((b - 85))" "$((b - 87))" "$b" "$b" "$((b - 87))"
+done)"
+
+# Case 1 — the pin. Refusals identical in spirit to the pre-autopick gate.
+check "pick: pinned + gw-in-subnet REFUSES, names issue #80" \
+  1 "issue #80" pick 10.88.0.0/24 "$D_INBOX" "$A_GUEST"
+check "pick: pinned + foreign interface REFUSES, names it" \
+  1 "virbr7" pick 10.88.0.0/24 "$D_LAN" "$A_FOREIGN"
+check "pick: a pinned refusal still names BOX_SUBNET" \
+  1 "BOX_SUBNET" pick 10.88.0.0/24 "$D_INBOX" "$A_GUEST"
+check "pick: pinned against a disagreeing bridge REFUSES (never re-addresses)" \
+  1 "never re-addresses" pick 10.88.0.0/24 "$D_LAN" "$A_HOSTSTACK" "$B_89"
+check "pick: a garbage pin is refused by name" \
+  1 "not a sane subnet" pick banana "$D_LAN" "$A_HOSTSTACK"
+check "pick: a pin that clears the gate is used verbatim" \
+  0 "10.89.0.0/24" pickout 10.89.0.0/24 "$D_INBOX" "$A_GUEST"
+check "pick: ...silently — a pin is the operator talking, not us" \
+  0 "" pickquiet 10.89.0.0/24 "$D_INBOX" "$A_GUEST"
+
+# Case 2 — no pin, a bridge: converge to ITS subnet. No refusal, no scan —
+# even when the default is claimed (THIS machine: nested stack, uplink on
+# 10.88, bridge remapped to 10.89 — the #80 workaround host, bare re-run).
+check "pick: bridge present converges to the bridge's own subnet" \
+  0 "10.89.0.0/24" pickout "" "$D_INBOX" "$A_GUEST
+$B_89" "$B_89"
+check "pick: ...announcing the convergence (an off-default bridge is worth a line)" \
+  0 "converging" pick "" "$D_INBOX" "$A_GUEST
+$B_89" "$B_89"
+check "pick: ...and the scan never ran (case 2 precedes case 4)" \
+  0 "" picknoscan "" "$D_INBOX" "$A_GUEST
+$B_89" "$B_89"
+check "pick: bridge on the DEFAULT subnet converges silently (plain re-run)" \
+  0 "" pickquiet "" "$D_LAN" "$A_HOSTSTACK" "$B_88"
+check "pick: ...to the default" \
+  0 "10.88.0.0/24" pickout "" "$D_LAN" "$A_HOSTSTACK" "$B_88"
+# The poisoned state (#80 verbatim: bridge AND uplink both on 10.88) must not
+# converge — rebuilding there re-arms the blackouts. Refuse, name the fix.
+check "pick: a bridge on a FOREIGN-claimed subnet refuses (the poisoned state)" \
+  1 "poisoned" pick "" "$D_INBOX" "$A_GUEST
+$B_88" "$B_88"
+check "pick: ...naming the bridge move as the fix" \
+  1 "ipv4.address" pick "" "$D_INBOX" "$A_GUEST
+$B_88" "$B_88"
+
+# Case 3 — no pin, no bridge, default free: the default, silently.
+check "pick: a free default host gets 10.88.0.0/24" \
+  0 "10.88.0.0/24" pickout "" "$D_LAN" ""
+check "pick: ...with no announcement" 0 "" pickquiet "" "$D_LAN" ""
+
+# Case 4 — no pin, no bridge, default claimed: the nested case. First free
+# candidate wins, the announcement names the claimant and the pin.
+check "pick: default claimed by the gateway auto-picks 10.89.0.0/24" \
+  0 "10.89.0.0/24" pickout "" "$D_INBOX" "$A_GUEST"
+check "pick: ...saying so loudly" \
+  0 "auto-picked 10.89.0.0/24" pick "" "$D_INBOX" "$A_GUEST"
+check "pick: ...naming WHY (the machine's own gateway = inside a box)" \
+  0 "DEFAULT GATEWAY" pick "" "$D_INBOX" "$A_GUEST"
+check "pick: ...and how to pin it for scripts" \
+  0 "BOX_SUBNET=10.89.0.0/24" pick "" "$D_INBOX" "$A_GUEST"
+check "pick: default AND 10.89 claimed skips to 10.90.0.0/24" \
+  0 "10.90.0.0/24" pickout "" "$D_INBOX" "$A_TWOCLAIM"
+check "pick: every candidate claimed → the old refusal" \
+  1 "refusing to build boxnet" pick "" "$D_LAN" "$A_ALLCLAIM"
+check "pick: ...naming the end of the scan range" \
+  1 "10.127.0.0/24" pick "" "$D_LAN" "$A_ALLCLAIM"
+check "pick: ...and BOX_SUBNET as the way out" \
+  1 "BOX_SUBNET" pick "" "$D_LAN" "$A_ALLCLAIM"
+rm -f "$PICKFN"
+
 # --- the whole script, driven: refuse-before-mutation, converge, plumb-through
 SETUPSHIM="$(mktemp -d)"
 cat > "$SETUPSHIM/incus" <<'SHIM'
@@ -712,19 +807,21 @@ runsetup() { # runsetup [VAR=val ...] — the real setup-host, under shims
 }
 
 W80="$(mktemp -d)"
-# Refusal 1: the default gateway sits inside the target — the inside of a box.
-check "setup-host: gw-in-subnet REFUSES and names issue #80" 1 "issue #80" \
-  runsetup FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST" \
+# Refusal 1: an EXPLICIT pin on the subnet the default gateway sits inside —
+# the inside of a box, and the operator said 10.88 out loud. A pin is never
+# silently overridden, so this refuses exactly as it did pre-autopick.
+check "setup-host: a pinned gw-claimed subnet REFUSES and names issue #80" 1 "issue #80" \
+  runsetup BOX_SUBNET=10.88.0.0/24 FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST" \
            FAKE_INCUS_LOG="$W80/g1.log" FAKE_SUDO_LOG="$W80/s1.log"
 check "setup-host: ...naming BOX_SUBNET as the way out" 1 "BOX_SUBNET" \
-  runsetup FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST"
+  runsetup BOX_SUBNET=10.88.0.0/24 FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST"
 check "setup-host: the refusal made NO incus call (refuse precedes mutation)" 1 "" \
   test -e "$W80/g1.log"
 check "setup-host: the refusal made NO sudo call either" 1 "" \
   test -e "$W80/s1.log"
-# Refusal 2: a foreign interface owns an address inside the target.
-check "setup-host: a foreign interface in the subnet REFUSES" 1 "virbr7" \
-  runsetup FAKE_IP4_DEFAULT="$D_LAN" FAKE_IP4_ADDRS="$A_FOREIGN"
+# Refusal 2: a pin on a subnet a foreign interface owns an address inside.
+check "setup-host: a pinned foreign-claimed subnet REFUSES" 1 "virbr7" \
+  runsetup BOX_SUBNET=10.88.0.0/24 FAKE_IP4_DEFAULT="$D_LAN" FAKE_IP4_ADDRS="$A_FOREIGN"
 # Refusal 3: garbage BOX_SUBNET dies at the gate.
 check "setup-host: a garbage BOX_SUBNET is refused by name" 1 "not a sane subnet" \
   runsetup BOX_SUBNET=banana
@@ -751,16 +848,25 @@ check "setup-host: ...the bridge derives from BOX_SUBNET" 0 "" \
   grep -qF 'network create boxnet ipv4.address=10.89.0.1/24' "$W80/g2.log"
 check "setup-host: ...and so does the ACL's gateway carve-out" 0 "" \
   grep -qF 'destination: 10.89.0.1/32' "$W80/g2.log"
-# ...which also proves the guard scans the TARGET subnet: the same tables that
-# refused the default (gw 10.88.0.1) pass once BOX_SUBNET moves off it — the
-# issue's workaround host, sanctioned.
+# The nested case with ZERO flags — #80's tables, no pin, no bridge: the
+# auto-pick must land the whole build on 10.89, announced, and every derived
+# value must follow the pick, not the default.
+check "setup-host: nested with no flags auto-picks and completes" 0 "Host ready" \
+  runsetup FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST" \
+           FAKE_INCUS_LOG="$W80/g3.log" FAKE_SUDO_LOG="$W80/s3.log"
+check "setup-host: ...announcing the auto-pick" 0 "auto-picked 10.89.0.0/24" \
+  runsetup FAKE_IP4_DEFAULT="$D_INBOX" FAKE_IP4_ADDRS="$A_GUEST"
+check "setup-host: ...the bridge follows the pick" 0 "" \
+  grep -qF 'network create boxnet ipv4.address=10.89.0.1/24' "$W80/g3.log"
+check "setup-host: ...the ACL carve-out follows the pick" 0 "" \
+  grep -qF 'destination: 10.89.0.1/32' "$W80/g3.log"
 rm -rf "$W80" "$SETUPSHIM"
 
-# The guard must be the FIRST effective act — before the incus install, the
+# The decision must be the FIRST effective act — before the incus install, the
 # usermod, every apt call. Line order, fail-closed on either grep missing.
 # shellcheck disable=SC2016  # the $-strings are literals in the target file
-check "setup-host: the subnet guard precedes the first mutation" 0 "" bash -c '
-  guard="$(grep -n "subnet_claimant \"\$BOX_SUBNET\"" "'"$ROOT"'/host/setup-host.sh" | head -1 | cut -d: -f1)"
+check "setup-host: the subnet decision precedes the first mutation" 0 "" bash -c '
+  guard="$(grep -n "^BOX_SUBNET=\"\$(choose_subnet " "'"$ROOT"'/host/setup-host.sh" | head -1 | cut -d: -f1)"
   mut="$(grep -n "^if ! command -v incus" "'"$ROOT"'/host/setup-host.sh" | head -1 | cut -d: -f1)"
   [ -n "$guard" ] && [ -n "$mut" ] && [ "$guard" -lt "$mut" ]'
 # box-firewall follows the bridge, wherever BOX_SUBNET put it.

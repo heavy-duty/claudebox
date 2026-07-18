@@ -502,16 +502,21 @@ install.sh runs it for you, so this is for re-applying by hand.
 One run is enough. If it has to add you to the incus-admin group it re-runs
 itself under that group — no re-login, no second invocation.
 
-The stack's subnet is 10.88.0.0/24 by default; BOX_SUBNET picks another /24
-(the bridge, the gateway carve-out and the firewall all derive from it). It
-REFUSES, before touching anything, where the target subnet is already claimed
-— most tellingly when this machine's own default gateway sits inside it,
-i.e. when you are running setup-host INSIDE a box: a nested stack on the
-guest's own uplink subnet captures its gateway address and blackholes its
-egress, intermittently (issue #80). The sanctioned way to nest:
+The stack's subnet: 10.88.0.0/24 when free; with an existing boxnet it
+converges on the bridge's own subnet; and when the default is claimed by
+something else — most tellingly this machine's own default gateway, i.e.
+setup-host running INSIDE a box — it auto-picks the first free /24 from
+10.89.0.0/24 through 10.127.0.0/24 and says so. A nested stack on the
+guest's own uplink subnet would capture its gateway address and blackhole
+its egress, intermittently (issue #80); the auto-pick is why a drill or
+rehearsal inside a box now works with zero flags. BOX_SUBNET pins the
+subnet explicitly (the bridge, the gateway carve-out and the firewall all
+derive from it) — a pin is never overridden: setup-host REFUSES, before
+touching anything, when the pinned subnet is claimed by a foreigner or
+disagrees with an existing bridge.
 
-  box setup-host
-  BOX_SUBNET=10.89.0.0/24 box setup-host   # nested, or a conflicted host
+  box setup-host                           # picks/converges by itself
+  BOX_SUBNET=10.90.0.0/24 box setup-host   # scripted hosts: pin it
 
 Multi-user hosts: setup-host builds the stack once, for everyone. An admin
 then hands individual users the restricted tier with 'box grant <user>' —
