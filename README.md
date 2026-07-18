@@ -129,19 +129,23 @@ re-apply at boot via `box-firewall.service` — no post-reboot ritual. If
 the host lacks `dnsmasq-base` (Debian cloud images skip Recommends):
 `sudo apt-get install -y dnsmasq-base`.
 
-The stack's subnet is `10.88.0.0/24` by default; `BOX_SUBNET` picks another
-`/24` (`BOX_SUBNET=10.89.0.0/24 box setup-host` — the bridge address, the
-ACL's gateway carve-out and the firewall all derive from it). setup-host
-**refuses to build on a subnet something already claims** — most tellingly
-when this machine's own default gateway sits inside it, which means it is
-being run *inside a box*: a nested `boxnet` on the guest's own uplink subnet
-captures its gateway address and blackholes the guest's egress in
-intermittent, maddening-to-attribute blackouts
-([#80](https://github.com/heavy-duty/box/issues/80)). `BOX_SUBNET` is the
-sanctioned way out for a nested or otherwise-conflicted install, and
-`box doctor` recognizes the poisoned state (a gateway held as a local
-address, duplicate uplink routes) on the machine it runs on and inside every
-box it probes.
+The stack's subnet is `10.88.0.0/24` when free. setup-host **never builds on
+a subnet something else already claims** — most tellingly when this machine's
+own default gateway sits inside it, which means it is being run *inside a
+box*: a nested `boxnet` on the guest's own uplink subnet captures its gateway
+address and blackholes the guest's egress in intermittent,
+maddening-to-attribute blackouts
+([#80](https://github.com/heavy-duty/box/issues/80)). Instead of refusing, a
+bare `box setup-host` decides for itself: an existing `boxnet` bridge is
+converged on as-is (the bridge is the pin — it is never re-addressed), and a
+claimed default triggers an auto-pick of the first free `/24` from
+`10.89.0.0/24` through `10.127.0.0/24`, announced loudly — so drills and
+rehearsals *inside a box* work with zero flags. `BOX_SUBNET=<a.b.c.0/24>`
+pins the subnet explicitly for scripted hosts (the bridge address, the ACL's
+gateway carve-out and the firewall all derive from it); a pin is honored or
+refused, never silently overridden. `box doctor` recognizes the poisoned
+state (a gateway held as a local address, duplicate uplink routes) on the
+machine it runs on and inside every box it probes.
 
 A host still carrying the pre-0.4.0 stack: `box migrate-host --all-boxes`
 re-homes each legacy box onto `boxnet` (authed state preserved), and
