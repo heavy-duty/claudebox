@@ -5,8 +5,16 @@
 # Docker's DOCKER-USER rules are runtime-only and need re-applying).
 set -euo pipefail
 
-GW=10.88.0.1
 NET=boxnet
+# The gateway is read off the live bridge, not hardcoded: the subnet is an
+# input now (BOX_SUBNET, setup-host.sh — #80), and a bridge moved off a
+# colliding subnet must keep its firewall. setup-host runs us after the
+# bridge exists, so the live read is the truth at install time; UFW rules
+# persist across boots on their own, so the default only papers over the
+# no-bridge-yet window at boot on a default-subnet host.
+# ('|| true': under pipefail an absent bridge would kill the script here.)
+GW="$(ip -4 -o addr show dev "$NET" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
+[ -n "$GW" ] || GW=10.88.0.1
 
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
   if ! ufw status | grep "on $NET" | grep -q "DENY"; then

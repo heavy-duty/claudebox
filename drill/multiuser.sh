@@ -105,6 +105,11 @@ probe_up() { # probe_up <user> <box> <url>
   echo "$r"
 }
 
+# The hardened network's gateway and prefix, read off the network — never
+# hardcoded, because BOX_SUBNET moves the whole subnet now (#80).
+boxnet_gw()  { incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1; }
+boxnet_pfx() { local gw; gw="$(boxnet_gw)"; printf '%s.' "${gw%.*}"; }
+
 cleanup() {
   [ "$KEEP" = 1 ] && { echo "(--keep: users and boxes left for inspection)"; return; }
   echo
@@ -194,8 +199,8 @@ fi
 rm -f "$mintlog"
 as_u "$U1" box list 2>/dev/null | grep -q '^mine ' && ok "(b) box list shows mine" || no "(b) box list does not show mine"
 as_u "$U1" box exec mine -- true >/dev/null 2>&1 && ok "(b) box exec mine -- true" || no "(b) box exec failed"
-as_u "$U1" box info mine 2>/dev/null | grep -q '10\.88\.' \
-  && ok "(g) box info shows a boxnet (10.88.x) address — placed on the hardened network" \
+as_u "$U1" box info mine 2>/dev/null | grep -qF "$(boxnet_pfx)" \
+  && ok "(g) box info shows a boxnet ($(boxnet_pfx)x) address — placed on the hardened network" \
   || no "(g) mine has no boxnet address in box info"
 as_u "$U1" box snapshot mine s1 >/dev/null 2>&1 && ok "(b) box snapshot mine s1" || no "(b) snapshot refused"
 as_u "$U1" box restore mine s1 >/dev/null 2>&1 && ok "(b) box restore mine s1 (the incus 6 'snapshot restore' spelling)" || no "(b) restore failed"
@@ -224,14 +229,14 @@ phase "g. the isolation contract, measured from INSIDE the boxes"
 ip1="$(incus --project "$p1" list mine --format csv --columns 4 2>/dev/null | tr -d '"' | sed 's/ (.*//' | head -n1)"
 ip2="$(incus --project "$p2" list mine --format csv --columns 4 2>/dev/null | tr -d '"' | sed 's/ (.*//' | head -n1)"
 inf "$U1's mine: ${ip1:-<no ip>}   $U2's mine: ${ip2:-<no ip>}"
-case "$ip1" in 10.88.*) ok "(g) $U1's box holds a boxnet lease" ;; *) no "(g) $U1's box is NOT on boxnet: '$ip1'" ;; esac
+case "$ip1" in "$(boxnet_pfx)"*) ok "(g) $U1's box holds a boxnet lease" ;; *) no "(g) $U1's box is NOT on boxnet: '$ip1'" ;; esac
 
 r="$(probe_up "$U1" mine https://1.1.1.1)"
 [ "$r" = reachable ] && ok "(g) egress to the public internet works (curl 1.1.1.1: $r)" || no "(g) public egress broken: $r"
 as_u "$U1" timeout -k 5 20 incus exec mine -- getent hosts deb.debian.org >/dev/null 2>&1 \
   && ok "(g) public DNS resolves (via the pinned resolver)" || no "(g) DNS broken inside the box"
 
-r="$(probe_from "$U1" mine "http://10.88.0.1:22")"
+r="$(probe_from "$U1" mine "http://$(boxnet_gw):22")"
 [ "$r" = dropped ] && ok "(g) box → host is dropped (gateway :22: $r)" || no "(g) box can reach the HOST: $r"
 r="$(probe_from "$U1" mine "http://192.168.0.1")"
 [ "$r" = dropped ] && ok "(g) box → RFC1918 is dropped ($r)" || no "(g) box reaches private space: $r"

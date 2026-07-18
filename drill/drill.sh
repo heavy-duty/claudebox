@@ -94,14 +94,17 @@ in_box() {
 #   · and the interface is NOT called eth0. The PROFILE names the device eth0,
 #     but inside a VM guest predictable naming renames it enp5s0. Six runs of
 #     A3 "not probed" were this, not the network.
-# So: read it from inside the box, and select by SUBNET (10.88.x, what boxnet
-# hands out) rather than by interface name — docker0 (172.17.x) is the decoy,
-# and the NIC's name is the guest's business, not ours.
+# So: read it from inside the box, and select by SUBNET (what boxnet hands
+# out — read off the network, never hardcoded: BOX_SUBNET moves it, #80)
+# rather than by interface name — docker0 (172.17.x) is the decoy, and the
+# NIC's name is the guest's business, not ours.
+boxnet_gw() { incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1; }
 boxnet_ip() {
-  local b="$1" ip _i
+  local b="$1" ip _i pfx
+  pfx="$(boxnet_gw)"; pfx="${pfx%.*}."
   for _i in $(seq 1 15); do
     ip="$(in_box "$b" ip -4 -o addr show scope global \
-          | awk '{ for (i = 1; i < NF; i++) if ($i == "inet" && $(i+1) ~ /^10\.88\./) { split($(i+1), a, "/"); print a[1]; exit } }')"
+          | awk -v p="$pfx" '{ for (i = 1; i < NF; i++) if ($i == "inet" && index($(i+1), p) == 1) { split($(i+1), a, "/"); print a[1]; exit } }')"
     [ -n "$ip" ] && { printf '%s\n' "$ip"; return 0; }
     sleep 2
   done
@@ -693,10 +696,11 @@ fi
 # nothing serves and read refused-vs-dropped — refused would mean the box's
 # packet reached the host's stack, which is the thing the firewall must prevent.
 # (No background listener: one less process to leak, one less way to wedge.)
-hv="$(box_probe archive http://10.88.0.1:8099)"
+gw="$(boxnet_gw)"
+hv="$(box_probe archive "http://$gw:8099")"
 case "$hv" in
   reachable|refused)
-    no "THE BOX'S PACKETS REACH THE HOST on 10.88.0.1:8099 [$hv] — the firewall rules are not holding"
+    no "THE BOX'S PACKETS REACH THE HOST on $gw:8099 [$hv] — the firewall rules are not holding"
     aud "A2 box→host: FAIL — $hv (the packet reached the host's stack)" ;;
   dropped)
     ok "box → host is blocked (no path to the machine's sockets)"
@@ -747,7 +751,7 @@ elif [ -n "$PEER_IP" ]; then
   fi
 else
   no "could not read peer's boxnet address — the sibling probe never ran"
-  aud "A3 sibling: NOT PROBED (no 10.88.x address on peer)"
+  aud "A3 sibling: NOT PROBED (no boxnet address on peer)"
 fi
 
 # C5 — DNS enumeration (#15 A4). Now a CONTRACT, not an observation: setup-host
@@ -936,7 +940,7 @@ else
       || no "migrate: legacy box is NOT on box-net"
     lip="$(boxnet_ip legacybox)"
     [ -n "$lip" ] && ok "migrate: legacy box got a boxnet address ($lip) — network move landed" \
-                  || no "migrate: legacy box has no 10.88 address — the move did not take"
+                  || no "migrate: legacy box has no boxnet address — the move did not take"
     in_box legacybox getent hosts deb.debian.org >/dev/null 2>&1 \
       && ok "migrate: re-homed box resolves + reaches the internet on its new leg" \
       || no "migrate: re-homed box cannot resolve on boxnet"
