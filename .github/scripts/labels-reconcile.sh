@@ -10,13 +10,15 @@ set -euo pipefail
 # own mark every tick.
 #
 # The verdict contract (CONTRIBUTING.md): reviews end in approve or
-# request-changes. Reality check (#85 round 1): at least one live bot posts
-# its agreement as a COMMENTED review and can never formally approve, which
-# would park every fully-agreed PR in state:addressing forever. So COMMENTED
-# reviews whose body carries a durable agreement signal count as approval —
-# the workaround the state machine owes the fleet until every bot speaks the
-# formal contract. Any verdict that counts toward needs-human must be bound
-# to the CURRENT head SHA: GitHub keeps approvals alive across pushes, and a
+# request-changes. Some live bots are comment-only and post agreement as a
+# COMMENTED review — a non-verdict this machine refuses to guess about (body
+# parsing is a heuristic, and a wrong guess promotes an unapproved PR). The
+# judgment call belongs to the PR AUTHOR, who reads the round and escalates
+# by requesting the human's review — an explicit request is a fact, and it is
+# the one this machine trusts (see decide_state's top precedence). The
+# machine auto-requests the human only in the no-judgment-needed case: three
+# formal head-current approvals. Any approval that counts must be bound to
+# the CURRENT head SHA: GitHub keeps approvals alive across pushes, and a
 # stale approval must never promote unreviewed code to the human.
 #
 # DRY_RUN=1 narrates every mutation instead of performing it (how this script
@@ -48,22 +50,14 @@ run() { # every mutation goes through here — DRY_RUN=1 logs instead of doing
 
 requested() { grep -qxF "$1" <<<"$REQUESTED"; }
 
-agreement_signal() { # $1 = review body → 0 when it carries a durable agreement
-  # the signals the live bots actually emit: grok "**Verdict: Approve**",
-  # codex "Verdict: I agree with everything", claude "✅ … I agree with
-  # everything". Conservative on purpose: "I agree with most" is NOT a match.
-  grep -qiE 'verdict:? ?\**approve|i agree with everything|^✅' <<<"$1"
-}
-
 bot_verdict() { # $1 = login → MISSING | BLOCK | APPROVE | STALE | FEEDBACK
-  local review state commit body
+  local review state commit
   review="$(jq -c --arg u "$1" \
     '[.[] | select(.user.login == $u)] | sort_by(.submitted_at) | last // empty' \
     <<<"$REVIEWS_JSON")"
   if [ -z "$review" ]; then echo MISSING; return; fi
   state="$(jq -r '.state' <<<"$review")"
   commit="$(jq -r '.commit_id' <<<"$review")"
-  body="$(jq -r '.body // ""' <<<"$review")"
   case "$state" in
     CHANGES_REQUESTED)
       # blocks at ANY head — GitHub's own semantic: only a newer review
@@ -71,13 +65,11 @@ bot_verdict() { # $1 = login → MISSING | BLOCK | APPROVE | STALE | FEEDBACK
       echo BLOCK ;;
     APPROVED)
       if [ "$commit" = "$HEAD_SHA" ]; then echo APPROVE; else echo STALE; fi ;;
-    COMMENTED)
-      if agreement_signal "$body"; then
-        if [ "$commit" = "$HEAD_SHA" ]; then echo APPROVE; else echo STALE; fi
-      else
-        echo FEEDBACK
-      fi ;;
-    *) echo FEEDBACK ;;
+    *)
+      # COMMENTED and anything else: a non-verdict. The machine does not
+      # read bodies — if the comment is really an agreement, the AUTHOR
+      # says so by requesting the human's review.
+      echo FEEDBACK ;;
   esac
 }
 
@@ -143,9 +135,11 @@ reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
 
   desired="$(decide_state)"
 
-  # encode the runbook's last step: the round passed → the human is asked,
-  # once. The guard (never requested, never reviewed) makes it idempotent —
-  # and the shared concurrency group in labels.yml makes it race-free.
+  # encode the runbook's last step for the no-judgment case: three formal
+  # head-current approvals → the human is asked, once. The guard (never
+  # requested, never reviewed) makes it idempotent — and the shared
+  # concurrency group in labels.yml makes it race-free. With a comment-only
+  # bot on the panel this path stays cold and the AUTHOR requests the human.
   if [ "$desired" = state:needs-human ] && ! requested "$HUMAN" \
     && [ -z "$(jq -r --arg u "$HUMAN" '[.[] | select(.user.login == $u)] | last | .state // empty' <<<"$REVIEWS_JSON")" ]; then
     run gh api "repos/$REPO/pulls/$n/requested_reviewers" -f "reviewers[]=$HUMAN" --silent

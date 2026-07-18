@@ -17,7 +17,7 @@ single reply, and a human takes the final review.
 | `state:building` | `#FBCA04` | the coding agent, still building | PR opened as draft | marked ready + bot reviews requested |
 | `state:bots-reviewing` | `#1D76DB` | the reviewer bots to finish the round | ready with reviews requested, or fixes pushed and reviews re-requested | all three bots have reviewed the round |
 | `state:addressing` | `#D93F0B` | the coding agent to reply and push fixes | all bots reviewed the round, not all approved | the single round-reply is posted and fixes pushed |
-| `state:needs-human` | `#8250DF` | the human reviewer | all three bots approve | merged — or changes requested, which cycles back to `state:addressing` |
+| `state:needs-human` | `#8250DF` | the human reviewer | the human review is requested — by the author when the round passes, or automatically on three formal head-current approvals | merged — or changes requested, which cycles back to `state:addressing` |
 
 `bots-reviewing` and `addressing` are deliberately distinct: staleness in the
 first means *poke the bots*, staleness in the second means *the agent dropped

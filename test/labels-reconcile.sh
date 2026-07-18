@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fixture tests for the labels-reconcile state machine — the transitions #85's
-# review demanded proof of: comment-only agreement closes the gate, a stale
-# approval does not promote unreviewed code, a comment without a verdict parks
-# the PR on the agent, and an explicit human request outranks everything.
+# Fixture tests for the labels-reconcile state machine: a comment is a
+# non-verdict whatever its body says (the AUTHOR escalates by requesting the
+# human), a stale approval does not promote unreviewed code, and an explicit
+# human request outranks everything.
 # Dependency-free beyond jq; no network, no daemon — pure decide_state.
 
 cd "$(dirname "$0")/.."
@@ -49,12 +49,23 @@ REQUESTED="" REVIEWS_JSON="$(reviews \
   "$(rev "$BOT2" APPROVED head1 "" t2)")"
 expect "missing bot review means bots-reviewing" state:bots-reviewing "$(decide_state)"
 
-# -- comment-only agreement closes the gate (the #85 blocker) -----------------
+# -- a comment is a non-verdict, agreement body or not: the author escalates --
 REVIEWS_JSON="$(reviews \
   "$(rev "$BOT1" COMMENTED head1 "✅ **Reviewed — I agree with everything.**" t1)" \
-  "$(rev "$BOT2" APPROVED  head1 "Verdict: I agree with everything and have no additional feedback." t2)" \
-  "$(rev "$BOT3" COMMENTED head1 "**Verdict: Approve** — I agree with this as-is." t3)")"
-expect "comment-only agreement counts as approval" state:needs-human "$(decide_state)"
+  "$(rev "$BOT2" APPROVED  head1 "" t2)" \
+  "$(rev "$BOT3" APPROVED  head1 "" t3)")"
+expect "comment-only agreement still parks on the author" state:addressing "$(decide_state)"
+# ...and the author's escalation — requesting the human — flips it
+REQUESTED="$HUMAN"
+expect "author escalation flips to needs-human" state:needs-human "$(decide_state)"
+REQUESTED=""
+
+# -- three formal approvals need no author judgment ---------------------------
+REVIEWS_JSON="$(reviews \
+  "$(rev "$BOT1" APPROVED head1 "" t1)" \
+  "$(rev "$BOT2" APPROVED head1 "" t2)" \
+  "$(rev "$BOT3" APPROVED head1 "" t3)")"
+expect "three formal approvals reach needs-human" state:needs-human "$(decide_state)"
 
 # -- a comment WITHOUT a verdict parks the PR on the agent --------------------
 REVIEWS_JSON="$(reviews \
@@ -87,7 +98,7 @@ REVIEWS_JSON="$(reviews \
   "$(rev "$BOT1" CHANGES_REQUESTED head1 "blockers" t1)" \
   "$(rev "$BOT1" APPROVED head1 "" t2)" \
   "$(rev "$BOT2" APPROVED head1 "" t3)" \
-  "$(rev "$BOT3" COMMENTED head1 "Verdict: Approve" t4)")"
+  "$(rev "$BOT3" APPROVED head1 "" t4)")"
 expect "later approval supersedes earlier block" state:needs-human "$(decide_state)"
 
 # -- an explicit human request outranks the bot rounds ------------------------
@@ -107,18 +118,6 @@ expect "human block with bots approving is addressing" state:addressing "$(decid
 REQUESTED="$HUMAN"
 expect "re-requested human is needs-human again" state:needs-human "$(decide_state)"
 REQUESTED=""
-
-# -- agreement_signal is conservative -----------------------------------------
-if agreement_signal "I agree with most; feedback below"; then
-  fail=$((fail + 1)); echo "FAIL: 'agree with most' must NOT be agreement"
-else
-  pass=$((pass + 1))
-fi
-if agreement_signal "**Verdict: Request changes** — blockers listed below."; then
-  fail=$((fail + 1)); echo "FAIL: 'Verdict: Request changes' must NOT be agreement"
-else
-  pass=$((pass + 1))
-fi
 
 printf 'labels-reconcile tests: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

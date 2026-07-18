@@ -28,13 +28,16 @@ labels tell you where everything is without opening anything.
    them at their discretion; anything blocking — including a question that
    gates the verdict — is **request changes**, saying what unblocks it. The
    reconciler treats a comment-only review as not-approved, so commenting
-   without a verdict only stalls the PR. (Transitional workaround: until
-   every bot speaks the formal contract, the reconciler counts a COMMENTED
-   review whose body carries a durable agreement signal — "Verdict: Approve",
-   "I agree with everything", a leading ✅ — as an approval, bound to the
-   current head SHA.)
-6. **When all three approve**, the final review goes to the maintainer — the
-   labels workflow requests it automatically.
+   without a verdict only stalls the PR. The machine never reads review
+   bodies: when a comment-only reviewer's line is really an agreement, that
+   judgment belongs to the **author** — escalate by requesting the
+   maintainer's review (step 6), and the reconciler flips the label on that
+   request, because an explicit request is a fact it can trust.
+6. **When the round passes, the author hands the PR to the maintainer** by
+   requesting their review — that request is what flips `state:needs-human`.
+   With three formal head-current approvals the labels workflow requests it
+   automatically; when part of the panel is comment-only, reading their
+   agreement is the author's judgment, so the author makes the request.
 7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
    mirror what CI runs; the multi-user rehearsal runs in CI on a real Incus.
 
