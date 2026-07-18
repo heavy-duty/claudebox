@@ -40,20 +40,57 @@ jobs:
         run: |
           sudo apt-get update
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y incus
-      - name: global install, from this checkout (the #71 layout)
-        # Not install.sh: it installs a RELEASE (REPO@REF), and CI must prove
-        # the code under review. Same tree, same layout, same a+rX.
+      - name: global install, via install.sh itself (the #71 layout, versioned)
+        # install.sh, not a cp -r mimic: BOX_INSTALL_SOURCE points it at this
+        # checkout, so CI proves the INSTALLER under review — the versioned
+        # layout, the current symlink, the PATH chain — not a hand-built
+        # imitation of it. Setup is run explicitly in the next step, so its
+        # output is its own CI section.
         run: |
-          sudo cp -r . /opt/box
-          sudo rm -rf /opt/box/.git
-          sudo chmod -R a+rX /opt/box
-          sudo ln -sf /opt/box/bin/box /usr/local/bin/box
+          sudo BOX_YES=1 BOX_SKIP_SETUP_HOST=1 BOX_INSTALL_SOURCE="$GITHUB_WORKSPACE" bash install.sh
+          # assert what landed: the layout, the chain, and that it answers
+          readlink -f /usr/local/bin/box | grep '^/opt/box/versions/'
+          /usr/local/bin/box --version
+          /usr/local/bin/box versions
       - name: setup-host
-        run: sudo bash /opt/box/host/setup-host.sh
+        run: sudo bash /opt/box/current/host/setup-host.sh
       - name: doctor — the baseline is provable before anything is judged
-        run: sudo BOX_TIER=admin bash /opt/box/drill/doctor.sh
+        run: sudo BOX_TIER=admin bash /opt/box/current/drill/doctor.sh
       - name: multi-user rehearsal (criteria a-l, container mode)
-        run: sudo BOX_MULTIUSER_REHEARSAL=1 bash /opt/box/drill/multiuser.sh --yes --container
+        run: sudo BOX_MULTIUSER_REHEARSAL=1 bash /opt/box/current/drill/multiuser.sh --yes --container
+      - name: uninstall drill — revoke clean, teardown, uninstall, ZERO residue
+        # The full-removal order, end to end on the real daemon: revoke a
+        # granted user (--purge asserts its own absence, incl. the incus-user
+        # state dir), tear the stack down, uninstall the tree — then assert
+        # NOTHING survived: no networks, profiles, ACLs, nft tables, systemd
+        # units, files or symlinks. The uninstall was flaky exactly because
+        # nobody measured this.
+        run: |
+          set -x
+          sudo useradd -m -s /bin/bash uninstdrill
+          sudo BOX_YES=1 /usr/local/bin/box grant uninstdrill
+          uid="$(id -u uninstdrill)"
+          sudo BOX_YES=1 /usr/local/bin/box revoke uninstdrill --purge
+          sudo test ! -e "/var/lib/incus/users/$uid"
+          ! sudo incus project show "user-$uid"
+          ! sudo incus config trust list --format csv | grep -q "incus-user-$uid"
+          sudo BOX_YES=1 /usr/local/bin/box teardown-host
+          sudo BOX_YES=1 /usr/local/bin/box uninstall --all
+          # zero residue: the daemon's state...
+          ! sudo incus network show boxnet
+          ! sudo incus profile show box-net
+          ! sudo incus network acl show box-isolate
+          # ...the firewall and its boot persistence...
+          ! sudo nft list table inet box
+          ! sudo nft list table bridge box
+          sudo test ! -e /etc/systemd/system/box-firewall.service
+          sudo test ! -e /usr/local/sbin/box-firewall
+          # ...and the install itself: files AND symlinks, both name generations
+          sudo test ! -e /opt/box
+          sudo test ! -e /usr/local/bin/box
+          sudo test ! -L /usr/local/bin/box
+          sudo test ! -e /usr/local/bin/claudebox
+          sudo test ! -L /usr/local/bin/claudebox
 
   # NOT run here: the full drill (drill/drill.sh). It rehearses the whole
   # surface — cold template mints, expose, migration — and wants a real host
