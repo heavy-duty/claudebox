@@ -23,6 +23,8 @@ jobs:
         run: bash test/cli.sh
       - name: labels state-machine tests
         run: bash test/labels-reconcile.sh
+      - name: release-flow tests
+        run: bash test/release.sh
 
   # The multi-user rehearsal, on a REAL incus — a GitHub runner is root on a
   # disposable VM, which is exactly the substrate the rehearsal needs. It runs

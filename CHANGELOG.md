@@ -7,6 +7,28 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **The installer defaults to the latest release, and releases publish
+  themselves** (#83) — `curl | bash` used to hand out whatever `main` was at
+  that second: the 0.6.0 release was a bookmark, not a package, and two
+  operators "on 0.6.0" could be running different trees. `install.sh` now
+  resolves the latest release tag by following GitHub's `releases/latest`
+  redirect (one HEAD request — no API, no token, no rate-limit pain) and
+  downloads that tag's tarball; a failed resolution refuses loudly, naming
+  `BOX_REF` as the way out — it never hangs and never silently falls back to
+  `main`. A set `BOX_REF` is tried as a tag first, then as a branch, so one
+  knob yields three channels: default = latest release, `BOX_REF=0.6.0` =
+  pinned, `BOX_REF=main` = dev. A new `release.yml` (on a bare `X.Y.Z` tag
+  push — the `0.6.0` tag set the no-`v` precedent) asserts the tag names the
+  tree's own `VERSION` (a mismatch fails loudly and creates nothing) and
+  publishes the GitHub release with that version's `CHANGELOG.md` section as
+  the body (`.github/scripts/release-notes.sh` — the curated prose, not the
+  generated PR list; no assets, the source tarball for the tag IS the
+  package). And `main`'s `VERSION` now carries `-dev` between releases
+  (this PR: `0.6.1-dev`): the versioned layout names install trees after
+  `VERSION`, so a `main` install without the bump would land in
+  `versions/0.6.0` and impersonate the released tree. `test/release.sh`
+  drives all of it offline — the extraction against fixtures and the real
+  changelog, the resolution and every channel against a shim curl.
 - **`setup-host` auto-picks a free subnet — nested box-in-box with zero
   flags** (#80, completing its fix #1: "refuse … or automatically select a
   non-colliding subnet"). A bare `box setup-host` now decides the subnet
