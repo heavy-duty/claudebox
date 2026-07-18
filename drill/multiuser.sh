@@ -294,7 +294,23 @@ phase "m. a raw attach to boxnet — the scoped guarantee, measured"
 # has no DHCP client, so its raw instance holds NO lease — and against a
 # dead NIC every negative probe below "passes" vacuously while the contract
 # goes unmeasured. Caught on this criterion's first run (MU-5).
-if as_u "$U1" incus launch images:debian/13/cloud esc2 --network boxnet >/dev/null 2>&1; then
+rawout="$(as_u "$U1" incus launch images:debian/13/cloud esc2 --network boxnet 2>&1)"; rawrc=$?
+if [ "$rawrc" -ne 0 ]; then
+  # Version fork, measured: 6.0.4 permits a restricted cert a raw --network
+  # reference to an allowed network; 6.0.0 refuses it at the permission
+  # layer. A refusal is not a broken probe — it is the STRONGEST of the
+  # three resolutions (prevention): on such a daemon the bypass this
+  # criterion measures cannot be expressed at all. Anything else (an image
+  # error, a name collision) is a broken probe and says so with its log.
+  if printf '%s' "$rawout" | grep -qiE 'permission|not allowed|restricted'; then
+    ok "(m) raw attach to boxnet is REFUSED outright by this incus — prevention, the strongest resolution"
+    inf "refusal: $(printf '%s\n' "$rawout" | grep -m1 -i 'error' || printf '%s\n' "$rawout" | tail -1)"
+    aud "m. this incus version refuses raw --network for restricted certs; where permitted (6.0.4, MU-5) the raw NIC keeps every network- and host-owned control — both worlds measured"
+  else
+    no "(m) raw attach failed for a reason that is neither refusal nor success — unmeasured:"
+    printf '%s\n' "$rawout" | tail -3 | sed 's/^/        /'
+  fi
+else
   ok "(m) raw attach to boxnet launches (expected: the network must be usable for the profile to work)"
   ip_raw=""
   for _ in $(seq 1 45); do
@@ -327,8 +343,6 @@ if as_u "$U1" incus launch images:debian/13/cloud esc2 --network boxnet >/dev/nu
   fi
   as_u "$U1" incus delete -f esc2 >/dev/null 2>&1
   aud "m. raw boxnet attach keeps ACL + nft drop + dns.mode (measured); loses only per-NIC port_isolation — the scoped guarantee in box-design.md"
-else
-  no "(m) raw attach to boxnet failed to launch — the scoped-guarantee measurement could not run"
 fi
 
 phase "e/f. the honest refusals — expose, setup-host, doctor"
@@ -414,9 +428,15 @@ box grant "$U3" >/dev/null 2>&1 \
 useradd -m -s /bin/bash "$U4" 2>/dev/null
 usermod -aG incus "$U4"
 as_u "$U4" incus project list >/dev/null 2>&1   # materialize their project
-uid4="$(id -u "$U4")"
-br4="incusbr-$uid4"; [ "${#br4}" -gt 15 ] && br4="user-$uid4"
-if as_u "$U4" incus launch images:debian/13 blocker --network "$br4" >/dev/null 2>&1; then
+# Stage the blocker with an INSTANCE-LOCAL NIC, the shape that actually
+# blocks narrowing (a profile-inherited NIC is detached by grant's own
+# eth0 removal — no conflict). A raw --network flag would do it on 6.0.4
+# but 6.0.0 refuses that spelling for restricted certs (see criterion m);
+# 'device override' lifts their own stock profile NIC into the instance —
+# their instance, their config, permitted on both — same resulting state.
+stage="$(as_u "$U4" incus launch images:debian/13 blocker 2>&1)"; stagerc=$?
+[ "$stagerc" -eq 0 ] && { stage="$(as_u "$U4" incus config device override blocker eth0 2>&1)"; stagerc=$?; }
+if [ "$stagerc" -eq 0 ]; then
   out="$(box grant "$U4" 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "still holding socket access"; then
     ok "(n) blocked narrowing fails LOUDLY, naming the retained access (rc=$rc)"
@@ -432,7 +452,8 @@ if as_u "$U4" incus launch images:debian/13 blocker --network "$br4" >/dev/null 
     && ok "(n) unblocked re-run converges" \
     || no "(n) re-run after unblocking failed"
 else
-  no "(n) could not stage the private-bridge blocker — the blocked-narrowing contract went unmeasured"
+  no "(n) could not stage the private-bridge blocker — the blocked-narrowing contract went unmeasured:"
+  printf '%s\n' "$stage" | tail -3 | sed 's/^/        /'
 fi
 aud "n. fail-closed injections: fresh-user backout verified; pre-existing member warned, not stripped; re-runs converge"
 
