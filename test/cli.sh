@@ -847,6 +847,184 @@ check "doctor: the egress-broken-DNS-fine fingerprint is named on both tiers" 0 
 check "doctor: the ACL carve-out is checked against the live gateway" 0 "" \
   grep -qF "does NOT match boxnet's gateway" "$ROOT/drill/doctor.sh"
 
+# ---------------------------------------------------------------------------
+# box-firewall's UFW converge and the fail-closed boot window (#86 review,
+# items 1–2). The whole script is DRIVEN under shims (the setup-host seam):
+# a fake ufw serves canned `ufw status` tables and logs every mutation, fake
+# nft/sysctl/iptables swallow the rest, and the shim ip answers the
+# live-bridge read. Stale gateway allows must converge to the live gateway,
+# a fresh UFW host must get exactly the rule set it always did, a no-UFW
+# host must keep its nft path, and the no-bridge-address boot window must
+# mutate NOTHING — the old GW=10.88.0.1 fallback built the carve-out for
+# the wrong gateway on every BOX_SUBNET host that hit it.
+# ---------------------------------------------------------------------------
+FWSHIM="$(mktemp -d)"; UFWSHIM="$(mktemp -d)"; WFW="$(mktemp -d)"
+cat > "$UFWSHIM/ufw" <<'SHIM'
+#!/usr/bin/env bash
+# Fake ufw: 'status' prints $FAKE_UFW_STATUS; every call is logged to
+# $FAKE_UFW_LOG. Mutations mutate nothing, of course.
+[ -n "${FAKE_UFW_LOG:-}" ] && printf 'ufw %s\n' "$*" >> "$FAKE_UFW_LOG"
+case "${1:-}" in status) printf '%s\n' "${FAKE_UFW_STATUS:-Status: inactive}" ;; esac
+exit 0
+SHIM
+cat > "$FWSHIM/nft" <<'SHIM'
+#!/usr/bin/env bash
+# Fake nft: logs to $FAKE_NFT_LOG. The bridge-table probe answers "absent"
+# so the creation path runs (and is logged) instead of being skipped.
+[ -n "${FAKE_NFT_LOG:-}" ] && printf 'nft %s\n' "$*" >> "$FAKE_NFT_LOG"
+case "$*" in "list table bridge box") exit 1 ;; esac
+exit 0
+SHIM
+cat > "$FWSHIM/sysctl" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+cat > "$FWSHIM/iptables" <<'SHIM'
+#!/usr/bin/env bash
+# Fake iptables: the DOCKER-USER probe answers "no such chain", so the
+# docker block is deterministically skipped whether or not this runner
+# happens to have docker.
+exit 1
+SHIM
+chmod +x "$UFWSHIM/ufw" "$FWSHIM/nft" "$FWSHIM/sysctl" "$FWSHIM/iptables"
+
+runfw() { # runfw <ufw|noufw> [VAR=val ...] — the real box-firewall, under shims
+  local mode="$1" p; shift
+  p="$FWSHIM:$SHIMDIR:$PATH"
+  [ "$mode" = ufw ] && p="$UFWSHIM:$p"
+  env PATH="$p" "$@" bash "$ROOT/host/box-firewall.sh"
+}
+
+# Canned `ufw status` tables, modeled on the real output shape.
+U_HDR='Status: active
+
+To                         Action      From
+--                         ------      ----
+22/tcp                     ALLOW       Anywhere'
+U_FRESH="$U_HDR"
+U_OLDGW="$U_HDR
+Anywhere on boxnet         DENY        Anywhere
+10.88.0.1 53/tcp on boxnet ALLOW       Anywhere
+10.88.0.1 53/udp on boxnet ALLOW       Anywhere
+67/udp on boxnet           ALLOW       Anywhere
+Anywhere on boxnet         ALLOW FWD   Anywhere"
+U_LIVEGW="$U_HDR
+Anywhere on boxnet         DENY        Anywhere
+10.89.0.1 53/tcp on boxnet ALLOW       Anywhere
+10.89.0.1 53/udp on boxnet ALLOW       Anywhere
+67/udp on boxnet           ALLOW       Anywhere
+Anywhere on boxnet         ALLOW FWD   Anywhere"
+BX88='5: boxnet    inet 10.88.0.1/24 scope global boxnet'
+BX89='5: boxnet    inet 10.89.0.1/24 scope global boxnet'
+
+# The remapped host (#80's escape hatch): bridge on 10.89, UFW still carrying
+# 10.88's carve-out — the stale allows go, the live gateway's land.
+check "box-firewall: a remapped bridge CONVERGES the UFW carve-out" 0 "" \
+  runfw ufw FAKE_IP4_BOXNET="$BX89" FAKE_UFW_STATUS="$U_OLDGW" FAKE_UFW_LOG="$WFW/remap.log"
+check "box-firewall: ...the stale tcp allow is deleted" 0 "" \
+  grep -qF 'ufw delete allow in on boxnet to 10.88.0.1 port 53 proto tcp' "$WFW/remap.log"
+check "box-firewall: ...and the stale udp allow" 0 "" \
+  grep -qF 'ufw delete allow in on boxnet to 10.88.0.1 port 53 proto udp' "$WFW/remap.log"
+check "box-firewall: ...the live gateway gains its tcp allow" 0 "" \
+  grep -qF 'ufw insert 1 allow in on boxnet to 10.89.0.1 port 53 proto tcp' "$WFW/remap.log"
+check "box-firewall: ...and its udp allow" 0 "" \
+  grep -qF 'ufw insert 1 allow in on boxnet to 10.89.0.1 port 53 proto udp' "$WFW/remap.log"
+check "box-firewall: ...the live gateway's rules are never deleted" 1 "" \
+  grep -qF 'delete allow in on boxnet to 10.89.0.1' "$WFW/remap.log"
+
+# The agreeing host: rules already match the live gateway — nothing deleted
+# (ufw itself skips the re-adds as existing rules).
+check "box-firewall: an agreeing UFW host deletes nothing" 0 "" \
+  runfw ufw FAKE_IP4_BOXNET="$BX89" FAKE_UFW_STATUS="$U_LIVEGW" FAKE_UFW_LOG="$WFW/agree.log"
+check "box-firewall: ...no delete was issued" 1 "" grep -qF ' delete ' "$WFW/agree.log"
+
+# The fresh host: no boxnet rules yet — exactly the five historical commands,
+# aimed at the live gateway, and nothing else (unchanged behavior).
+check "box-firewall: a fresh UFW host runs clean" 0 "" \
+  runfw ufw FAKE_IP4_BOXNET="$BX88" FAKE_UFW_STATUS="$U_FRESH" FAKE_UFW_LOG="$WFW/fresh.log"
+check "box-firewall: ...the deny lands" 0 "" \
+  grep -qF 'ufw insert 1 deny in on boxnet' "$WFW/fresh.log"
+check "box-firewall: ...the DNS allows aim at the live gateway" 0 "" \
+  grep -qF 'ufw insert 1 allow in on boxnet to 10.88.0.1 port 53 proto tcp' "$WFW/fresh.log"
+# shellcheck disable=SC2016  # $1 expands in the child shell, by design
+check "box-firewall: ...DHCP and the route allow land too" 0 "" bash -c '
+  grep -qF "ufw insert 1 allow in on boxnet to any port 67 proto udp" "$1" &&
+  grep -qF "ufw route allow in on boxnet" "$1"' _ "$WFW/fresh.log"
+# shellcheck disable=SC2016  # $1 expands in the child shell, by design
+check "box-firewall: ...exactly the five historical mutations, no more" 0 "" \
+  bash -c '[ "$(grep -vc "^ufw status" "$1")" -eq 5 ]' _ "$WFW/fresh.log"
+
+# The boot window (#86 review item 2): bridge not yet addressed → NO guessed
+# gateway, NO mutation at all — the persisted rules are left exactly as they
+# are, and the skip says so. (The old fallback built 10.88.0.1 rules on a
+# BOX_SUBNET host here — a latent DNS drop.)
+check "box-firewall: an unaddressed bridge FAILS CLOSED on a UFW host" 0 "left as-is" \
+  runfw ufw FAKE_IP4_BOXNET= FAKE_UFW_STATUS="$U_OLDGW" FAKE_UFW_LOG="$WFW/boot.log"
+# shellcheck disable=SC2016  # $1 expands in the child shell, by design
+check "box-firewall: ...not one ufw mutation was issued" 0 "" \
+  bash -c '[ "$(grep -vc "^ufw status" "$1")" -eq 0 ]' _ "$WFW/boot.log"
+check "box-firewall: the hardcoded gateway fallback is GONE (comments aside)" 1 "" \
+  grep -qE '^[^#]*GW=10' "$ROOT/host/box-firewall.sh"
+
+# The no-UFW host: untouched semantics — the nft input carve-out is
+# interface-scoped, so it needs no gateway and applies even in the boot
+# window where the UFW path now declines to guess.
+check "box-firewall: a no-UFW host keeps its nft path" 0 "" \
+  runfw noufw FAKE_IP4_BOXNET="$BX89" FAKE_NFT_LOG="$WFW/nft.log"
+check "box-firewall: ...the DNS/DHCP accept is interface-scoped" 0 "" \
+  grep -qF 'add rule inet box input iifname boxnet udp dport { 53, 67 } accept' "$WFW/nft.log"
+check "box-firewall: ...and the input drop lands" 0 "" \
+  grep -qF 'add rule inet box input iifname boxnet drop' "$WFW/nft.log"
+check "box-firewall: the nft path survives the boot window too" 0 "" \
+  runfw noufw FAKE_IP4_BOXNET= FAKE_NFT_LOG="$WFW/nftboot.log"
+check "box-firewall: ...with the same interface-scoped carve-out" 0 "" \
+  grep -qF 'add rule inet box input iifname boxnet udp dport { 53, 67 } accept' "$WFW/nftboot.log"
+
+# ---------------------------------------------------------------------------
+# The doctor's UFW blind spot (#86 review item 1, second half): the ACL
+# check alone gave a remapped UFW host a clean bill while the stale UFW
+# allow dropped box DNS. ufw_dns_findings is pure text → findings, the
+# gw_squat_signature seam: extracted and driven against canned tables.
+# ---------------------------------------------------------------------------
+UFWFN="$(mktemp)"
+awk '/^ufw_dns_findings\(\) \{/,/^\}/' "$ROOT/drill/doctor.sh" > "$UFWFN"
+check "ufw_dns_findings: extracted from doctor.sh (guards the awk)" 0 "DNS allow" cat "$UFWFN"
+check "ufw_dns_findings: the extracted function is valid bash" 0 "" bash -n "$UFWFN"
+ufwsig()   { bash -c ". '$UFWFN'; ufw_dns_findings \"\$1\" \"\$2\" \"\$3\"" _ "$1" "$2" "$3"; }
+noufwsig() { [ -z "$(ufwsig "$1" "$2" "$3")" ]; }
+
+check "ufw findings: agreement is SILENT" 0 "" noufwsig "$U_LIVEGW" boxnet 10.89.0.1
+check "ufw findings: a stale carve-out is flagged as NOT the live gateway" \
+  0 "NOT boxnet's live gateway" ufwsig "$U_OLDGW" boxnet 10.89.0.1
+check "ufw findings: ...naming the address it points at" \
+  0 "10.88.0.1" ufwsig "$U_OLDGW" boxnet 10.89.0.1
+# Our deny with no DNS allow at all is a drop — say so.
+U_DENYONLY="$U_HDR
+Anywhere on boxnet         DENY        Anywhere"
+check "ufw findings: a deny with NO DNS allow is a drop" \
+  0 "NO DNS allow" ufwsig "$U_DENYONLY" boxnet 10.89.0.1
+# A UFW host box-firewall never touched has nothing to judge — clean.
+check "ufw findings: an untouched UFW host is CLEAN" 0 "" noufwsig "$U_FRESH" boxnet 10.89.0.1
+# A stale allow left BESIDE the live one still gets named (residue, not a drop).
+U_BOTH="$U_LIVEGW
+10.88.0.1 53/tcp on boxnet ALLOW       Anywhere"
+check "ufw findings: a stale allow beside the live one is named" \
+  0 "stale UFW DNS allow" ufwsig "$U_BOTH" boxnet 10.89.0.1
+# Rules on OTHER interfaces are not boxnet's problem.
+U_OTHERIF="$U_LIVEGW
+10.88.0.1 53/tcp on eth0   ALLOW       Anywhere"
+check "ufw findings: another interface's DNS allow is ignored" 0 "" \
+  noufwsig "$U_OTHERIF" boxnet 10.89.0.1
+
+# The wiring: doctor judges UFW's own table where UFW is active, and the fix
+# points at the converging box-firewall.
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "doctor: reads UFW's table through ufw_dns_findings" 0 "" \
+  grep -qF 'ufw_dns_findings "$ufw_out"' "$ROOT/drill/doctor.sh"
+check "doctor: the UFW fix names the converge" 0 "" \
+  grep -qF 'converges the UFW allows' "$ROOT/drill/doctor.sh"
+rm -f "$UFWFN"; rm -rf "$FWSHIM" "$UFWSHIM" "$WFW"
+
 # The docs keep the new promises.
 check "help setup-host names BOX_SUBNET" 0 "BOX_SUBNET" "$BOX" help setup-host
 check "help setup-host names the refusal" 0 "REFUSES" "$BOX" help setup-host
