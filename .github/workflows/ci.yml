@@ -22,11 +22,41 @@ jobs:
       - name: cli tests
         run: bash test/cli.sh
 
-  # NOT run here: the drill (drill/drill.sh) and the multi-user rehearsal
-  # (drill/multiuser.sh). Both stand up a real Incus, rearrange the host's
-  # network/firewall, and — for the rehearsal — create throwaway system users.
-  # None of that belongs in CI: it needs a disposable host and root, and it is
-  # the answer to #72 Task 0's substrate question, which a container runner
-  # cannot answer. CI stays static + dependency-free (shellcheck + cli.sh),
-  # exactly as this repo's design demands ("isolation claims are tested on a
-  # real host, never reasoned about" — docs/box-design.md).
+  # The multi-user rehearsal, on a REAL incus — a GitHub runner is root on a
+  # disposable VM, which is exactly the substrate the rehearsal needs. It runs
+  # in container mode: the tier's mechanics (grant, confinement, the network
+  # contract, revoke) are identical for containers and VMs — the nft bridge
+  # drop, the ACL, dns.mode=none and port_isolation all bind to boxnet, not
+  # to the instance type. What container mode canNOT validate is the VM trust
+  # boundary itself; that stays a real-hardware ritual (drill/RUNS.md), same
+  # as the full drill. So: every PR proves the tier's semantics, and a
+  # release still proves the boundary.
+  rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: install incus
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y incus
+      - name: global install, from this checkout (the #71 layout)
+        # Not install.sh: it installs a RELEASE (REPO@REF), and CI must prove
+        # the code under review. Same tree, same layout, same a+rX.
+        run: |
+          sudo cp -r . /opt/box
+          sudo rm -rf /opt/box/.git
+          sudo chmod -R a+rX /opt/box
+          sudo ln -sf /opt/box/bin/box /usr/local/bin/box
+      - name: setup-host
+        run: sudo bash /opt/box/host/setup-host.sh
+      - name: doctor — the baseline is provable before anything is judged
+        run: sudo BOX_TIER=admin bash /opt/box/drill/doctor.sh
+      - name: multi-user rehearsal (criteria a-l, container mode)
+        run: sudo BOX_MULTIUSER_REHEARSAL=1 bash /opt/box/drill/multiuser.sh --yes --container
+
+  # NOT run here: the full drill (drill/drill.sh). It rehearses the whole
+  # surface — cold template mints, expose, migration — and wants a real host
+  # and the better part of an hour. The rehearsal job above is the CI-shaped
+  # slice of the same discipline: isolation claims are still tested on a real
+  # daemon, never reasoned about (docs/box-design.md).
