@@ -6,6 +6,31 @@ set -euo pipefail
 self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 here="$(dirname "$(dirname "$self")")"
 
+# Byte-identical copy of bin/box's box_tier() — this script must know the
+# tier before any install tree exists, and test/cli.sh diffs the two copies
+# so they cannot drift.
+box_tier() {
+  [ "$(id -u)" -eq 0 ] && { printf 'admin\n'; return; }
+  local groups; groups="$(id -nG 2>/dev/null | tr ' ' '\n')"
+  if   printf '%s\n' "$groups" | grep -qx incus-admin; then printf 'admin\n'
+  elif printf '%s\n' "$groups" | grep -qx incus;       then printf 'restricted\n'
+  else printf 'none\n'
+  fi
+}
+
+# A restricted (incus-group) user cannot build daemon-global state, and
+# telling them to escalate would be wrong twice: the stack is the admin's to
+# own, and if 'box new' works for them it already exists. Say so and succeed —
+# this must sit BEFORE the sudo resolution below, which would otherwise bury
+# the honest answer under a privilege error. Gated on the tier, not on
+# 'command -v sudo': having the sudo binary is not the same as holding a grant.
+if [ "$(id -u)" -ne 0 ] && [ "$(box_tier)" = restricted ]; then
+  echo "You are in the 'incus' group (restricted tier): you manage your own boxes," >&2
+  echo "but the host's daemon-global stack is built by an admin. It is already set" >&2
+  echo "up if 'box new' works. Nothing for you to do here." >&2
+  exit 0
+fi
+
 # How we reach root, decided once. 'sudo' cannot be hardcoded: at UID 0 it is
 # unnecessary, and on a minimal root image it is not installed at all — this
 # script died on 'sudo: command not found' before doing anything, which made
@@ -194,6 +219,13 @@ $SUDO systemctl enable box-firewall.service
 # firewall, silently, and the box→box hole stayed open through a release that
 # claimed to close it. Restart re-runs the script, which is idempotent by design.
 $SUDO systemctl restart box-firewall.service
+
+# incus-user is what serves the restricted tier (box grant). Debian 13 and
+# Ubuntu 24.04 ship it inside the incus package; enabling it here makes the
+# host tier-ready, and costs a host that never grants anyone nothing. Failure
+# is a NOTE, not an error: the admin tier does not depend on it.
+$SUDO systemctl enable --now incus-user.socket 2>/dev/null \
+  || echo "NOTE: could not enable incus-user.socket — 'box grant' (the restricted tier) needs it; this Incus may not ship incus-user (#74)." >&2
 
 # Profile — box-net, the placement contract: the isolated NIC and the root
 # disk, nothing a template controls (resources are stamped per-instance from
