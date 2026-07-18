@@ -9,15 +9,34 @@ NET=boxnet
 # The gateway is read off the live bridge, not hardcoded: the subnet is an
 # input now (BOX_SUBNET, setup-host.sh — #80), and a bridge moved off a
 # colliding subnet must keep its firewall. setup-host runs us after the
-# bridge exists, so the live read is the truth at install time; UFW rules
-# persist across boots on their own, so the default only papers over the
-# no-bridge-yet window at boot on a default-subnet host.
+# bridge exists, so the live read is the truth at install time. At boot the
+# bridge may not be addressed yet — then GW is EMPTY and the UFW carve-out
+# below is left alone rather than built for a guessed gateway: the old
+# GW=10.88.0.1 fallback was wrong on every BOX_SUBNET host that hit the
+# no-bridge window, a latent DNS drop (#86 review). Failing closed costs
+# nothing: UFW rules persist across boots on their own, and nothing else in
+# this script needs the gateway (the nft carve-out is interface-scoped).
 # ('|| true': under pipefail an absent bridge would kill the script here.)
 GW="$(ip -4 -o addr show dev "$NET" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
-[ -n "$GW" ] || GW=10.88.0.1
 
 if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-  if ! ufw status | grep "on $NET" | grep -q "DENY"; then
+  if [ -z "$GW" ]; then
+    echo "box-firewall: $NET has no address yet — UFW DNS carve-out left as-is (no rule beats a wrong one; the persisted rules survive boots, and setup-host or a service restart converges them once the bridge is addressed)" >&2
+  else
+    # Converge, don't create-once (the ACL's own #86 lesson, applied to UFW):
+    # gating this block on "a DENY on boxnet exists" pinned every host to the
+    # gateway of the FIRST run — a bridge remapped off a colliding subnet
+    # (#80's escape hatch) kept its stale 'allow … to <old-gw> port 53' and
+    # never gained the live gateway's, so box→gateway DNS died at our own
+    # deny while every config looked right. Drop the DNS allows aimed
+    # anywhere else, then ensure the live set: ufw skips a rule that already
+    # exists, so the re-run is a no-op and a fresh host gets exactly the
+    # rules it always did.
+    for stale in $(ufw status | awk -v net="$NET" -v gw="$GW" '
+        $2 ~ /^53\// && $3 == "on" && $4 == net && $1 != gw { print $1 }' | sort -u); do
+      ufw delete allow in on "$NET" to "$stale" port 53 proto tcp || true
+      ufw delete allow in on "$NET" to "$stale" port 53 proto udp || true
+    done
     ufw insert 1 deny in on "$NET"
     ufw insert 1 allow in on "$NET" to "$GW" port 53 proto tcp
     ufw insert 1 allow in on "$NET" to "$GW" port 53 proto udp
