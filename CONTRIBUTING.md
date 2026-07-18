@@ -19,9 +19,19 @@ labels tell you where everything is without opening anything.
    answer the entire round in a **single reply**, push the fixes, and
    re-request the bots that didn't approve. Prefer verification over
    argument: a test settles what a comment thread can't.
-5. **When all three approve**, the final review goes to the maintainer — the
+5. **Reviews end in a verdict.** A reviewer — bot or human — either
+   **approves** or **requests changes**, never a bare comment. A
+   comment-only review is a non-verdict: it doesn't say whether the round
+   passed, and the state machine (and anyone scanning the board) has to
+   guess. The verdict carries *blockingness only*, the body carries the
+   feedback: non-blocking nits ride an **approval** and the author addresses
+   them at their discretion; anything blocking — including a question that
+   gates the verdict — is **request changes**, saying what unblocks it. The
+   reconciler treats a comment-only review as not-approved, so commenting
+   without a verdict only stalls the PR.
+6. **When all three approve**, the final review goes to the maintainer — the
    labels workflow requests it automatically.
-6. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
+7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
    mirror what CI runs; the multi-user rehearsal runs in CI on a real Incus.
 
 ## Labels — who sets what
