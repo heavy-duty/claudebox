@@ -76,6 +76,9 @@ gh label create "scope:host"           --color C5DEF5 --description "host/ — s
 gh label create "scope:tiers"          --color C5DEF5 --description "restricted tier — grant/revoke, multi-user" --force
 gh label create "scope:templates"      --color C5DEF5 --description "templates/ — the box seeds" --force
 gh label create "scope:drill"          --color C5DEF5 --description "drill/ — rehearsals, doctor, RUNS.md" --force
-gh label delete duplicate --yes; gh label delete invalid --yes; gh label delete question --yes
-gh label delete wontfix --yes; gh label delete "help wanted" --yes; gh label delete "good first issue" --yes
+# delete is not an upsert: a label that is already gone exits non-zero. Swallow
+# that, so this block converges on re-run instead of erroring after first success.
+for L in duplicate invalid question wontfix "help wanted" "good first issue"; do
+  gh label delete "$L" --yes 2>/dev/null || true
+done
 ```
