@@ -1,0 +1,56 @@
+name: labels
+# The automation LABELS.md promises. Two halves:
+#   scope     — path-derived scope:* labels on PRs (actions/labeler)
+#   reconcile — the state:* machine + the stale sweep (.github/scripts/labels-reconcile.sh)
+#
+# pull_request_target, not pull_request: every PR here arrives from a fork,
+# where pull_request (and pull_request_review) run with a READ-ONLY token and
+# cannot label anything. _target is safe in this workflow because no PR code
+# is ever checked out or executed — labeler reads changed paths via the API,
+# and reconcile checks out the BASE branch only. Keep it that way.
+#
+# Review-submitted transitions (bots finishing a round) ride the cron: there
+# is no pull_request_review_target, so the 15-minute tick is the wake signal —
+# the same cadence the reviewer bots poll at.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: # also bootstraps missing labels — run once on a fresh repo
+  pull_request_target:
+    types: [opened, reopened, ready_for_review, converted_to_draft, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  scope:
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: labels-scope-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/labeler@v5
+        with:
+          # additive only — a hand-applied scope must survive the machine
+          sync-labels: false
+
+  reconcile:
+    runs-on: ubuntu-latest
+    # ONE shared group: every reconcile sweeps every open PR, so cron and
+    # PR-event runs must serialize or two sweeps race the same PR's labels
+    # and both pass the request-the-human-once guard. GitHub keeps at most
+    # one queued run per group (older queued runs are superseded), which
+    # coalesces bursts instead of piling them up.
+    concurrency:
+      group: labels-reconcile
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4 # base branch only — never the PR's code
+      - name: reconcile state + stale
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: bash .github/scripts/labels-reconcile.sh

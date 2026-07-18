@@ -17,7 +17,7 @@ single reply, and a human takes the final review.
 | `state:building` | `#FBCA04` | the coding agent, still building | PR opened as draft | marked ready + bot reviews requested |
 | `state:bots-reviewing` | `#1D76DB` | the reviewer bots to finish the round | ready with reviews requested, or fixes pushed and reviews re-requested | all three bots have reviewed the round |
 | `state:addressing` | `#D93F0B` | the coding agent to reply and push fixes | all bots reviewed the round, not all approved | the single round-reply is posted and fixes pushed |
-| `state:needs-human` | `#8250DF` | the human reviewer | all three bots approve | merged — or changes requested, which cycles back to `state:addressing` |
+| `state:needs-human` | `#8250DF` | the human reviewer | the human review is requested — by the author when the round passes, or automatically on three formal head-current approvals | merged — or changes requested, which cycles back to `state:addressing` |
 
 `bots-reviewing` and `addressing` are deliberately distinct: staleness in the
 first means *poke the bots*, staleness in the second means *the agent dropped
@@ -54,13 +54,16 @@ would just say the same thing twice, drifting apart eventually.
 
 State labels are written by automation, never by hand. Every state above is
 derivable from GitHub's own facts — the draft flag, requested reviewers,
-review states, push timestamps — so a scheduled workflow recomputes the state
-and reconciles labels statelessly. A hand-moved label is a lie waiting to
-happen; the workflow asserts the effective state instead. Until that workflow
-lands, treat `state:` labels as advisory.
+review states, push timestamps — so the labels workflow
+([.github/workflows/labels.yml](.github/workflows/labels.yml)) recomputes the
+state and reconciles labels statelessly, on a 15-minute cron plus PR events.
+A hand-moved label is a lie waiting to happen; the workflow asserts the
+effective state instead. `scope:` labels on PRs are applied from the changed
+paths by actions/labeler ([.github/labeler.yml](.github/labeler.yml));
+[CONTRIBUTING.md](CONTRIBUTING.md) says who sets what.
 
-The same workflow bootstraps the taxonomy: it creates any missing label
-idempotently. To create them by hand (needs push access):
+The same workflow bootstraps the taxonomy: a manual dispatch creates any
+missing label idempotently. To create them by hand (needs push access):
 
 ```sh
 gh label create "state:building"       --color FBCA04 --description "PR is a draft — the coding agent is still building" --force
