@@ -195,6 +195,9 @@ No listener is needed, and none should be started: see trap 3.
 
 | Run | Result | What it cost |
 | --- | --- | --- |
+| **MU-3** | **41/0 (containers) + 41/0 (VMs) — the tier holds** | `multiuser.sh` (#74) from zero on Debian 13 / Incus 6.0.4: grant, confinement, lifecycle, the in-box contract with the cross-user sibling drop, closed escape hatches, re-sync survival, scoped revoke. The VM pass needed right-sized boxes (1GiB): two 2GiB nested VMs on a 7.7GiB host measured swap, not isolation |
+| MU-2 | 40/41 (VMs) | the egress probe cried broken over a TLS handshake that outlived its 8s budget under nested-KVM memory pressure — every isolation probe (which PASSES on silence) was immune. Probe budgets raised, reachable-probes retry once, and the mint keeps its log for the post-mortem |
+| MU-1 | 39/41 (containers) | both FAILs were the instrument: a `box new` rc swallowed with its narration (the drill's oldest sin, relearned), and the enumeration probe resolving the box's OWN name — /etc/hosts answered, not the gateway. Probe a SIBLING's name or you measure cloud-init's hostname hygiene. Found for real along the way: `box restore` dispatched `incus restore`, which does not exist in Incus 6 — broken for every tier since the rename |
 | 1 | hung at C7; ~9 false FAILs | traps 1, 2, 4 — pipefail, the exec-pty hang, the DHCP race |
 | 2 | 42/49 | trap 5 — an interrupted run 1 left boxes behind, cascading 5 FAILs. Found the `claude`-on-PATH bug. Phase D delivered B1 (`@internal` rejected) and a B3 reading of *broken* |
 | 3 | 48/49 | trap 4 — `eth0_ip` never matched, so A3 again unprobed. B3 now read *intact*, contradicting run 2 |

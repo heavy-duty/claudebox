@@ -91,3 +91,27 @@ installed and runnable; authenticating is yours.
 If the host has no `/dev/kvm`, box falls back to container mode. The drill
 still runs, but it says loudly that **the VM trust boundary was not validated**
 rather than passing quietly on a weaker one.
+
+## The multi-user rehearsal (`multiuser.sh`)
+
+The restricted tier (#74) has its own rehearsal — the drill proves one
+operator's host; this proves a *shared* one:
+
+```sh
+sudo BOX_MULTIUSER_REHEARSAL=1 bash drill/multiuser.sh --yes
+```
+
+Root only, opt-in twice (it creates system users and edits the group
+database). It creates two throwaway users, grants them the tier through the
+real `box grant`, mints real boxes as them, and measures — from inside those
+boxes — that each user is confined to their own project (a), the full
+lifecycle works (b), no cross-user visibility (c), names don't collide (d),
+`expose`/`setup-host`/`doctor` answer honestly at the tier (e/f), the boxes
+ride `boxnet` under the full isolation contract including the cross-user
+sibling drop (g), the private-bridge escape hatches are closed (h), the grant
+survives an incus-user restart (k), and `revoke --purge` erases one user
+without touching the other (l). Everything it makes, it deletes.
+
+`--container` skips VM mints (CI runs it this way on every PR — the tier's
+semantics are instance-type-independent); on real hardware run it bare so the
+boxes are VMs. `--keep` leaves the users and boxes up for inspection.
