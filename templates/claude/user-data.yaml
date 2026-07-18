@@ -27,4 +27,7 @@ runcmd:
   # honest edge as rig's own unpinned box install, until rig#32 ships a
   # release flow). The pin covers both the installer fetched AND the tree
   # it installs, so a branch under review is testable end to end.
-  - curl -fsSL https://raw.githubusercontent.com/@RIG_REPO@/@RIG_REF@/install.sh | RIG_REPO="@RIG_REPO@" RIG_REF="@RIG_REF@" bash
+  # HOME=/root: cloud-init runs runcmd as root but with NO $HOME in the
+  # environment, and the rig installer (set -u) reads $HOME for its DEST —
+  # measured live: the mint died with "HOME: unbound variable" without it.
+  - curl -fsSL https://raw.githubusercontent.com/@RIG_REPO@/@RIG_REF@/install.sh | HOME=/root RIG_REPO="@RIG_REPO@" RIG_REF="@RIG_REF@" bash
