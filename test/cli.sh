@@ -277,6 +277,12 @@ for d in "$ROOT"/templates/*/; do
     # shellcheck disable=SC2016
     check "template '$t': the pin reaches the installer's env too" 0 "" \
       bash -c 'grep "install.sh" "$1" | grep -q "RIG_REPO=\"@RIG_REPO@\" RIG_REF=\"@RIG_REF@\""' _ "$d/user-data.yaml"
+    # HOME=/root: a scar found live — cloud-init's runcmd has no $HOME and
+    # rig's installer (set -u) dies on it (rig#39). The pin must survive
+    # every seed rewrite.
+    # shellcheck disable=SC2016
+    check "template '$t': the rig install pins HOME=/root (runcmd has no \$HOME)" 0 "" \
+      bash -c 'grep "install.sh" "$1" | grep -q "HOME=/root "' _ "$d/user-data.yaml"
   fi
   # ------------------------------------------------------------------------
   # THE ABSENCE — no tenant content in ANY template, ever again. Everything a
