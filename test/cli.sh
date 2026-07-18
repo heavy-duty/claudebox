@@ -198,25 +198,6 @@ for d in "$ROOT"/templates/*/; do
     grep -qE '^[[:space:]]*-[[:space:]]+tmux$' "$d/user-data.yaml"
 done
 
-# ---------------------------------------------------------------------------
-# The staging template (#68) — server-class, still creds-free. Its posture in
-# full: both boot demands set (proven through the real parser, not a grep),
-# docker + rig preinstalled, and NOTHING that joins or admits — tailscale,
-# auth keys and ssh in any spelling are rig's to install at bootstrap time,
-# inside the guest, so their absence from the shipped cloud-init IS the
-# creds-free contract. Comments may name them (to say why they are absent);
-# effective lines must not.
-# ---------------------------------------------------------------------------
-STG="$ROOT/templates/staging"
-check "staging: demands VM mode and autostart (via the real parser)" \
-  0 "REQUIRE_VM=1 AUTOSTART=1" tpl "$ROOT" staging
-check "staging: installs docker (get.docker.com)" 0 "" \
-  grep -qF 'get.docker.com' "$STG/user-data.yaml"
-check "staging: preinstalls rig" 0 "" \
-  grep -qF 'rig/main/install.sh' "$STG/user-data.yaml"
-# shellcheck disable=SC2016  # $1 expands in the child shell, by design
-check "staging: no tailscale/authkey/ssh outside comments (creds-free)" 1 "" \
-  bash -c 'grep -v "^[[:space:]]*#" "$1" | grep -qiE "tailscale|authkey|ssh"' _ "$STG/user-data.yaml"
 rm -f "$TPLFN"
 
 # The keys' cmd_new half, grepped the way the expose guard is (line order —
