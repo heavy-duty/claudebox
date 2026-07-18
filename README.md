@@ -8,7 +8,7 @@ destroying it loses nothing you didn't push.
 
 **Strictly creds-free.** A box ships with everything installed and **no**
 credentials — no agent token, no git PAT, nothing. You authenticate
-interactively *inside* the box. The tool never stores or injects a secret. That
+interactively _inside_ the box. The tool never stores or injects a secret. That
 means there's nothing shared or committed, so it's safe for multiple operators
 out of the box.
 
@@ -22,6 +22,8 @@ box. A repo can ship an optional [`.box/`](docs/box-recipe.md)
 runbook that the box's coding agent reads and acts on — there is no `install`
 step and no host-run setup. See [docs/box-design.md](docs/box-design.md) for the
 design rationale.
+
+> **0.6.0**: multi-user support.
 
 > **0.5.0**: two new templates (`codex`, `grok`), `box expose` — a
 > loopback-only door to a box port, for seeing a dev server — and the host
@@ -52,7 +54,7 @@ rebuild the stack under your boxes. Upgrading is therefore explicit: uninstall
 what you have and install fresh. Preserve any boxes first — `box down <box>`,
 copy out anything you need (a portable `box export` is
 [#70](https://github.com/heavy-duty/box/issues/70)), then `box rm <box>`
-(which deletes the box *and* its snapshots) — then:
+(which deletes the box _and_ its snapshots) — then:
 
 ```sh
 rm -rf ~/.local/share/box ~/.local/bin/box   # uninstall
@@ -67,7 +69,7 @@ declines the host-setup step.
 ### Global vs per-user install
 
 Where box lands depends on **who runs the installer**, because on a shared host
-box's tree is *executed by other users* — so it cannot hide in one user's home:
+box's tree is _executed by other users_ — so it cannot hide in one user's home:
 
 - **As root → global.** The tree goes to `/opt/box` (world-readable) and the
   `box` symlink to `/usr/local/bin` (already on every login `PATH`). One
@@ -113,11 +115,11 @@ socket is all-or-nothing — `incus-admin` group members own every instance on
 the machine — so box layers a second tier on
 [incus-user](https://linuxcontainers.org/incus/docs/main/projects/):
 
-| tier | who | what they hold |
-|---|---|---|
-| **admin** | root, or the `incus-admin` group | everything: all boxes, the stack, `setup-host`, `expose`, `grant` |
-| **restricted** | the `incus` group | their **own** boxes only, on the same hardened network |
-| none | everyone else | no socket, nothing |
+| tier           | who                              | what they hold                                                    |
+| -------------- | -------------------------------- | ----------------------------------------------------------------- |
+| **admin**      | root, or the `incus-admin` group | everything: all boxes, the stack, `setup-host`, `expose`, `grant` |
+| **restricted** | the `incus` group                | their **own** boxes only, on the same hardened network            |
+| none           | everyone else                    | no socket, nothing                                                |
 
 An admin hands the tier out per user, and takes it back:
 
@@ -132,7 +134,7 @@ box revoke dev1 --purge     # ...or end their sessions and delete everything the
 `grant` is an idempotent convergence, not a flag flip, because incus-user's
 defaults miss box's contract three ways (measured on Debian 13 / Incus 6.0.4,
 see [the plan doc](docs/plans/2026-07-18-restricted-tier.md)): it pins each
-user to a private *unhardened* NAT bridge, it blocks snapshots, and it cannot
+user to a private _unhardened_ NAT bridge, it blocks snapshots, and it cannot
 see the `box-net` profile. Granting rewires all three: the user's project is
 restricted to `boxnet` **and only boxnet** — the hardened network is not their
 default placement but the only one their certificate can express — snapshots
@@ -175,12 +177,12 @@ claude                           # if the repo has .box/, the agent reads it and
 No coding agent is special — each is one template among several, and adding
 another is just another directory. What ships today:
 
-| Template | What's in it |
-| --- | --- |
+| Template | What's in it                                              |
+| -------- | --------------------------------------------------------- |
 | `blank`  | Bare Debian 13 — same isolation, no tooling. The default. |
-| `claude` | Claude Code, creds-free — where this project started |
-| `codex`  | OpenAI Codex CLI, creds-free |
-| `grok`   | xAI Grok CLI, creds-free |
+| `claude` | Claude Code, creds-free — where this project started      |
+| `codex`  | OpenAI Codex CLI, creds-free                              |
+| `grok`   | xAI Grok CLI, creds-free                                  |
 
 A template is a directory under `templates/`: a `box.env` (image, user,
 resources — parsed against a strict allowlist, never sourced) and a
@@ -303,7 +305,7 @@ command surface is a table.
 ## Isolation
 
 The contract: **a box reaches the public internet and nothing else.** Not the
-host, not your LAN, not another box, not even another box's *name*. What
+host, not your LAN, not another box, not even another box's _name_. What
 enforces it, layer by layer:
 
 - **Dedicated NAT bridge** `boxnet`, IPv6 off. Every rule below is
@@ -311,7 +313,7 @@ enforces it, layer by layer:
   contract, not a default.
 - **`box-isolate` ACL** — drops all egress to private space (RFC1918,
   CGNAT, link-local), with a single carve-out to the gateway so DNS works.
-- **Sibling isolation, at L2** — two boxes on one bridge are *switched*,
+- **Sibling isolation, at L2** — two boxes on one bridge are _switched_,
   never routed, so no L3 rule can separate them (learned the hard way; see
   below). `security.port_isolation` on every box NIC plus an nft
   bridge-family drop mean box A cannot exchange frames with box B at all.

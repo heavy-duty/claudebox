@@ -5,6 +5,8 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+## 0.6.0 — 2026-07-18
+
 ### Added
 
 - **The restricted tier: multi-user hosts** (#74, redesigning #72) — an admin
@@ -12,7 +14,7 @@ which records not just what changed but what each drill run proved.
   hardened `boxnet`, seeing nobody else's; `box revoke <user>` takes it back
   (`--purge` deletes their world, and asserts the absence). The tier rides
   incus-user, whose defaults miss box's contract three measured ways (Debian
-  13 / Incus 6.0.4): a private *unhardened* NAT bridge per user, snapshots
+  13 / Incus 6.0.4): a private _unhardened_ NAT bridge per user, snapshots
   blocked, the `box-net` profile invisible — so grant is an idempotent
   convergence: project narrowed to `boxnet` **and only boxnet** (listing the
   private bridge too, the obvious fix, would keep an unhardened network one
@@ -29,7 +31,7 @@ which records not just what changed but what each drill run proved.
   `multiuser.sh --container`), so every PR proves the tier's semantics
   against a live daemon, not a mock. The VM trust boundary itself remains a
   real-hardware ritual, like the full drill.
-- **Global / root install** (#71) — run as root, box installs *once* to
+- **Global / root install** (#71) — run as root, box installs _once_ to
   `/opt/box` (world-readable) with the `box` symlink on `/usr/local/bin`, so
   every operator on a shared host runs the same tree. Per-user installs are
   unchanged (`$HOME/.local`); `BOX_HOME`/`BOX_BIN` still override. A per-user
@@ -53,7 +55,7 @@ which records not just what changed but what each drill run proved.
   restricted user; fixed for every tier, and the rehearsal + a grep-guard in
   `test/cli.sh` now hold it.
 - **`box tmux` works on every template** (#65) — `box tmux` runs
-  `tmux new-session` *inside* the box, but the templates did not install tmux, so
+  `tmux new-session` _inside_ the box, but the templates did not install tmux, so
   it failed with `tmux: command not found`. `tmux` is now in each template's
   cloud-init package list (`blank`/`claude`/`codex`/`grok`).
 
@@ -103,11 +105,11 @@ which records not just what changed but what each drill run proved.
   It now asserts the post-install stack in-group before touching the host, and
   runs `setup-host` exactly once more — after the clean, which deliberately
   unsets `dns.mode` and so has to be converged back. `DRILL_OWNS_SETUP=1`
-  hands sequencing back to the drill. Pre-setup tripwires now read *before*
+  hands sequencing back to the drill. Pre-setup tripwires now read _before_
   `install.sh`, since that is what triggers setup now.
 - **`install.sh` asks, sets up the host, and no-ops on re-run** (#64) — it now
-  prompts *"Install box?"*, then on a fresh host installs the tree and asks a
-  second question, *"Set up this machine as a box host now?"*, running the whole
+  prompts _"Install box?"_, then on a fresh host installs the tree and asks a
+  second question, _"Set up this machine as a box host now?"_, running the whole
   isolation stack if you say yes (previously it only printed a warning and left
   you a command, so the install reported success and `box new` died on a host
   with no Incus). Prompts read `/dev/tty`, since under `curl | bash` the script
@@ -141,7 +143,7 @@ installer retires — but nothing current carries the old name.
   is per-port, `--list`/`--remove` manage it, and `box info` shows open
   exposures — a box with a hole says so.
 - **Inline resource overrides on `new`** — `--cpu <n> --memory <size>
-  --disk <size>` (#57). Resolution most-specific-first: flag > `BOX_CPU` /
+--disk <size>` (#57). Resolution most-specific-first: flag > `BOX_CPU` /
   `BOX_MEMORY` / `BOX_DISK` environment (the scripting form) > template
   `box.env` > defaults. Values pass to Incus verbatim; resources are all a
   flag can touch. `--from` refuses them — a clone carries its source's
