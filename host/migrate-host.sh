@@ -19,9 +19,13 @@
 #
 # NOT 'set -e' around the per-box work: a box that fails one step is reported
 # and skipped, not a crash that abandons the rest mid-migration.
+#
+# The report idiom is 'action && say "did X" || warn/die': say and warn always
+# return 0, so the C-may-run-when-A-is-true trap SC2015 warns about cannot fire
+# on those lines (same reasoning as drill.sh's ok/no).
+# shellcheck disable=SC2015
 set -u
 
-GW_NEW=10.88.0.1
 say()  { printf 'migrate: %s\n' "$*"; }
 warn() { printf 'migrate: WARNING: %s\n' "$*" >&2; }
 die()  { printf 'migrate: ERROR: %s\n' "$*" >&2; exit 1; }
@@ -86,9 +90,9 @@ rehome_one() {
   # 3. VERIFY THE EFFECT, not the exit codes (the whole repo's lesson). The box
   #    must be on 10.88 and actually resolve+reach the internet on its new leg
   #    before we call it migrated.
-  local i ip
+  local _i ip
   ip=""
-  for i in $(seq 1 30); do
+  for _i in $(seq 1 30); do
     ip="$(incus exec "$b" -- ip -4 -o addr show scope global </dev/null 2>/dev/null \
           | awk '{for(i=1;i<NF;i++) if($i=="inet" && $(i+1)~/^10\.88\./){split($(i+1),a,"/"); print a[1]; exit}}')"
     [ -n "$ip" ] && break

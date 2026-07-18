@@ -172,6 +172,47 @@ EOF
   fi
 
   phase "Installing box ($REPO@$REF)"
+
+  # Sudo, up front and out loud. Later calls run unattended, and a password
+  # prompt swallowed by a '-qq' redirect looks exactly like a hang. This now
+  # has to precede the install too: install.sh runs the host setup itself, so
+  # the first thing needing root is no longer further down — it is inside the
+  # very next command.
+  sudo -v || { echo "drill: need sudo (the host setup installs packages and firewall rules)"; exit 1; }
+
+  # Pre-setup observations must be READ BEFORE install.sh, because install.sh
+  # is now what runs setup-host. Read after it and setup has already had its
+  # chance to act, so the observation says nothing.
+  # setup-host.sh installs nftables itself when neither nft nor UFW exists
+  # (a stock Debian 13 cloud image ships neither). This is a tripwire: if it
+  # fires, that fix regressed.
+  fw_absent_pre=0
+  if ! command -v nft >/dev/null 2>&1 && ! command -v ufw >/dev/null 2>&1; then
+    fw_absent_pre=1
+  fi
+
+  # DRILL_OWNS_SETUP=1 opts out of the installer's automatic setup and puts the
+  # drill back in charge of sequencing it (install, then clean, then converge).
+  # The DEFAULT deliberately does not: a drill that runs setup-host itself right
+  # after installing cannot tell you whether install.sh did its job, because the
+  # drill's own call would build the stack either way. The default path exercises
+  # what a user actually runs, and asserts the result in-group below.
+  OWNS="${DRILL_OWNS_SETUP:-0}"
+  if [ "$OWNS" = 1 ]; then
+    export BOX_SKIP_SETUP_HOST=1
+  fi
+
+  # The installer is a no-op when box is already installed — upgrading is
+  # uninstall-then-install, by design. The drill re-proves a tree from scratch
+  # every run, so it does the uninstall itself: clear any prior tree and symlink
+  # before installing, or install.sh would correctly refuse to touch them.
+  rm -rf "$HOME/.local/share/box" "$HOME/.local/bin/box"
+
+  # The installer prompts (install? set up host?) and reads /dev/tty. The drill
+  # runs unattended with no tty, so it answers yes to everything via BOX_YES.
+  # OWNS still suppresses the setup prompt via BOX_SKIP_SETUP_HOST above.
+  export BOX_YES=1
+
   BOX_REPO="$REPO" BOX_REF="$REF" \
     bash -c "$(curl -fsSL "https://raw.githubusercontent.com/$REPO/$REF/install.sh")" \
     || { echo "install failed"; exit 1; }
@@ -195,16 +236,9 @@ EOF
   inf "installed tree confirms: $got"
 
   phase "Host setup (Incus, boxnet, ACL, profile, firewall)"
-  # setup-host.sh installs nftables itself when neither nft nor UFW exists
-  # (a stock Debian 13 cloud image ships neither). This guard is a tripwire:
-  # if it fires, that fix regressed.
-  if ! command -v nft >/dev/null 2>&1 && ! command -v ufw >/dev/null 2>&1; then
+  if [ "$fw_absent_pre" = 1 ]; then
     note "neither nft nor ufw present pre-setup — setup-host.sh must install nftables itself (it fixed this once; watch that it still does)"
   fi
-
-  # Sudo, up front and out loud. Later calls run unattended, and a password
-  # prompt swallowed by a '-qq' redirect looks exactly like a hang.
-  sudo -v || { echo "drill: need sudo (the host setup installs packages and firewall rules)"; exit 1; }
 
   # apt's lock is held by apt-daily / unattended-upgrades on a fresh cloud
   # image, and 'apt-get -qq >/dev/null' waits for it in COMPLETE SILENCE —
@@ -224,15 +258,56 @@ EOF
     inf "incus already installed — skipping apt"
   fi
 
-  inf "running setup-host.sh (first pass: may only add you to incus-admin)…"
-  ~/.local/share/box/host/setup-host.sh || true
-  # The group we were just added to isn't in this shell's credentials yet.
+  # No setup-host call here any more. It used to run a full "first pass" that
+  # the comment described as "may only add you to incus-admin" — behaviour that
+  # no longer exists (setup-host converges in one run now, #63) and that, since
+  # install.sh runs setup itself (#64), was simply the stack being built a
+  # second time before the drill had asserted the first.
+  if [ "$OWNS" = 1 ]; then
+    # We opted out of the installer's setup, so nobody has joined us to the
+    # group yet. usermod ONLY: the stack build waits until after the clean
+    # below, which is the entire reason for owning the sequence.
+    inf "DRILL_OWNS_SETUP=1 — the drill owns the host setup"
+    id -nG | grep -qw incus-admin || sudo usermod -aG incus-admin "$USER"
+  else
+    inf "install.sh ran the host setup — asserting what it left, in-group, next"
+  fi
+  # setup-host's own sg re-exec was a CHILD of install.sh; this shell's
+  # credentials are untouched, so we still have to enter the group ourselves —
+  # once, for the remainder of the drill.
   inf "re-entering inside the incus-admin group…"
-  exec sg incus-admin -c "IN_GROUP=1 BOX_REPO='$REPO' BOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
+  exec sg incus-admin -c "IN_GROUP=1 DRILL_OWNS_SETUP='$OWNS' BOX_REPO='$REPO' BOX_REF='$REF' KEEP=$KEEP bash '$SELF' --in-group"
 fi
 
 export PATH="$HOME/.local/bin:$PATH"
 KEEP="${KEEP:-0}"
+
+# PROVE THE INSTALLER'S CONTRACT (#64) — first, before the clean or anything
+# else on this host mutates the stack, and before the drill runs setup-host
+# itself further down. That ordering is the whole point: the old flow ran
+# setup-host immediately after installing, so the stack existed by the drill's
+# own hand and the run passed identically whether or not install.sh had done a
+# thing. This is read-only, so it is safe with a previous run's boxes still
+# attached.
+if [ "${DRILL_OWNS_SETUP:-0}" != 1 ]; then
+  phase "Asserting the stack that install.sh built"
+  missing=""
+  incus network show boxnet        >/dev/null 2>&1 || missing="$missing boxnet"
+  incus network acl show box-isolate >/dev/null 2>&1 || missing="$missing box-isolate"
+  incus profile show box-net       >/dev/null 2>&1 || missing="$missing box-net"
+  # Last thing setup-host does, so it doubles as "it ran to the end".
+  sudo nft list table bridge box   >/dev/null 2>&1 || missing="$missing nft-bridge-box"
+  if [ -n "$missing" ]; then
+    echo "drill: FATAL — install.sh reported success but left an INCOMPLETE stack:$missing" >&2
+    echo "  install.sh is supposed to run the host setup itself (#64), and setup-host" >&2
+    echo "  is supposed to converge in one run (#63). One of those did not happen." >&2
+    echo "  reproduce with the output visible:" >&2
+    echo "    ~/.local/share/box/host/setup-host.sh" >&2
+    echo "  or hand setup back to the drill:  DRILL_OWNS_SETUP=1 $SELF" >&2
+    exit 1
+  fi
+  ok "install.sh left a complete host stack (boxnet, box-isolate, box-net, nft bridge drop) — no second setup needed"
+fi
 
 # CLEAN BEFORE SETUP, not after. setup-host.sh reconfigures the network's ACLs,
 # and a previous run's boxes are still ATTACHED to that network — 'incus network
@@ -277,7 +352,15 @@ done
 left="$(incus list --format csv --columns n 2>/dev/null | tr '\n' ' ')"
 [ -n "$left" ] && inf "instances still on this host (not ours, left alone): $left"
 
-inf "running setup-host.sh (in-group pass: network, ACL, profile, firewall)…"
+# This call stays, and it is NOT the install's setup repeated for its own sake:
+# the clean above deliberately unsets dns.mode, which is part of the SHIPPED
+# stack, and drops a previous run's phase-D mutations. Something has to put the
+# host back together afterwards, and setup-host is that something — this is the
+# "converge against a clean slate" the block above is ordered for. On the
+# default path the install's setup has already been asserted, so what this
+# proves is idempotency: a second run over a cleaned host is a no-op that
+# restores the stack rather than a fresh build.
+inf "running setup-host.sh (post-clean convergence: restores dns.mode and any reverted mutations)…"
 if ! timeout -k 10 300 ~/.local/share/box/host/setup-host.sh; then
   echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
   echo "  it should take seconds on a host that already has incus. usual causes:" >&2

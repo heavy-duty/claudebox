@@ -1,0 +1,32 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        # -x follows `source`/`.` directives; box has no lib split today, but the
+        # flag costs nothing and keeps the invocation identical to rig's.
+        # globstar so a script in a new subdirectory is linted without anyone
+        # remembering to edit this list; bin/* covers the extensionless entrypoint
+        # (bin/box). The file list is printed so under-coverage shows up in the log.
+        run: |
+          shopt -s globstar
+          files=(bin/* **/*.sh)
+          printf 'shellcheck: %s\n' "${files[@]}"
+          shellcheck -x "${files[@]}"
+      - name: cli tests
+        run: bash test/cli.sh
+
+  # NOT run here: the drill (drill/drill.sh) and the multi-user rehearsal
+  # (drill/multiuser.sh). Both stand up a real Incus, rearrange the host's
+  # network/firewall, and — for the rehearsal — create throwaway system users.
+  # None of that belongs in CI: it needs a disposable host and root, and it is
+  # the answer to #72 Task 0's substrate question, which a container runner
+  # cannot answer. CI stays static + dependency-free (shellcheck + cli.sh),
+  # exactly as this repo's design demands ("isolation claims are tested on a
+  # real host, never reasoned about" — docs/box-design.md).

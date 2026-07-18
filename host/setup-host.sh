@@ -3,17 +3,81 @@
 # the box-net profile. Idempotent. Ubuntu 24.04 / Debian 13.
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+here="$(dirname "$(dirname "$self")")"
 
-if ! command -v incus >/dev/null; then
-  sudo apt-get update
-  sudo apt-get install -y incus
+# How we reach root, decided once. 'sudo' cannot be hardcoded: at UID 0 it is
+# unnecessary, and on a minimal root image it is not installed at all — this
+# script died on 'sudo: command not found' before doing anything, which made
+# install.sh's deliberate root path unusable on exactly the hosts it was for.
+if [ "$(id -u)" -eq 0 ]; then
+  SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+else
+  echo "ERROR: host setup needs root and 'sudo' was not found." >&2
+  echo "       re-run this as root: $self" >&2
+  exit 1
 fi
 
-if ! id -nG "$USER" | grep -qw incus-admin; then
-  sudo usermod -aG incus-admin "$USER"
-  echo "NOTE: added $USER to incus-admin — re-login (or 'sg incus-admin') and re-run."
-  exit 0
+# apt, unattended-safe. install.sh now runs us without a human watching, and
+# a fresh cloud image has apt-daily/unattended-upgrades holding the dpkg lock
+# for the first minutes of its life — plain 'apt-get install' then waits on it
+# in complete silence, indefinitely. Bound the wait and never prompt.
+# 'env', not a bare VAR=val prefix: bash recognises assignments at PARSE time,
+# so with $SUDO empty (we are root) 'DEBIAN_FRONTEND=x apt-get' would have
+# already been parsed as a plain word and bash would try to EXECUTE it —
+# 'DEBIAN_FRONTEND=noninteractive: command not found'. env is immune.
+apt_get() {
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
+
+if ! command -v incus >/dev/null; then
+  apt_get update
+  apt_get install -y incus
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  # Root needs no group: UID 0 opens /var/lib/incus/unix.socket regardless of
+  # who owns it, and there is nothing to re-exec into. The HUMAN needs it — and
+  # under 'sudo install.sh' that is SUDO_USER, not the root we are running as.
+  # Adding root to incus-admin would be a no-op that also left the actual user
+  # locked out of their own boxes.
+  # NOTE: 'id -nG "$name"' here is deliberate and NOT the bug fixed below. That
+  # bug was asking the DATABASE about our own process; this asks the database
+  # about someone else's account, which is the only thing it can be asked.
+  login_user="${SUDO_USER:-}"
+  if [ -n "$login_user" ] && [ "$login_user" != root ]; then
+    if ! id -nG "$login_user" | grep -qw incus-admin; then
+      usermod -aG incus-admin "$login_user"
+      echo "added $login_user to incus-admin — log out and back in for your shell to pick it up"
+    fi
+  fi
+# Group membership is a property of THIS PROCESS's credentials, not of the group
+# database — and the two disagree for exactly as long as it matters here.
+# 'id -nG "$USER"' names a user, so it reads /etc/group and reports incus-admin
+# the instant usermod returns; the running shell's own credentials still lack
+# it, because supplementary groups are fixed at login. So the old check passed
+# on a same-session re-run, sailed into the incus calls below, and died on a
+# permission error that named neither the group nor the re-login. Argless
+# 'id -nG' asks the process what it actually holds, which is what incus checks
+# when it opens /var/lib/incus/unix.socket.
+elif ! id -nG | grep -qw incus-admin; then
+  $SUDO usermod -aG incus-admin "$USER"
+  # Then finish the job rather than adjourning it. Exiting 0 here was a
+  # success-shaped no-op: no boxnet, no ACL, no box-net profile, no firewall —
+  # and the burden of knowing that on the reader of a NOTE (#63). 'sg' runs us
+  # again with the new group in our credentials, no re-login, one invocation.
+  # The guard makes that at most one hop: if sg somehow lands without the
+  # group, we fail loudly instead of forking forever.
+  if [ -z "${BOX_SETUP_HOST_REEXEC:-}" ]; then
+    echo "added $USER to incus-admin — re-running under the new group (no re-login needed)"
+    export BOX_SETUP_HOST_REEXEC=1
+    exec sg incus-admin -c "$(printf '%q ' bash "$self" "$@")"
+  fi
+  echo "ERROR: still not in incus-admin after usermod + sg." >&2
+  echo "       log out and back in, then re-run: box setup-host" >&2
+  exit 1
 fi
 
 # Storage pool + base config (safe to re-run: skipped once the pool exists).
@@ -28,7 +92,7 @@ fi
 # says so.
 if ! incus storage show default >/dev/null 2>&1; then
   driver=btrfs
-  command -v mkfs.btrfs >/dev/null 2>&1 || sudo apt-get install -y btrfs-progs || driver=dir
+  command -v mkfs.btrfs >/dev/null 2>&1 || apt_get install -y btrfs-progs || driver=dir
   if ! incus admin init --preseed <<PRESEED
 storage_pools:
 - name: default
@@ -117,19 +181,19 @@ incus network set boxnet raw.dnsmasq \
 # The no-UFW path drives nft directly, and a stock Debian 13 cloud image ships
 # neither nftables nor UFW — install the dependency we are about to use.
 if ! command -v ufw >/dev/null 2>&1 && ! command -v nft >/dev/null 2>&1; then
-  sudo apt-get install -y nftables
+  apt_get install -y nftables
 fi
-sudo install -m 755 "$here/host/box-firewall.sh" /usr/local/sbin/box-firewall
-sudo install -m 644 "$here/host/box-firewall.service" /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable box-firewall.service
+$SUDO install -m 755 "$here/host/box-firewall.sh" /usr/local/sbin/box-firewall
+$SUDO install -m 644 "$here/host/box-firewall.service" /etc/systemd/system/
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable box-firewall.service
 # RESTART, not 'enable --now'. The unit is RemainAfterExit, so once it has run
 # it stays "active" forever — and 'enable --now' does nothing to an active unit.
 # Re-running setup-host after upgrading the tool therefore installed the new
 # rules to /usr/local/sbin and never applied them: the host kept the old
 # firewall, silently, and the box→box hole stayed open through a release that
 # claimed to close it. Restart re-runs the script, which is idempotent by design.
-sudo systemctl restart box-firewall.service
+$SUDO systemctl restart box-firewall.service
 
 # Profile — box-net, the placement contract: the isolated NIC and the root
 # disk, nothing a template controls (resources are stamped per-instance from
@@ -143,7 +207,7 @@ incus profile edit box-net < "$here/profiles/box-net.yaml"
 
 # The sibling drop is the one rule whose absence is invisible: everything keeps
 # working, and boxes can simply reach each other. Assert it landed.
-if sudo nft list table bridge box >/dev/null 2>&1; then
+if $SUDO nft list table bridge box >/dev/null 2>&1; then
   echo "Isolation: box-to-box drop is live (nft bridge table 'box')."
 else
   echo "WARNING: the box-to-box drop is NOT active — boxes can reach each other." >&2

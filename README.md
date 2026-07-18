@@ -40,14 +40,56 @@ design rationale.
 curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
 ```
 
-Installs the tree to `~/.local/share/box` and links `box` onto your
-`PATH`. Re-run any time to upgrade — upgrading from a pre-0.4.0 install also
-retires the old `claudebox` symlink. (No `git clone` needed.)
+It asks first — **"Install box?"** — then, if box is not already installed,
+downloads the tree to `~/.local/share/box`, links `box` onto your `PATH`, and
+asks a second question: **"Set up this machine as a box host now?"** Say yes and
+it builds the whole isolation stack for you (it may ask for `sudo`); say no and
+you can run `box setup-host` later. (No `git clone` needed.)
+
+**Re-running is a safe no-op.** If box is already installed, the installer tells
+you so and changes nothing — a stray re-run can never clobber your install or
+rebuild the stack under your boxes. Upgrading is therefore explicit: uninstall
+what you have and install fresh. Preserve any boxes first — `box down <box>`,
+copy out anything you need (a portable `box export` is
+[#70](https://github.com/heavy-duty/box/issues/70)), then `box rm <box>`
+(which deletes the box *and* its snapshots) — then:
+
+```sh
+rm -rf ~/.local/share/box ~/.local/bin/box   # uninstall
+curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
+```
+
+A version-aware upgrade that migrates boxes instead of asking you to is
+[#67](https://github.com/heavy-duty/box/issues/67). For unattended installs
+(CI, images), `BOX_YES=1` answers every prompt yes and `BOX_SKIP_SETUP_HOST=1`
+declines the host-setup step.
+
+### Global vs per-user install
+
+Where box lands depends on **who runs the installer**, because on a shared host
+box's tree is *executed by other users* — so it cannot hide in one user's home:
+
+- **As root → global.** The tree goes to `/opt/box` (world-readable) and the
+  `box` symlink to `/usr/local/bin` (already on every login `PATH`). One
+  install, every operator on the host runs the same `box`. This is the fleet
+  path: [rig](https://github.com/heavy-duty/rig)'s `box` role
+  ([rig#24](https://github.com/heavy-duty/rig/issues/24)) installs box once at
+  host bootstrap ([#71](https://github.com/heavy-duty/box/issues/71)).
+- **As a normal user → per-user.** The tree goes to `~/.local/share/box` and
+  the symlink to `~/.local/bin` — the solo path, unchanged. Nobody else needs
+  to run your box.
+
+`BOX_HOME` / `BOX_BIN` override the destination on either path. A per-user
+install under `/root` would be `0700` and unreadable to everyone else — which
+is exactly the bug the root branch fixes.
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
+The installer already does this. Run it directly to set up a host you
+installed with `BOX_SKIP_SETUP_HOST=1`, or to re-apply the stack by hand:
+
 ```sh
-box setup-host   # run twice if it adds you to incus-admin (re-login between)
+box setup-host   # one run is enough
 ```
 
 Idempotent. Installs Incus and creates the isolation stack: the `boxnet` NAT

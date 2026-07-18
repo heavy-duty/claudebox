@@ -7,3 +7,9 @@ users:
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     lock_passwd: true
 package_update: false
+# The one package a blank box still needs: 'box tmux' runs 'tmux new-session'
+# INSIDE the box, and a bare Debian image ships no tmux — without this it fails
+# with "tmux: command not found" (#65). cloud-init refreshes the apt lists on its
+# own whenever 'packages' is non-empty, so package_update stays false here.
+packages:
+  - tmux
