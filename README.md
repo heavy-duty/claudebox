@@ -45,6 +45,22 @@ design rationale.
 curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
 ```
 
+By default that installs the **latest release** — the installer resolves the
+release tag off GitHub's `releases/latest` redirect (no API, no token) and
+downloads exactly that tree, so two operators running it get the same box.
+If the resolution fails it says so and stops — it never silently hands out
+`main`. `BOX_REF` picks another channel (a set ref is tried as a tag first,
+then as a branch — [#83](https://github.com/heavy-duty/box/issues/83)):
+
+```sh
+curl -fsSL .../install.sh | bash                  # the latest release (default)
+curl -fsSL .../install.sh | BOX_REF=0.6.0 bash    # pin a release
+curl -fsSL .../install.sh | BOX_REF=main bash     # the development tip
+```
+
+(A dev tree's `VERSION` carries a `-dev` suffix, so it lands beside your
+releases under `versions/`, never on top of one.)
+
 It asks first — **"Install box?"** — then downloads the tree into a
 **versioned** install (the way plenty of CLIs manage theirs), links `box` onto
 your `PATH`, and on a fresh host asks a second question: **"Set up this

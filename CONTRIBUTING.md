@@ -41,6 +41,29 @@ labels tell you where everything is without opening anything.
 7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
    mirror what CI runs; the multi-user rehearsal runs in CI on a real Incus.
 
+## Releases
+
+A release is a PR, then a tag ([#83](https://github.com/heavy-duty/box/issues/83)):
+
+1. **The release PR** — `release: X.Y.Z`, labeled `release` — bumps `VERSION`
+   from `X.Y.Z-dev` and stamps the `## Unreleased` section with version +
+   date (feature PRs land their changelog entry as part of the PR, so the
+   section is already written). This PR is where the release ritual hangs:
+   the full drill on real hardware, recorded in
+   [drill/RUNS.md](drill/RUNS.md) — CI proves the tier's semantics on every
+   PR, a release still proves the boundary.
+2. **Merge, then tag the merge commit** bare `X.Y.Z` — no `v` prefix, the
+   `0.6.0` tag set the precedent — and push the tag.
+   [release.yml](.github/workflows/release.yml) takes it from there: it
+   asserts the tag names the tree's own `VERSION` (a mismatch fails loudly
+   and creates nothing) and publishes the GitHub release with that version's
+   `CHANGELOG.md` section as the body. No assets — the source tarball for
+   the tag is the package, and `install.sh` downloads exactly that.
+3. **Immediately after: bump `main`'s `VERSION` to `X.Y.(Z+1)-dev`.** Not
+   cosmetic — the versioned layout names install trees after `VERSION`, so a
+   `main` install without the bump would land in `versions/X.Y.Z` and
+   impersonate the release you just cut.
+
 ## Labels — who sets what
 
 The full taxonomy lives in [LABELS.md](LABELS.md). What matters day to day is
