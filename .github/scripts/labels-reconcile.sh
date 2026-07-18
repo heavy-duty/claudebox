@@ -73,6 +73,16 @@ bot_verdict() { # $1 = login → MISSING | BLOCK | APPROVE | STALE | FEEDBACK
   esac
 }
 
+human_request_needed() { # 0 when needs-human requires a FRESH human request
+  # already requested → the handoff is live; head-current human approval →
+  # nothing left to ask. Anything else (never reviewed, an old comment, an
+  # approval of an older head) stalls the handoff unless we request —
+  # guarding on "has the human ever reviewed" wedged exactly that way.
+  if requested "$HUMAN"; then return 1; fi
+  if [ "$(bot_verdict "$HUMAN")" = APPROVE ]; then return 1; fi
+  return 0
+}
+
 decide_state() { # → the one state:* label this PR should carry
   if [ "$DRAFT" = true ]; then echo state:building; return; fi
   # an explicit human request outranks the bot rounds — it is the final
@@ -136,12 +146,13 @@ reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
   desired="$(decide_state)"
 
   # encode the runbook's last step for the no-judgment case: three formal
-  # head-current approvals → the human is asked, once. The guard (never
-  # requested, never reviewed) makes it idempotent — and the shared
-  # concurrency group in labels.yml makes it race-free. With a comment-only
-  # bot on the panel this path stays cold and the AUTHOR requests the human.
-  if [ "$desired" = state:needs-human ] && ! requested "$HUMAN" \
-    && [ -z "$(jq -r --arg u "$HUMAN" '[.[] | select(.user.login == $u)] | last | .state // empty' <<<"$REVIEWS_JSON")" ]; then
+  # head-current approvals → the human is asked, once. The guard asks whether
+  # a FRESH human review is needed for THIS head — never "has the human ever
+  # reviewed", which wedged the handoff after any earlier human comment.
+  # Idempotent (a live request suppresses it); race-free via the shared
+  # concurrency group in labels.yml. With a comment-only bot on the panel
+  # this path stays cold and the AUTHOR requests the human.
+  if [ "$desired" = state:needs-human ] && human_request_needed; then
     run gh api "repos/$REPO/pulls/$n/requested_reviewers" -f "reviewers[]=$HUMAN" --silent
     log "#$n: requested $HUMAN (round passed)"
   fi

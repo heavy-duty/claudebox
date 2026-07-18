@@ -119,5 +119,32 @@ REQUESTED="$HUMAN"
 expect "re-requested human is needs-human again" state:needs-human "$(decide_state)"
 REQUESTED=""
 
+# -- an old human comment must not wedge the handoff (codex, #85 round 3) -----
+REVIEWS_JSON="$(reviews \
+  "$(rev "$HUMAN" COMMENTED old1 "early thoughts" t0)" \
+  "$(rev "$BOT1" APPROVED head1 "" t1)" \
+  "$(rev "$BOT2" APPROVED head1 "" t2)" \
+  "$(rev "$BOT3" APPROVED head1 "" t3)")"
+expect "old human comment + three approvals is needs-human" state:needs-human "$(decide_state)"
+expect "old human comment still needs a fresh request" needed "$(human_request_needed && echo needed || echo not-needed)"
+# ...a stale human APPROVAL likewise needs a re-request for the new head
+REVIEWS_JSON="$(reviews \
+  "$(rev "$HUMAN" APPROVED old1 "" t0)" \
+  "$(rev "$BOT1" APPROVED head1 "" t1)" \
+  "$(rev "$BOT2" APPROVED head1 "" t2)" \
+  "$(rev "$BOT3" APPROVED head1 "" t3)")"
+expect "stale human approval needs a fresh request" needed "$(human_request_needed && echo needed || echo not-needed)"
+# ...a HEAD-CURRENT human approval needs nothing more
+REVIEWS_JSON="$(reviews \
+  "$(rev "$HUMAN" APPROVED head1 "" t0)" \
+  "$(rev "$BOT1" APPROVED head1 "" t1)" \
+  "$(rev "$BOT2" APPROVED head1 "" t2)" \
+  "$(rev "$BOT3" APPROVED head1 "" t3)")"
+expect "head-current human approval needs no request" not-needed "$(human_request_needed && echo needed || echo not-needed)"
+# ...and a live request suppresses re-requesting
+REQUESTED="$HUMAN"
+expect "live human request suppresses re-request" not-needed "$(human_request_needed && echo needed || echo not-needed)"
+REQUESTED=""
+
 printf 'labels-reconcile tests: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
