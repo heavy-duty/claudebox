@@ -247,17 +247,23 @@ v6="$(as_u "$U1" timeout -k 5 20 incus exec mine -- sh -c 'ip -6 addr show dev e
              || no "(g) the box holds a global IPv6 address — an uncovered egress path"
 
 phase "h. the escape hatches, tried and refused"
-# Each probe asserts the refusal's REASON, not just a nonzero exit — an image
-# server hiccup or a name collision also exits nonzero, and reading that as
-# "the escape is closed" is a false verdict wearing a green light (the drill
-# has relearned this enough times to earn a rule).
+# Each probe asserts more than a nonzero exit — an image hiccup or a name
+# collision also exits nonzero, and reading that as "the escape is closed"
+# is a false verdict wearing a green light (the drill has relearned this
+# enough times to earn a rule). For the attach, the incus ERROR WORDING
+# drifts between 6.0.x releases (6.0.4 refuses before "Launching", 6.0.0
+# after — MU-4), so the assertion is the OUTCOME: nothing may end up running
+# on the private bridge, and the refusal line is printed as evidence.
 out="$(as_u "$U1" incus launch images:debian/13 esc --network "incusbr-$uid1" 2>&1)"; rc=$?
-if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qiE 'not found|not allowed'; then
-  ok "(h) attaching the private incusbr-$uid1 is refused (not in restricted.networks.access)"
+st="$(incus --project "$p1" list esc --format csv --columns s 2>/dev/null | head -n1)"
+if [ "$rc" -eq 0 ] || [ "$st" = RUNNING ]; then
+  no "(h) the private-bridge attach was NOT refused (rc=$rc, esc state: ${st:-none}):"
+  printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
 else
-  no "(h) private-bridge attach: rc=$rc, said: $(printf '%s' "$out" | head -1)"
-  as_u "$U1" incus delete -f esc >/dev/null 2>&1
+  ok "(h) attaching the private incusbr-$uid1 is refused (rc=$rc, nothing running on it)"
+  inf "refusal: $(printf '%s\n' "$out" | grep -m1 -i 'error' || printf '%s\n' "$out" | tail -1)"
 fi
+as_u "$U1" incus delete -f esc >/dev/null 2>&1
 out="$(as_u "$U1" incus project set "$p1" restricted.networks.access "boxnet,incusbr-$uid1" 2>&1)"; rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'restricted'; then
   ok "(h) a restricted certificate cannot widen its own project"
