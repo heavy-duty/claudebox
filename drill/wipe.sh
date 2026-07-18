@@ -19,6 +19,11 @@
 # NOT 'set -e': on a wipe, a step that finds nothing to remove is success,
 # not failure. Every removal states what it did; silence is never trusted
 # (the exit-code lesson, again).
+#
+# The file is one long 'removal && say "did X" || say "X failed"'. say always
+# returns 0, so the C-may-run-when-A-is-true trap SC2015 warns about cannot fire
+# here (same reasoning as drill.sh's ok/no).
+# shellcheck disable=SC2015
 set -u
 
 YES=0; PURGE_STORAGE=0

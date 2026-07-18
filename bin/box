@@ -641,6 +641,13 @@ load_template() {
       *) die "template '$t': not a KEY=\"value\" line: $line" ;;
     esac
     val="${val#\"}"; val="${val%\"}"
+    # T_DESC is parsed for symmetry with the other BOX_* keys, but cmd_templates
+    # re-reads BOX_DESCRIPTION straight from the file (a box is listed without
+    # ever loading its template), so the parsed value here is never read. Keep the
+    # row — deleting it would turn box.env's own key into an "unknown key" error at
+    # mint time. (SC2034 disabled for the branch below; the directive must sit on
+    # the whole case, not an individual arm.)
+    # shellcheck disable=SC2034
     case "$key" in
       BOX_DESCRIPTION) T_DESC="$val" ;;
       BOX_IMAGE)       T_IMAGE="$val" ;;
@@ -651,7 +658,12 @@ load_template() {
       *) die "template '$t': unknown key '$key' — a template sets image, user and resources, nothing else (there is no key for a network, on purpose)" ;;
     esac
   done <"$dir/box.env"
-  [ -n "$T_IMAGE" ] && [ -n "$T_USER" ] || die "template '$t': BOX_IMAGE and BOX_USER are required"
+  # Not 'A && B || die': if T_IMAGE is set but T_USER is not, that idiom still
+  # dies (which is what we want) — but it reads as an if-then-else it is not, so
+  # spell the guard out (SC2015).
+  if [ -z "$T_IMAGE" ] || [ -z "$T_USER" ]; then
+    die "template '$t': BOX_IMAGE and BOX_USER are required"
+  fi
   # Resolution, most specific wins: inline flag (--cpu/--memory/--disk, #57)
   # > BOX_* environment (how a small host or the drill shrinks every box it
   # mints) > the template's file > defaults. Values pass to Incus verbatim —
@@ -793,7 +805,7 @@ box_net_ip() {
   pfx="$(incus network get boxnet ipv4.address 2>/dev/null | cut -d/ -f1 | cut -d. -f1-3)"
   [ -n "$pfx" ] || return 1
   incus list "$1" --format csv --columns 4 2>/dev/null \
-    | tr -d '"' | tr ' ,' '\n\n' | grep -E "^${pfx//./\\.}\.[0-9]+$" | head -n1 | grep .
+    | tr -d '"' | tr ' ,' '\n' | grep -E "^${pfx//./\\.}\.[0-9]+$" | head -n1 | grep .
 }
 
 # VIRTUAL-MACHINE is a mouthful in a table; anything unexpected passes through.

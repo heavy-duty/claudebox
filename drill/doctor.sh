@@ -14,6 +14,11 @@
 #
 # This script is the answer to "what state is the host actually in?" — the
 # question that kept getting answered by hand.
+#
+# ok/no/inf/head_ all return 0, so the 'A && ok "…" || no "…"' idiom this file
+# is built on cannot hit the C-may-run-when-A-is-true trap SC2015 warns about
+# (same reasoning as drill.sh's ok/no).
+# shellcheck disable=SC2015
 set -u
 
 FIX=0; PIN=0
