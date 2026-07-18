@@ -234,6 +234,22 @@ check "grant: backs out its own group-add on failure" 0 "" \
   grep -qF 'trap backout EXIT' "$ROOT/host/grant-user.sh"
 check "grant: the back-out disarms on success" 0 "" \
   grep -qF 'trap - EXIT' "$ROOT/host/grant-user.sh"
+# The backout must VERIFY the removal and scream when it cannot — an
+# unverified rollback printing a security guarantee is the review's A2.
+check "grant: the backout verifies against the group database" 0 "" \
+  bash -c 'awk "/^backout\(\) \{/,/^\}/" "'"$ROOT"'/host/grant-user.sh" | grep -q "id -nG"'
+check "grant: an unverifiable rollback screams" 0 "" \
+  grep -qF 'ROLLBACK INCOMPLETE' "$ROOT/host/grant-user.sh"
+check "grant: a failed re-grant warns the pre-existing member is untouched" 0 "" \
+  grep -qF 'still holding socket access' "$ROOT/host/grant-user.sh"
+check "grant: the mid-grant login window is named" 0 "" \
+  bash -c 'awk "/^backout\(\) \{/,/^\}/" "'"$ROOT"'/host/grant-user.sh" | grep -q "loginctl terminate-user"'
+# The scoped guarantee (raw --network boxnet) is measured, not prose:
+check "rehearsal: measures the raw boxnet attach (criterion m)" 0 "" \
+  grep -qF -- '--network boxnet' "$ROOT/drill/multiuser.sh"
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "rehearsal: injects grant failures (criterion n)" 0 "" \
+  grep -qF 'grant-user.sh" "$U3"' "$ROOT/drill/multiuser.sh"
 # shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "revoke: purge deletes instances one at a time" 0 "" \
   grep -qF 'delete -f "$inst"' "$ROOT/host/revoke-user.sh"

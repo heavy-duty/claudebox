@@ -253,7 +253,7 @@ done
 # An interrupted multiuser.sh leaves its users (and their projects) behind —
 # and nothing else on this host will ever mention them. Its own cleanup is
 # 'box revoke --purge + userdel'; say so rather than absorbing them silently.
-for u in boxdrill1 boxdrill2; do
+for u in boxdrill1 boxdrill2 boxdrill3 boxdrill4; do
   if getent passwd "$u" >/dev/null 2>&1; then
     no "leftover rehearsal user: $u (an interrupted drill/multiuser.sh run)"
     inf "fix:  sudo BOX_YES=1 box revoke $u --purge && sudo userdel -r $u"

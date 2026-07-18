@@ -1,6 +1,6 @@
 # Restricted incus tier — design and measured results (#74)
 
-**Status: implemented and rehearsed.** 42/42 rehearsal criteria green on the
+**Status: implemented and rehearsed.** 54/54 rehearsal criteria green on the
 design host (Debian 13 trixie, Incus 6.0.4, nested KVM), in container mode
 and VM mode — and green in CI on ubuntu-latest / incus 6.0.0 (whose one
 version-drift false FAIL is MU-4 in `drill/RUNS.md`). This doc records the design, what was measured, and why each
@@ -69,10 +69,27 @@ touch `boxnet`'s config or the ACL (`no permission for project "default"`).
 
 A restricted user CAN edit the `box-net` profile copy in their own project
 (they own project profiles — `features.profiles=true`), including stripping
-`security.port_isolation`. That is why the host-owned nft bridge drop is the
-second layer: `meta ibrname boxnet obrname boxnet drop` fires on every
-port-to-port frame regardless of per-NIC flags. Cross-user sibling probes are
-dropped either way — measured from inside the boxes.
+`security.port_isolation` — and CAN attach `boxnet` raw with `--network
+boxnet`, no profile at all (the network must be in
+`restricted.networks.access` for the profile to work; there is no
+allow-via-profile-only lever). That is why the host-owned nft bridge drop is
+the second layer: `meta ibrname boxnet obrname boxnet drop` fires on every
+port-to-port frame regardless of per-NIC flags. The documented guarantee is
+scoped accordingly (see box-design.md): box-minted instances carry per-NIC
+port isolation; raw attachments keep every network- and host-owned control,
+losing only that redundant L2 layer. Both shapes are measured from inside
+the instances (rehearsal criteria g and m).
+
+Two grant-failure contracts, both injected in the rehearsal (criterion n):
+a fresh user is backed out of the group with the removal VERIFIED against
+the live group database (and any session begun mid-grant is named, with the
+loginctl remedy — the one window the database cannot close); a pre-existing
+member is never stripped by a failed re-grant, but the failure states out
+loud that they retain socket access on part-converged policy, with both
+remediations. The default-profile eth0 removal is deliberately NOT restored
+on failure: that mutation only reduces capability, and restoring it would
+move the failure state away from fail-closed. Every step is check-then-
+converge, which is what makes re-run-to-repair deterministic.
 
 ## What `box grant <user>` converges (idempotent, re-run to refresh)
 
@@ -110,10 +127,11 @@ It had never worked.
 ## Rehearsal and CI
 
 `drill/multiuser.sh` (root, opt-in via `BOX_MULTIUSER_REHEARSAL=1`) proves
-criteria (a)–(f) from #74 plus the measured extensions (g)–(l): the in-box
+criteria (a)–(f) from #74 plus the measured extensions (g)–(n): the in-box
 isolation contract (egress, DNS, box→host, RFC1918, cross-user sibling drop,
 name enumeration, IPv6-off), the closed escape hatches, re-sync survival, and
-scoped revoke. Two real users, real grants, real mints, probes from inside;
+scoped revoke, the raw-attach scoped guarantee (m) and the grant-failure
+injections (n). Real users, real grants, real mints, probes from inside;
 `--container` for CI, VM mode on real hardware; cleanup deletes everything it
 made.
 

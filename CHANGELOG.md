@@ -20,10 +20,10 @@ which records not just what changed but what each drill run proved.
   into their project. `box_tier()` (live credentials, argless `id -nG`)
   drives the tier-aware surface: `expose` refuses honestly before any daemon
   call, `setup-host` and `doctor` answer at the caller's tier. Rehearsed
-  end-to-end by `drill/multiuser.sh` (criteria a–l: confinement, lifecycle,
+  end-to-end by `drill/multiuser.sh` (criteria a–n: confinement, lifecycle,
   cross-user visibility, name collisions, the in-box isolation contract,
   escape hatches, re-sync survival, revoke incl. the live-session case) —
-  42/42 on the design host, in both container and VM mode.
+  54/54 on the design host (container and VM mode), including the raw-attach scoped-guarantee measurement and both grant-failure injections demanded by #75's review.
 - **CI runs the multi-user rehearsal on a real Incus** — a second `rehearsal`
   job stands up the full stack on the runner (setup-host, doctor, then
   `multiuser.sh --container`), so every PR proves the tier's semantics

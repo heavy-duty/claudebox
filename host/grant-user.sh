@@ -93,16 +93,40 @@ fi
 # fresh grant (their existing sessions predate the membership, so no process
 # holds it yet). A user who was already in the group keeps it: not ours to
 # take on a re-run's failure.
-added_group=0
+added_group=0; was_member=0
 backout() {
   if [ "$added_group" -eq 1 ]; then
     $SUDO gpasswd -d "$user" incus >/dev/null 2>&1 || true
-    echo "box grant: FAILED — removed $user from 'incus' again (no half-granted access left behind); fix the cause and re-run" >&2
+    # VERIFY the removal — an unverified rollback printing a security
+    # guarantee is a lie waiting for its day. Exact-token match, live DB.
+    if id -nG "$user" 2>/dev/null | tr ' ' '\n' | grep -qx incus; then
+      echo "box grant: ROLLBACK INCOMPLETE — the grant failed AND $user is still in the 'incus' group." >&2
+      echo "           remove it by hand NOW:  gpasswd -d $user incus   (then fix the cause and re-run)" >&2
+      exit 1
+    fi
+    echo "box grant: FAILED — removed $user from 'incus' again (verified against the group database); fix the cause and re-run" >&2
+    # The one window the database cannot close: a login STARTED between our
+    # usermod and this backout keeps the group in its session credentials.
+    # For a fresh grant that is a rare race, but rare is not never — name it
+    # and the remedy instead of overclaiming.
+    if pgrep -u "$user" >/dev/null 2>&1; then
+      echo "box grant: NOTE — $user has live processes; a session begun during this grant would still hold" >&2
+      echo "           the group until it ends:  sudo loginctl terminate-user $user" >&2
+    fi
+  elif [ "$was_member" -eq 1 ]; then
+    # A user who was ALREADY in the group keeps it — stripping a membership
+    # this run did not add could break a working user over a failed re-run.
+    # But silence here would leave them holding a socket onto part-converged
+    # policy without the admin being told. Loud, with both remediations.
+    echo "box grant: FAILED with $user still holding socket access (their membership predates this run)." >&2
+    echo "           their project may be part-converged — harmless in itself, and a re-run converges the rest." >&2
+    echo "           if their access is not acceptable while you fix the cause:  box revoke $user" >&2
   fi
 }
 trap backout EXIT
 
 if id -nG "$user" | tr ' ' '\n' | grep -qx incus; then
+  was_member=1
   echo "group: $user already in 'incus'"
 else
   $SUDO usermod -aG incus "$user"

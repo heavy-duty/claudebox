@@ -165,9 +165,16 @@ Cross-USER isolation is the same mechanism as cross-box isolation, on
 purpose: their instances share `boxnet` with everyone's, and the bridge-family
 drop + port isolation + `dns.mode=none` already make any two boxes strangers.
 A restricted user CAN strip `security.port_isolation` from the profile copy
-in their own project — which is why the nft bridge drop, which they cannot
-touch, exists as the second, host-owned layer. Defense in depth, both layers
-measured (`drill/multiuser.sh`, criteria a–l).
+in their own project — or skip the profile entirely and attach `boxnet` raw
+(`--network boxnet`); the network must be usable for the profile to work, and
+Incus has no allow-via-profile-only lever. So the guarantee is scoped, and
+said plainly: **per-NIC port isolation is guaranteed for box-minted
+instances; a raw attachment keeps every network-owned control (the ACL,
+`dns.mode=none`, the resolver pin) and every host-owned one (the nft bridge
+drop) — losing only the redundant per-NIC L2 layer.** Scoped, and measured:
+`drill/multiuser.sh` criterion (m) launches exactly that raw instance and
+probes egress, RFC1918, both sibling directions and name enumeration from
+inside it. Defense in depth, every layer measured (criteria a–n).
 
 `box revoke` is two strengths: bare, it removes the group — their boxes keep
 *running* (revoking a person does not kill their workloads), `grant` restores

@@ -26,6 +26,10 @@
 #   i. (folded into b: snapshot / restore / clone)
 #   k. the grant survives an incus-user restart
 #   l. box revoke --purge removes the user's world and touches nobody else's
+#   m. a RAW attach to boxnet (no box-net profile) keeps every network- and
+#      host-owned control — the scoped guarantee, measured (#75 review)
+#   n. a grant that fails is fail-closed: fresh user backed out (verified),
+#      pre-existing member warned loudly, re-run converges (#75 review)
 #
 # ok/no/note return 0 by design — the 'A && ok || no' idiom below is the
 # same one drill.sh is built on (and the reason for the SC2015 disable).
@@ -105,7 +109,7 @@ cleanup() {
   [ "$KEEP" = 1 ] && { echo "(--keep: users and boxes left for inspection)"; return; }
   echo
   echo "── cleanup"
-  for u in "$U1" "$U2"; do
+  for u in "$U1" "$U2" boxdrill3 boxdrill4; do
     id "$u" >/dev/null 2>&1 || continue
     # A half-failed purge followed by userdel leaves a project owned by
     # nobody — and doctor's leftover check keys on the USER existing. Keep
@@ -277,6 +281,56 @@ else
   no "(h) boxnet edit attempt: rc=$rc, said: $(printf '%s' "$out" | head -1)"
 fi
 
+phase "m. a raw attach to boxnet — the scoped guarantee, measured"
+# A restricted user CAN 'incus launch --network boxnet' without the box-net
+# profile: boxnet must be in restricted.networks.access for the profile to
+# work at all, and Incus has no allow-via-profile-only lever. What the raw
+# NIC loses is per-NIC security.port_isolation — the deliberately redundant
+# L2 twin of the host-owned nft bridge drop. Everything else binds to the
+# NETWORK (ACL, dns.mode=none, resolver pin) or the HOST (nft drop), so the
+# contract's claim for raw attachments is "every control except the
+# redundant per-NIC layer" — and a claim is a measurement here, not prose.
+# Same image the blank template mints (the /cloud variant): the plain image
+# has no DHCP client, so its raw instance holds NO lease — and against a
+# dead NIC every negative probe below "passes" vacuously while the contract
+# goes unmeasured. Caught on this criterion's first run (MU-5).
+if as_u "$U1" incus launch images:debian/13/cloud esc2 --network boxnet >/dev/null 2>&1; then
+  ok "(m) raw attach to boxnet launches (expected: the network must be usable for the profile to work)"
+  ip_raw=""
+  for _ in $(seq 1 45); do
+    ip_raw="$(incus --project "$p1" list esc2 --format csv --columns 4 2>/dev/null | tr -d '"' | sed 's/ (.*//' | grep . | head -n1)"
+    [ -n "$ip_raw" ] && as_u "$U1" timeout -k 5 15 incus exec esc2 -- true >/dev/null 2>&1 && break
+    sleep 2
+  done
+  inf "raw instance esc2: ${ip_raw:-<no ip>}"
+  if [ -z "$ip_raw" ]; then
+    # Without an address the negative probes below would all pass vacuously
+    # — a dead NIC drops everything, including the truth.
+    no "(m) the raw instance never got a boxnet lease — the scoped guarantee went UNMEASURED"
+  else
+    r="$(probe_up "$U1" esc2 https://1.1.1.1)"
+    [ "$r" = reachable ] && ok "(m) raw NIC: public egress works ($r)" || no "(m) raw NIC: egress broken: $r"
+    r="$(probe_from "$U1" esc2 "http://192.168.0.1")"
+    [ "$r" = dropped ] && ok "(m) raw NIC: RFC1918 still dropped (the ACL binds to the network, not the profile)" \
+                       || no "(m) raw NIC: reaches private space ($r) — the ACL did not cover a raw attach"
+    if [ -n "$ip2" ]; then
+      r="$(probe_from "$U1" esc2 "http://$ip2:9")"
+      [ "$r" = dropped ] && ok "(m) raw → another user's box is DROPPED (the nft drop is host-owned)" \
+                         || no "(m) raw instance reached a sibling ($r) — the host drop did not cover it"
+    fi
+    r="$(probe_from "$U2" mine "http://$ip_raw:9")"
+    [ "$r" = dropped ] && ok "(m) another user's box → raw is DROPPED (both directions hold)" \
+                       || no "(m) a sibling reached the raw instance ($r)"
+    as_u "$U1" timeout -k 5 20 incus exec esc2 -- getent hosts mine >/dev/null 2>&1 \
+      && no "(m) raw NIC can enumerate instance names (dns.mode leak)" \
+      || ok "(m) raw NIC: name enumeration still blocked (dns.mode=none is the network's)"
+  fi
+  as_u "$U1" incus delete -f esc2 >/dev/null 2>&1
+  aud "m. raw boxnet attach keeps ACL + nft drop + dns.mode (measured); loses only per-NIC port_isolation — the scoped guarantee in box-design.md"
+else
+  no "(m) raw attach to boxnet failed to launch — the scoped-guarantee measurement could not run"
+fi
+
 phase "e/f. the honest refusals — expose, setup-host, doctor"
 out="$(as_u "$U1" box expose mine 3000 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi restricted \
@@ -324,6 +378,63 @@ st="$(incus --project "$p1" list mine --format csv --columns s 2>/dev/null | hea
 [ "$st" = RUNNING ] && ok "(l) $U1's box is untouched and RUNNING through it all" \
                     || no "(l) $U1's box state after $U2's purge: '$st'"
 aud "l. revoke --purge is scoped: $U2 erased, $U1 unmoved"
+
+phase "n. a grant that fails is fail-closed — injected, both flavors"
+U3=boxdrill3; U4=boxdrill4
+BOXROOT="$(dirname "$(dirname "$(readlink -f "$(command -v box)")")")"
+
+# Flavor 1: a FRESH user, fault injected at the LAST mutation (the profile
+# edit) — so the backout runs after every earlier mutation has landed. The
+# contract: nonzero exit, the group's absence VERIFIED, and a clean re-run
+# converges the partial state (which is what makes re-run-to-repair real).
+useradd -m -s /bin/bash "$U3" 2>/dev/null
+badroot="$(mktemp -d)"
+cp -r "$BOXROOT/." "$badroot/"
+echo 'devices: {' > "$badroot/profiles/box-net.yaml"   # yaml that cannot load
+out="$(bash "$badroot/host/grant-user.sh" "$U3" 2>&1)"; rc=$?
+rm -rf "$badroot"
+if [ "$rc" -ne 0 ] && ! id -nG "$U3" | tr ' ' '\n' | grep -qx incus; then
+  ok "(n) fresh-user grant failed at the last mutation → backed out, group absence verified (rc=$rc)"
+else
+  no "(n) injected failure: rc=$rc, in-group=$(id -nG "$U3" | tr ' ' '\n' | grep -cx incus) — not fail-closed:"
+  printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
+fi
+printf '%s' "$out" | grep -q "verified against the group database" \
+  && ok "(n) the backout message claims only what it verified" \
+  || no "(n) the backout message is not the verified one"
+box grant "$U3" >/dev/null 2>&1 \
+  && ok "(n) a clean re-run converges the partial state left by the failure" \
+  || no "(n) re-run after injected failure did NOT converge"
+
+# Flavor 2: a PRE-EXISTING member (hand-added before box, the review's named
+# scenario) with an instance parked on the private bridge by an
+# instance-local NIC — narrowing must fail, the grant must fail LOUDLY
+# saying they retain socket access, and must NOT strip the membership this
+# run did not add. Unblock, re-run, converge.
+useradd -m -s /bin/bash "$U4" 2>/dev/null
+usermod -aG incus "$U4"
+as_u "$U4" incus project list >/dev/null 2>&1   # materialize their project
+uid4="$(id -u "$U4")"
+br4="incusbr-$uid4"; [ "${#br4}" -gt 15 ] && br4="user-$uid4"
+if as_u "$U4" incus launch images:debian/13 blocker --network "$br4" >/dev/null 2>&1; then
+  out="$(box grant "$U4" 2>&1)"; rc=$?
+  if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "still holding socket access"; then
+    ok "(n) blocked narrowing fails LOUDLY, naming the retained access (rc=$rc)"
+  else
+    no "(n) blocked narrowing: rc=$rc — the loud contract is missing:"
+    printf '%s\n' "$out" | tail -3 | sed 's/^/        /'
+  fi
+  id -nG "$U4" | tr ' ' '\n' | grep -qx incus \
+    && ok "(n) the pre-existing membership was NOT stripped by the failed re-grant" \
+    || no "(n) the failed grant stripped a membership it did not add"
+  as_u "$U4" incus delete -f blocker >/dev/null 2>&1
+  box grant "$U4" >/dev/null 2>&1 \
+    && ok "(n) unblocked re-run converges" \
+    || no "(n) re-run after unblocking failed"
+else
+  no "(n) could not stage the private-bridge blocker — the blocked-narrowing contract went unmeasured"
+fi
+aud "n. fail-closed injections: fresh-user backout verified; pre-existing member warned, not stripped; re-runs converge"
 
 echo
 echo "════════════════════════════════════════════"
