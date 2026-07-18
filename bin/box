@@ -161,7 +161,7 @@ OPTIONS
                           dev/test only. Default where /dev/kvm is absent.
   --json                Emit Incus JSON instead of a table     (list, info)
   --instance-only       Export the live state only, no snapshots   (export)
-  --force, -f           Delete without the confirmation prompt        (rm)
+  --force, -f           Delete without asking (rm); overwrite the file (export)
   --remote <r>          Act on Incus remote <r>                       (any)
   --help, -h            Help; after a command, help for that command
   --version, -V         Print the box version
@@ -347,6 +347,7 @@ the reuse workflow (log in once, snapshot, clone forever) lives in them.
 
   box export <box> [<file>]   # default file: <box>-<UTC timestamp>.tar.gz
   --instance-only             # live state only, leave the snapshots behind
+  --force                     # overwrite an existing <file> (refused otherwise)
 
 The box must be stopped first ('box down <box>'). Incus can back up a running
 instance, but a live root disk is a moving target — and this artifact's whole
@@ -804,7 +805,7 @@ wait_agent() {
 # the reset costs one reboot. Do it before handing the box over, never after.
 reset_identity() {
   local i="$1"
-  echo "box: giving the clone its own identity (machine-id, DHCP lease)..."
+  echo "box: giving the instance its own identity (machine-id, DHCP lease)..."
   # Do NOT truncate machine-id and reboot: systemd needs a valid one to shut
   # down cleanly, so the graceful stop hangs and the reboot never happens —
   # leaving the clone on its source's identity, which is the bug we are here to
