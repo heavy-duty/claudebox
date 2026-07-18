@@ -1,8 +1,9 @@
 # Restricted incus tier — design and measured results (#74)
 
-**Status: implemented and rehearsed.** 41/41 rehearsal criteria green on the
+**Status: implemented and rehearsed.** 42/42 rehearsal criteria green on the
 design host (Debian 13 trixie, Incus 6.0.4, nested KVM), in container mode
-and VM mode. This doc records the design, what was measured, and why each
+and VM mode — and green in CI on ubuntu-latest / incus 6.0.0 (whose one
+version-drift false FAIL is MU-4 in `drill/RUNS.md`). This doc records the design, what was measured, and why each
 decision fell where it did. It supersedes the vetoed #72 design
 (`docs/plans/2026-07-17-multiuser-hosts.md` on `feat/restricted-tier-wip`).
 

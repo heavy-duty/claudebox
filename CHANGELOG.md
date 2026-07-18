@@ -22,8 +22,8 @@ which records not just what changed but what each drill run proved.
   call, `setup-host` and `doctor` answer at the caller's tier. Rehearsed
   end-to-end by `drill/multiuser.sh` (criteria a–l: confinement, lifecycle,
   cross-user visibility, name collisions, the in-box isolation contract,
-  escape hatches, re-sync survival, revoke) — 41/41 on the design host, in
-  both container and VM mode.
+  escape hatches, re-sync survival, revoke incl. the live-session case) —
+  42/42 on the design host, in both container and VM mode.
 - **CI runs the multi-user rehearsal on a real Incus** — a second `rehearsal`
   job stands up the full stack on the runner (setup-host, doctor, then
   `multiuser.sh --container`), so every PR proves the tier's semantics
