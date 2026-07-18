@@ -132,3 +132,35 @@ pass before merge:
 - [ ] Grep assertions: `BOX_REQUIRE_VM`/`BOX_AUTOSTART` appear in the
   allowlist; `boot.autostart` is stamped only under the `BOX_AUTOSTART`
   guard; no template other than `staging` sets either key.
+
+---
+
+## Addendum (2026-07-18): rebased onto main; the template test suite
+
+The branch was rebased onto main, which had since gained the restricted tier
+(#74), a CI workflow, and `test/cli.sh`. What that changed here:
+
+- **`load_template` conflicts** — main replaced the `[ -n … ] && [ -n … ] ||
+  die` required-keys idiom with the spelled-out `if [ -z … ]` form (SC2015)
+  and grew the SC2034 directive block; the two new key arms were re-applied
+  onto that version, both intact.
+- **`cmd_new`** — main added a tier-aware box-net pre-flight at the top of
+  the function; the `BOX_REQUIRE_VM` refusal stays in the fresh-mint branch,
+  after `pick_mode` (it must read the *effective* mode). Its message holds
+  for both tiers: `/dev/kvm` is a host fact, and admin and restricted mints
+  go through the same daemon, so the fix is the same — a KVM host, not a
+  grant.
+- **tmux** — `box tmux` is a contract every template honors (#65, asserted
+  by `test/cli.sh`), so the staging package list carries tmux; the operator
+  babysits `rig bootstrap workload` through it.
+- **The template test suite** (maintainer request): `test/cli.sh`'s template
+  coverage is now *dynamic* over `templates/*/` — a new template cannot ship
+  unseen. Per template: `box.env` driven through the real, extracted
+  `load_template` (unknown keys and missing `BOX_IMAGE`/`BOX_USER` fail);
+  `user-data.yaml` exists, declares `#cloud-config`, parses as YAML
+  (python3+pyyaml, loudly skipped where absent), installs tmux.
+  Staging-specific: both boot demands proven through the parser, docker +
+  rig present, and a creds-free grep-refusal (no tailscale/authkey/ssh in
+  effective cloud-init lines). Grep guards pin the `cmd_new` half: the
+  refusal orders after `pick_mode`; `boot.autostart` is stamped only under
+  the `T_AUTOSTART` guard.

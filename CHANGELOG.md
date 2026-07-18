@@ -5,6 +5,27 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Added
+
+- **Server-class boxes: the `staging` template** (#68) — Debian 13 VM with
+  docker + rig (+ tmux, the #65 contract) preinstalled and *nothing* that
+  joins or admits: tailscale, sshd and every credential are rig's to install
+  at bootstrap time (`box shell` → `sudo rig bootstrap workload`), inside
+  the guest — box stays creds-free. Two new optional `box.env` keys carry
+  the posture: `BOX_REQUIRE_VM=1` (no container fallback, and `--container`
+  is refused — the VM is the trust boundary and the guest runs docker) and
+  `BOX_AUTOSTART=1` (`boot.autostart=true`, so the box returns from a host
+  reboot without an operator; clones inherit it via `incus copy`). Still no
+  key for a network or a `security.*` flag. The design doc gains the
+  overlay-join clarification and the snapshot-before-join rule.
+- **Template test suite** — `test/cli.sh`'s template coverage is dynamic
+  over `templates/*/`, so a new template cannot ship unseen: `box.env` is
+  driven through the real, extracted `load_template` (unknown keys and
+  missing `BOX_IMAGE`/`BOX_USER` fail), `user-data.yaml` must exist, declare
+  `#cloud-config`, parse as YAML and install tmux; staging additionally
+  proves its boot demands, docker + rig, and the creds-free refusal (no
+  tailscale/authkey/ssh in effective cloud-init lines).
+
 ## 0.6.0 — 2026-07-18
 
 ### Added
