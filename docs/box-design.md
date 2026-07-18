@@ -55,13 +55,35 @@ rides along deliberately — and because scrubbing a disk image is a promise
 tarball surgery cannot keep, export shouts that the file is a credential
 instead of pretending to sanitize it.
 
+## Thin templates: box mints, rig converges (#81)
+
+A template is a **thin, creds-free seed** — base image, the tenant user,
+tmux, and [rig](https://github.com/heavy-duty/rig) preinstalled — and what
+the box *becomes* lives in rig's bootstrap roles (rig#31): box auto-runs the
+template's creds-free tenant role after cloud-init (`rig bootstrap claude` /
+`codex` / `grok` / `staging`), which installs the agent CLI or server
+posture. The split is deliberate: cloud-init is a first-boot one-shot —
+not convergent, not re-runnable, only parse-and-grep testable — while a rig
+role is an idempotent script with effective-state asserts that can also
+converge an *existing* box to a newer spec. Anything that joins a tailnet or
+holds a key (staging's workload join) stays operator-run through
+`box shell`; box prints it as a next step and never sees the key. The seed's
+rig install is pinned by `RIG_REPO`/`RIG_REF` at mint (default
+`heavy-duty/rig@main`, unpinned — the honest edge until rig#32's releases),
+and box's template suite holds the line with fail-closed absence greps: no
+agent CLI, no docker, no tailscale, no context-file heredocs in any
+template, ever again.
+
 ## The box announces itself to the agent
 
-cloud-init installs a global agent-context file in every coding-agent box
+Every coding-agent box gets a global agent-context file
 (`~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.grok/AGENTS.md`) telling the
 agent it is running in a box (trust-less, ephemeral, creds-free) and to treat a
 repo's `.box/` folder as its bootstrap runbook. No "tell it" step, no host
-execution.
+execution. The file is rendered by rig's tenant roles from one shared
+template (#81) — including the #80 guard: never run `box setup-host`,
+`box teardown-host` or the drill inside a box; a nested box stack claims the
+guest's own uplink subnet and silently breaks its networking.
 
 ## `.box/` is optional, agent-facing documentation
 

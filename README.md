@@ -2,9 +2,12 @@
 
 **Headless, trust-less, throwaway dev VMs.** One command mints a fresh,
 network-isolated Incus box from a **template**; the coding-agent templates
-ship a CLI agent on Debian 13 — `claude` (Claude Code), `codex` (OpenAI
-Codex), `grok` (xAI Grok). The box is the product — you log in and work;
-destroying it loses nothing you didn't push.
+hand you a CLI agent on Debian 13 — `claude` (Claude Code), `codex` (OpenAI
+Codex), `grok` (xAI Grok) — **box mints, [rig](https://github.com/heavy-duty/rig)
+converges**: the template is a thin seed, and the agent tooling lands via a
+creds-free `rig bootstrap` role auto-run at mint
+([#81](https://github.com/heavy-duty/box/issues/81)). The box is the product
+— you log in and work; destroying it loses nothing you didn't push.
 
 **Strictly creds-free.** A box ships with everything installed and **no**
 credentials — no agent token, no git PAT, nothing. You authenticate
@@ -215,23 +218,64 @@ claude                           # if the repo has .box/, the agent reads it and
 No coding agent is special — each is one template among several, and adding
 another is just another directory. What ships today:
 
-| Template | What's in it                                              |
-| -------- | --------------------------------------------------------- |
-| `blank`  | Bare Debian 13 — same isolation, no tooling. The default. |
-| `claude` | Claude Code, creds-free — where this project started      |
-| `codex`  | OpenAI Codex CLI, creds-free                              |
-| `grok`   | xAI Grok CLI, creds-free                                  |
+| Template  | What it becomes                                                        |
+| --------- | ---------------------------------------------------------------------- |
+| `blank`   | Bare Debian 13 — same isolation, no tooling. The default.              |
+| `claude`  | Claude Code, creds-free — where this project started                   |
+| `codex`   | OpenAI Codex CLI, creds-free                                           |
+| `grok`    | xAI Grok CLI, creds-free                                               |
+| `staging` | Server-class: docker + sshd hardening via rig; VM-only, autostarts     |
 
-A template is a directory under `templates/`: a `box.env` (image, user,
-resources — parsed against a strict allowlist, never sourced) and a
-`user-data.yaml` (cloud-init, passed to Incus verbatim). The coding-CLI
-templates are all the same shape — install the CLI, put it on PATH, drop an
-agent-context file; none of them carry credentials.
+**Templates are thin seeds; rig does the becoming**
+([#81](https://github.com/heavy-duty/box/issues/81)). A template is a
+directory under `templates/`: a `box.env` (image, user, resources, boot
+demands, tenant role — parsed against a strict allowlist, never sourced) and
+a `user-data.yaml` (cloud-init, passed to Incus verbatim except the two rig
+pin tokens below). The seed is deliberately small — the tenant user, tmux,
+and [rig](https://github.com/heavy-duty/rig) preinstalled, nothing that
+joins a tailnet or admits credentials — and after cloud-init settles, box
+auto-runs the template's **creds-free** tenant role inside the guest
+(`rig bootstrap claude` / `codex` / `grok` / `staging`,
+[rig#31](https://github.com/heavy-duty/rig/issues/31)). The agent CLI,
+docker, the server posture and the agent-context file all come from that
+role — convergent and idempotent, so the same command re-run later converges
+an *existing* box to a newer spec (`box shell <box>` →
+`sudo rig bootstrap <role>`). The agent-context file carries the
+[#80](https://github.com/heavy-duty/box/issues/80) guard — never run
+`box setup-host`, `box teardown-host` or the drill *inside* a box — once,
+from rig's roles, instead of copy-pasted per template.
+
+**Anything that joins or admits stays operator-run.** The `staging` box's
+tailnet workload join holds a pre-auth key, so box only prints it as the
+next step — `box shell <name>`, then `sudo rig bootstrap workload` — and
+never sees the key ([#69](https://github.com/heavy-duty/box/issues/69)'s
+split, kept).
+
+**The rig pin point** (`RIG_REPO` / `RIG_REF`). The seeds preinstall rig,
+which inverts the rig→box install edge
+([rig#28](https://github.com/heavy-duty/rig/issues/28): rig installs box on
+host-class machines; box guests now install rig). The seed's install line
+carries `@RIG_REPO@`/`@RIG_REF@` tokens that box resolves at mint from the
+environment:
+
+```sh
+box new --name work --template claude                  # heavy-duty/rig @ main
+RIG_REPO=you/rig RIG_REF=my-branch \
+  box new --name trial --template claude               # a rig branch under review
+```
+
+Both directions of that edge track `main` unpinned today — said honestly,
+the same way rig documents box's unpinned install
+([rig#29](https://github.com/heavy-duty/rig/issues/29)) — until the release
+flow lands ([rig#32](https://github.com/heavy-duty/rig/issues/32),
+[#83](https://github.com/heavy-duty/box/issues/83)). The pin covers both the
+installer fetched and the tree it installs, and the values are
+allowlist-validated on the host before they touch the YAML.
 
 ```sh
 box templates                    # list what this install can mint
 box new --name scratch           # the DEFAULT template is blank: bare Debian,
-                                 #   same isolation, nobody home
+                                 #   same isolation, nobody home — no rig, no role
 ```
 
 A template **cannot** name a network, a profile, or a `security.*` flag —
