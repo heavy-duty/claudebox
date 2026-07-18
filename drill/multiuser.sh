@@ -151,6 +151,13 @@ snaps="$(incus project get "$p1" restricted.snapshots 2>/dev/null)"
 [ "$snaps" = allow ] && ok "snapshots allowed in $p1 (the clone workflow exists)" \
                      || no "restricted.snapshots = '$snaps' — box snapshot will refuse"
 
+# The same shape for backups (#70): export rides the backup API, which
+# restricted projects block by default exactly like snapshots. A grant that
+# missed this key strands every post-upgrade 'box export' at the tier.
+bkups="$(incus project get "$p1" restricted.backups 2>/dev/null)"
+[ "$bkups" = allow ] && ok "backups allowed in $p1 (box export works at this tier)" \
+                     || no "restricted.backups = '$bkups' — box export will refuse"
+
 incus --project "$p1" profile device get default eth0 type >/dev/null 2>&1 \
   && no "(h) $p1's default profile still carries the private-bridge eth0" \
   || ok "(h) $p1's default profile places no network — box-net is the only door"

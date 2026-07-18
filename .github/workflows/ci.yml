@@ -33,7 +33,7 @@ jobs:
   # release still proves the boundary.
   rehearsal:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - name: install incus
@@ -58,6 +58,33 @@ jobs:
         run: sudo BOX_TIER=admin bash /opt/box/current/drill/doctor.sh
       - name: multi-user rehearsal (criteria a-l, container mode)
         run: sudo BOX_MULTIUSER_REHEARSAL=1 bash /opt/box/current/drill/multiuser.sh --yes --container
+      # The #70 round-trip, on the SAME live daemon: a box's state must
+      # survive 'box rm' via export → import. Container mode for the same
+      # reason the rehearsal uses it — export/import are backup mechanics
+      # (tarball out, tarball in, re-stamp), identical across instance types;
+      # the VM trust boundary stays a real-hardware ritual. Every assertion
+      # is state observed AFTER the original box was deleted: the file
+      # written pre-export, the snapshot, the boundary tag, a live agent.
+      - name: export/import round-trip — state survives 'box rm' (#70)
+        run: |
+          set -eux
+          sudo box new --name keeper --container
+          sudo box exec keeper -- sh -c 'echo survives > /home/dev/proof'
+          sudo box snapshot keeper pre-export
+          sudo box down keeper
+          sudo box export keeper /tmp/keeper.tar.gz
+          sudo test -s /tmp/keeper.tar.gz
+          sudo box rm keeper --force
+          sudo box import /tmp/keeper.tar.gz --name keeper2
+          test "$(sudo incus config get keeper2 user.box)" = 1
+          sudo incus exec keeper2 -- true
+          sudo box exec keeper2 -- cat /home/dev/proof | grep -qx survives
+          sudo incus snapshot list keeper2 --format csv | grep -q '^pre-export'
+          # the collision boundary, live: the name is taken, import must refuse
+          if sudo box import /tmp/keeper.tar.gz --name keeper2; then
+            echo 'collision was not refused'; exit 1
+          fi
+          sudo box rm keeper2 --force
       - name: uninstall drill — revoke clean, teardown, uninstall, ZERO residue
         # The full-removal order, end to end on the real daemon: revoke a
         # granted user (--purge asserts its own absence, incl. the incus-user

@@ -7,6 +7,34 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **`box export` / `box import`** (#70) — a box's state that survives the box
+  _and_ the host, unblocking #66's humane upgrade flow (down, export, rm,
+  upgrade, re-import). `box export <box> [<file>]` wraps `incus export` into
+  one portable backup tarball (default `<box>-<UTC stamp>.tar.gz`), snapshots
+  included by default (`--instance-only` opts out); the box must be stopped
+  first (`box down`) so the artifact is a settled disk, not a moving one. The
+  file is **shouted about, not scrubbed** — it carries the box's whole disk
+  (agent logins, git credentials, SSH keys), and scrubbing a disk image is a
+  promise tarball surgery cannot keep, so box says what is inside instead,
+  every time. `box import <file> [--name <box>]` mints the box back and
+  re-stamps what is the _current host's_ truth, not the artifact's: the
+  `user.box=1` boundary tag (legacy `user.claudebox=1` honored), the
+  `box-net` placement (re-assigned if the artifact's differs — the
+  migrate-host move), and a fresh machine identity: the NIC's MAC (imports
+  restore `volatile.*` verbatim, and a re-import beside its sibling collided
+  at start with "MAC address already defined on another NIC" — measured
+  live; `incus copy` regenerates it, `incus import` does not) plus
+  `reset_identity` (the clone trust boundary: no DHCP collision with the box
+  it was exported from).
+  Import refuses any name an existing instance holds — the `resolve_box`
+  boundary, seen from the other side. Works on both tiers: `box grant` now
+  also converges `restricted.backups allow` (incus-user blocks backups by
+  default exactly like snapshots, and an export _is_ a backup
+  create+download — measured against incus 6.0's `permissions.go`); re-run
+  `box grant <user>` after upgrading, as documented. CI's `rehearsal` job now
+  proves the round-trip on a live Incus: mint → write a file → snapshot →
+  down → export → `rm` → import → the file and the snapshot survived, the
+  agent answers, the tag is present, and a colliding re-import is refused.
 - **Versioned installs** (#66's stance, made livable) — install.sh now lands
   each version side by side at `<root>/versions/<v>` (its own `VERSION` +
   `INSTALLED_FROM`), with a `current` symlink tracking the default and

@@ -65,8 +65,8 @@ boxes. Installing a **new** version lands it side by side and flips `current`
 only when you have **no boxes** — under existing boxes the flip is refused
 (never change versions under a user's boxes,
 [#66](https://github.com/heavy-duty/box/issues/66)) and switching stays a
-deliberate act: preserve what you care about — `box down <box>`, copy out
-anything you need (a portable `box export` is
+deliberate act: preserve what you care about — `box down <box>`, then
+`box export <box>` (one portable file per box, snapshots included —
 [#70](https://github.com/heavy-duty/box/issues/70)), then `box rm <box>`
 (which deletes the box _and_ its snapshots) — then:
 
@@ -77,8 +77,10 @@ box use <version>   # flip the default (same refusal while boxes exist)
 
 A pre-0.7.0 flat install is migrated into `versions/` automatically on the
 next installer run — the tree is moved, not re-downloaded, and your boxes are
-untouched. A version-aware upgrade that migrates boxes instead of asking you
-to is [#67](https://github.com/heavy-duty/box/issues/67). For unattended
+untouched. After switching versions (and `box setup-host`, if the stack was
+torn down), `box import <file>` brings each exported box back — snapshots,
+logins and all. A version-aware upgrade that migrates boxes instead of asking
+you to is [#67](https://github.com/heavy-duty/box/issues/67). For unattended
 installs (CI, images), `BOX_YES=1` answers every prompt yes,
 `BOX_SKIP_SETUP_HOST=1` declines the host-setup step, and
 `BOX_INSTALL_SOURCE=<dir-or-tarball>` installs from a local tree instead of
@@ -159,7 +161,8 @@ user to a private _unhardened_ NAT bridge, it blocks snapshots, and it cannot
 see the `box-net` profile. Granting rewires all three: the user's project is
 restricted to `boxnet` **and only boxnet** — the hardened network is not their
 default placement but the only one their certificate can express — snapshots
-are allowed, and the shipped profile is installed into their project. Re-run
+and backups are allowed (the clone and `box export` workflows), and the
+shipped profile is installed into their project. Re-run
 `box grant <user>` after upgrading box to refresh the profile, like
 `setup-host` for the stack.
 
@@ -244,6 +247,38 @@ a box's live state, or roll a box back with `box restore work authed`.
 Forgotten what you called a checkpoint? `box info work` prints the box's
 snapshot labels and the `--from` line to clone one.
 
+## Survive the host: `box export` / `box import`
+
+Snapshots live _inside_ a box, and `box rm` deletes the box **and** its
+snapshots. `box new --from` clones — but the clone still lives on the same
+host, under the same stack. `box export` is the way out
+([#70](https://github.com/heavy-duty/box/issues/70)): one portable file that
+outlives the box, the host stack, and the machine.
+
+```sh
+box down work                        # export wants a settled disk
+box export work                      # → work-<UTC stamp>.tar.gz, snapshots included
+box rm work                          # nothing is lost anymore
+# ...upgrade box / rebuild the host / carry the file to another machine...
+box import work-<stamp>.tar.gz       # the box is back — snapshots, logins and all
+box import work-<stamp>.tar.gz --name work2   # or under a new name
+```
+
+This is what makes the upgrade flow humane
+([#66](https://github.com/heavy-duty/box/issues/66)): stop, export, remove
+every box, upgrade, re-import. Everything `incus import` restores is the
+artifact's truth (disk, config, snapshots); what box re-stamps on import is
+_this_ host's truth — the `user.box=1` boundary tag, the `box-net` placement
+(re-assigned if the artifact's differs), and a fresh machine identity, the
+same move a clone gets, so an imported box can never collide with the box it
+was exported from. Import refuses a name any existing instance already holds.
+`--instance-only` exports the live state without the snapshots.
+
+**The file is a credential.** A box's disk carries everything inside it —
+agent logins, git PATs, SSH keys, shell history. Export scrubs nothing (a
+"scrubbed" disk image would be a lie) and shouts instead, every time. Store
+and move the file like the secret it is.
+
 ## See a dev server: `box expose`
 
 The isolation contract says no inbound path exists — which is one "no" too
@@ -276,6 +311,10 @@ box exec <box> -- <cmd...>   # run a command in the box
 box tmux <box> [session]     # attach/create a tmux session — survives disconnects
 box snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
 box restore <box> <snap>     # roll back to a snapshot
+box export <box> [<file>] [--instance-only]
+                             # one portable file (snapshots incl.) — survives rm & host
+box import <file> [--name <box>]
+                             # mint a box back from an exported file, re-stamped
 box rename <box> <new>       # rename a box (stop it first)
 box down <box>               # stop (state kept; `start` resumes)
 box start <box>              # start a stopped box
