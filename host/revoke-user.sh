@@ -59,9 +59,37 @@ fi
 # The group, first — access ends even if a purge step below trips.
 if id -nG "$user" | tr ' ' '\n' | grep -qx incus; then
   $SUDO gpasswd -d "$user" incus >/dev/null
-  echo "group: removed $user from 'incus' — the socket closes with their next login"
+  echo "group: removed $user from 'incus'"
 else
   echo "group: $user was not in 'incus'"
+fi
+
+# Supplementary groups are fixed AT LOGIN: the database change above does
+# nothing to a session the user already holds — a leftover tmux keeps the
+# socket until it dies. For a bare revoke that is an honest warning. For
+# --purge it is a hole: a stale-group process can touch incus-user AFTER the
+# purge and lazily recreate the project with incus-user's stock defaults —
+# the unhardened NAT bridge, un-narrowed — which is strictly worse than the
+# granted state this script is unwinding. So --purge terminates the user's
+# sessions first (it is already the destructive, confirmed path), and a bare
+# revoke says out loud what it did not do.
+if pgrep -u "$user" >/dev/null 2>&1; then
+  if [ "$purge" -eq 1 ]; then
+    echo "sessions: $user has live processes — terminating them (a stale session could recreate the project, unhardened, after the purge)"
+    $SUDO loginctl terminate-user "$user" 2>/dev/null || true
+    $SUDO pkill -u "$user" 2>/dev/null || true
+    sleep 1
+    $SUDO pkill -9 -u "$user" 2>/dev/null || true
+    if pgrep -u "$user" >/dev/null 2>&1; then
+      echo "box revoke: could not terminate $user's processes — refusing to purge under them" >&2
+      echo "            (they retain the socket until those sessions end, and could recreate the project)" >&2
+      exit 1
+    fi
+  else
+    echo "WARNING: $user has live sessions, and group membership is read at login —"
+    echo "         those sessions keep the socket until they end. To end them now:"
+    echo "         sudo loginctl terminate-user $user"
+  fi
 fi
 
 if [ "$purge" -eq 0 ]; then
@@ -113,9 +141,13 @@ if [ -d "/var/lib/incus/users/$uid" ]; then
 fi
 
 # Assert absence rather than trusting exit codes — the wipe.sh discipline.
+# The certificate included: its removal above is set -e-exempt (left of &&),
+# and a promise the header makes is a promise this block checks.
 leftover=""
 incus project show "$project" >/dev/null 2>&1 </dev/null && leftover="$leftover $project"
 incus network show "$bridge" >/dev/null 2>&1 </dev/null && leftover="$leftover $bridge"
+incus config trust list --format csv --columns nf 2>/dev/null | grep -q "^incus-user-$uid," \
+  && leftover="$leftover cert:incus-user-$uid"
 if [ -n "$leftover" ]; then
   echo "box revoke: purge INCOMPLETE — still present:$leftover" >&2
   exit 1

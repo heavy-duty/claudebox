@@ -169,11 +169,17 @@ in their own project — which is why the nft bridge drop, which they cannot
 touch, exists as the second, host-owned layer. Defense in depth, both layers
 measured (`drill/multiuser.sh`, criteria a–l).
 
-`box revoke` is two strengths: bare, it removes the group — the socket
-closes, their boxes keep *running* (revoking a person does not kill their
-workloads) and `grant` restores everything; `--purge` deletes their world
-(boxes, images, project, private bridge, trust-store certificate) and asserts
-the absence afterwards.
+`box revoke` is two strengths: bare, it removes the group — their boxes keep
+*running* (revoking a person does not kill their workloads), `grant` restores
+everything, and because supplementary groups are read at login, revoke warns
+when live sessions keep the socket until they end (and names the `loginctl`
+command). `--purge` terminates those sessions *first* — a stale-group process
+could otherwise touch incus-user after the purge and lazily recreate the
+project with stock, unhardened defaults, undoing the grant's whole point —
+then deletes their world (boxes, images, project, private bridge, trust-store
+certificate) and asserts the absence afterwards. A failed `grant` backs its
+own group-add out on exit for the same reason: no half-granted user holding
+an un-narrowed socket.
 
 ## Non-goals
 

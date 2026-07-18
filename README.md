@@ -123,8 +123,10 @@ An admin hands the tier out per user, and takes it back:
 
 ```sh
 box grant dev1              # dev1 can now: box new / list / shell / snapshot / rm — their boxes only
-box revoke dev1             # locked out; their boxes survive (grant again restores)
-box revoke dev1 --purge     # ...or delete everything they had
+box revoke dev1             # tier removed; their boxes survive (grant again restores).
+                            #   a session they already hold keeps the socket until it
+                            #   ends — revoke warns and names the loginctl command
+box revoke dev1 --purge     # ...or end their sessions and delete everything they had
 ```
 
 `grant` is an idempotent convergence, not a flag flip, because incus-user's

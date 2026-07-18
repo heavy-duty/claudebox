@@ -448,14 +448,18 @@ existing box-to-box drop means even their instances cannot reach a sibling.
 EOF
 ;;
     revoke) cat <<'EOF'
-Take the restricted tier back from a user. Without --purge, this only removes
-them from the 'incus' group: they lose the socket, but their project and
-boxes stay (still running!) and 'box grant' restores access untouched. With
---purge, their boxes, images, project, private bridge and trust-store
-certificate are removed too — irreversible, so it asks first.
+Take the restricted tier back from a user. Without --purge, this removes
+them from the 'incus' group: their project and boxes stay (still running!)
+and 'box grant' restores access untouched. Group membership is read at
+LOGIN, so a session they already hold keeps the socket until it ends —
+revoke says so and names the loginctl command when it happens. With
+--purge, their sessions are terminated first (a stale session could quietly
+recreate the project, unhardened, afterwards — measured, not theoretical),
+then their boxes, images, project, private bridge and trust-store
+certificate are removed — irreversible, so it asks first.
 
-  box revoke dev1            # lock them out, keep their boxes
-  box revoke dev1 --purge    # ...and delete everything they had
+  box revoke dev1            # take the tier; their boxes keep running
+  box revoke dev1 --purge    # ...or end their sessions and delete everything
 EOF
 ;;
     teardown-host) cat <<'EOF'
@@ -754,7 +758,12 @@ cmd_new() {
   # for an admin (setup-host builds it), in YOUR project for a restricted user
   # (box grant converges it). Its absence has a different fix per tier, and
   # incus's own "Profile not found" at launch time names neither.
-  if [ -z "$remote" ] && ! incus profile show box-net >/dev/null 2>&1 </dev/null; then
+  if [ -z "$remote" ] && ! timeout 10 incus profile show box-net >/dev/null 2>&1 </dev/null; then
+    # A missing profile and a daemon that is not answering are different
+    # faults with different fixes — "run setup-host" at a wedged daemon
+    # (the #26 shape) is wrong advice. Separate them before diagnosing.
+    timeout 10 incus list >/dev/null 2>&1 </dev/null \
+      || die "the incus daemon is not answering — diagnose it: box doctor"
     if [ "$(box_tier)" = restricted ]; then
       die "your project has no box-net profile — the restricted tier is granted per user, by an admin: box grant $(id -un)"
     fi

@@ -217,6 +217,23 @@ check "grant: refuses an incus-admin member (nothing tighter to grant)" 0 "" \
   grep -qF 'incus-admin' "$ROOT/host/grant-user.sh"
 check "revoke: group removal is the lockout" 0 "" \
   grep -qF 'gpasswd -d' "$ROOT/host/revoke-user.sh"
+# Group membership is read at login: purge must terminate live sessions (a
+# stale-group process could recreate the project unhardened AFTER the purge),
+# and a bare revoke must say the socket survives in held sessions.
+check "revoke: purge terminates live sessions first" 0 "" \
+  grep -qF 'loginctl terminate-user' "$ROOT/host/revoke-user.sh"
+check "revoke: purge refuses under unkillable sessions" 0 "" \
+  grep -qF 'refusing to purge under them' "$ROOT/host/revoke-user.sh"
+check "revoke: bare revoke warns about held sessions" 0 "" \
+  grep -qF 'live sessions' "$ROOT/host/revoke-user.sh"
+check "revoke: the purge asserts the certificate's absence too" 0 "" \
+  bash -c 'grep -A6 "Assert absence" "'"$ROOT"'/host/revoke-user.sh" | grep -q "config trust list"'
+# A failed grant must not leave a half-granted user: if THIS run added the
+# group, the exit path takes it back (and the trap disarms only on success).
+check "grant: backs out its own group-add on failure" 0 "" \
+  grep -qF 'trap backout EXIT' "$ROOT/host/grant-user.sh"
+check "grant: the back-out disarms on success" 0 "" \
+  grep -qF 'trap - EXIT' "$ROOT/host/grant-user.sh"
 # shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "revoke: purge deletes instances one at a time" 0 "" \
   grep -qF 'delete -f "$inst"' "$ROOT/host/revoke-user.sh"

@@ -79,10 +79,13 @@ as_u() { local u="$1"; shift; runuser -u "$u" -- "$@" </dev/null; }
 # down): "refused" means a packet ARRIVED and was answered — which, for an
 # isolation probe, is a failure wearing polite clothes. Silence is the pass.
 probe_from() {  # probe_from <user> <box> <url>
-  local u="$1" b="$2" url="$3" out
-  out="$(as_u "$u" timeout -k 5 30 incus exec "$b" -- curl -sS -m 15 -o /dev/null "$url" 2>&1)"
-  case "$out" in
-    "") echo reachable ;;
+  local u="$1" b="$2" url="$3" out rc
+  out="$(as_u "$u" timeout -k 5 30 incus exec "$b" -- curl -sS -m 15 -o /dev/null "$url" 2>&1)"; rc=$?
+  # Silence + success is the only 'reachable': when the OUTER timeout kills a
+  # wedged exec (the #26 shape), curl never spoke — empty output with rc 124
+  # must not read as an open door.
+  case "$rc:$out" in
+    0:) echo reachable ;;
     *Connection\ refused*) echo refused ;;
     *) echo dropped ;;
   esac
@@ -104,9 +107,15 @@ cleanup() {
   echo "── cleanup"
   for u in "$U1" "$U2"; do
     id "$u" >/dev/null 2>&1 || continue
-    BOX_YES=1 box revoke "$u" --purge >/dev/null 2>&1
-    userdel -r "$u" >/dev/null 2>&1
-    id "$u" >/dev/null 2>&1 && echo "  WARNING: user $u still exists" || echo "  removed $u (tier, boxes, account)"
+    # A half-failed purge followed by userdel leaves a project owned by
+    # nobody — and doctor's leftover check keys on the USER existing. Keep
+    # the user when the purge fails, and name what survived.
+    if BOX_YES=1 box revoke "$u" --purge >/dev/null 2>&1; then
+      userdel -r "$u" >/dev/null 2>&1
+      id "$u" >/dev/null 2>&1 && echo "  WARNING: user $u still exists" || echo "  removed $u (tier, boxes, account)"
+    else
+      echo "  WARNING: purge FAILED for $u — kept the account so 'box doctor' can name it; project user-$(id -u "$u") may survive"
+    fi
   done
 }
 trap cleanup EXIT
@@ -238,15 +247,29 @@ v6="$(as_u "$U1" timeout -k 5 20 incus exec mine -- sh -c 'ip -6 addr show dev e
              || no "(g) the box holds a global IPv6 address — an uncovered egress path"
 
 phase "h. the escape hatches, tried and refused"
-as_u "$U1" incus launch images:debian/13 esc --network "incusbr-$uid1" >/dev/null 2>&1 \
-  && { no "(h) $U1 attached the unhardened private bridge"; as_u "$U1" incus delete -f esc >/dev/null 2>&1; } \
-  || ok "(h) attaching the private incusbr-$uid1 is refused (not in restricted.networks.access)"
-as_u "$U1" incus project set "$p1" restricted.networks.access "boxnet,incusbr-$uid1" >/dev/null 2>&1 \
-  && no "(h) $U1 widened their OWN project's network access" \
-  || ok "(h) a restricted certificate cannot widen its own project"
-as_u "$U1" incus network set boxnet dns.mode=managed >/dev/null 2>&1 \
-  && no "(h) $U1 edited boxnet itself" \
-  || ok "(h) boxnet's config refuses a restricted certificate"
+# Each probe asserts the refusal's REASON, not just a nonzero exit — an image
+# server hiccup or a name collision also exits nonzero, and reading that as
+# "the escape is closed" is a false verdict wearing a green light (the drill
+# has relearned this enough times to earn a rule).
+out="$(as_u "$U1" incus launch images:debian/13 esc --network "incusbr-$uid1" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qiE 'not found|not allowed'; then
+  ok "(h) attaching the private incusbr-$uid1 is refused (not in restricted.networks.access)"
+else
+  no "(h) private-bridge attach: rc=$rc, said: $(printf '%s' "$out" | head -1)"
+  as_u "$U1" incus delete -f esc >/dev/null 2>&1
+fi
+out="$(as_u "$U1" incus project set "$p1" restricted.networks.access "boxnet,incusbr-$uid1" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qi 'restricted'; then
+  ok "(h) a restricted certificate cannot widen its own project"
+else
+  no "(h) project-widen attempt: rc=$rc, said: $(printf '%s' "$out" | head -1)"
+fi
+out="$(as_u "$U1" incus network set boxnet dns.mode=managed 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qiE 'permission|restricted'; then
+  ok "(h) boxnet's config refuses a restricted certificate"
+else
+  no "(h) boxnet edit attempt: rc=$rc, said: $(printf '%s' "$out" | head -1)"
+fi
 
 phase "e/f. the honest refusals — expose, setup-host, doctor"
 out="$(as_u "$U1" box expose mine 3000 2>&1)"; rc=$?
@@ -275,7 +298,16 @@ acc="$(incus project get "$p1" restricted.networks.access 2>/dev/null)"
 aud "k. incus-user re-sync: convergence intact (matches its source: setup runs only at project creation)"
 
 phase "l. revoke — one user out, the other untouched"
+# Revocation's hard case is a user who is LOGGED IN: groups are read at
+# login, so a held session keeps the socket — and after a purge it could
+# touch incus-user and recreate the project with stock, unhardened defaults.
+# Hold a session open across the purge and demand it dies with the tier.
+runuser -u "$U2" -- sleep 300 </dev/null >/dev/null 2>&1 &
+sleep 1
 BOX_YES=1 box revoke "$U2" --purge >/dev/null 2>&1 && ok "(l) box revoke $U2 --purge exits 0" || no "(l) revoke failed"
+pgrep -u "$U2" >/dev/null 2>&1 \
+  && no "(l) $U2 still has live processes after the purge — a stale session could recreate their project, unhardened" \
+  || ok "(l) the purge terminated $U2's held session (no stale-group path back in)"
 as_u "$U2" incus list >/dev/null 2>&1 \
   && no "(l) $U2 still reaches the daemon after revoke" \
   || ok "(l) $U2 is locked out"

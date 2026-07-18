@@ -85,10 +85,28 @@ fi
 # 1. The group. 'incus' is the restricted socket; membership takes effect at
 # the user's next login, but run_as below starts a fresh process with the
 # database's groups, so the grant itself never waits on a re-login.
+#
+# If THIS run granted the group and a later step fails, take it back on the
+# way out: a half-granted user would otherwise hold live socket access to an
+# UN-NARROWED project — the stock unhardened bridge attachable — until an
+# admin re-runs. Backing out the group closes that window completely for a
+# fresh grant (their existing sessions predate the membership, so no process
+# holds it yet). A user who was already in the group keeps it: not ours to
+# take on a re-run's failure.
+added_group=0
+backout() {
+  if [ "$added_group" -eq 1 ]; then
+    $SUDO gpasswd -d "$user" incus >/dev/null 2>&1 || true
+    echo "box grant: FAILED — removed $user from 'incus' again (no half-granted access left behind); fix the cause and re-run" >&2
+  fi
+}
+trap backout EXIT
+
 if id -nG "$user" | tr ' ' '\n' | grep -qx incus; then
   echo "group: $user already in 'incus'"
 else
   $SUDO usermod -aG incus "$user"
+  added_group=1
   echo "group: added $user to 'incus' (their next login picks it up; the grant does not wait)"
 fi
 
@@ -129,7 +147,12 @@ if ! err="$(incus project set "$project" restricted.networks.access boxnet 2>&1 
   echo "  (an instance still on the private bridge blocks this — move or delete it, then re-run)" >&2
   exit 1
 fi
-echo "network: $project restricted to boxnet (the private incusbr-$uid is unreferenced and unreachable)"
+# The private bridge's name follows incus-user's own rule (revoke-user.sh
+# mirrors it too): incusbr-<uid>, or user-<uid> when that would not fit an
+# interface name — naming the wrong one here would be a true claim with the
+# wrong noun on big-uid (SSSD/AD) hosts.
+bridge="incusbr-$uid"; [ "${#bridge}" -gt 15 ] && bridge="user-$uid"
+echo "network: $project restricted to boxnet (the private $bridge is unreferenced and unreachable)"
 
 # 5. Snapshots. incus-user projects block them by default, and box's whole
 # reuse story — log in once, snapshot, clone forever — is snapshots.
@@ -150,5 +173,6 @@ echo "profile: box-net installed in $project"
 run_as "$user" timeout 30 incus profile show box-net >/dev/null 2>&1 \
   || { echo "box grant: converged, but $user cannot see the box-net profile through incus-user — check journalctl -u incus-user" >&2; exit 1; }
 
+trap - EXIT   # converged and verified: the grant stands
 echo "granted: $user has the restricted tier — their 'box new' lands on the hardened boxnet."
 echo "         (their boxes are theirs alone; 'box revoke $user' takes the tier back)"
