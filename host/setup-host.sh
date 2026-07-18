@@ -45,15 +45,17 @@ else
   exit 1
 fi
 
-# --- The subnet, and the refusal to build on one something already owns -----
+# --- The subnet: never build on one something already owns ------------------
 # (#80.) The stack's subnet was hardcoded, and running setup-host INSIDE a box
 # gave the guest a nested boxnet claiming the exact subnet and gateway of its
 # own uplink: the guest then held its gateway's address as a LOCAL address,
 # carried two connected routes for the subnet, and suffered intermittent,
 # self-recovering egress blackouts nobody could attribute — the host looked
 # clean the whole time. The flagship use case funnels agents toward doing
-# exactly this (working on box, in a box), so the guard must refuse BEFORE
-# any mutation, and name the way out (BOX_SUBNET).
+# exactly this (working on box, in a box), so the decision must happen BEFORE
+# any mutation. An explicit BOX_SUBNET is honored or refused, never overridden;
+# with no pin, choose_subnet below converges on an existing bridge or picks a
+# free /24 itself — a drill inside a box now just works, zero flags.
 
 # BOX_SUBNET must be a /24 with a zero host octet — a.b.c.0/24. Everything
 # the stack derives (the bridge address, the gateway carve-out, the firewall)
@@ -93,39 +95,108 @@ subnet_claimant() {
   [ -n "$hit" ] && printf '%s\n' "$hit"
 }
 
-BOX_SUBNET="${BOX_SUBNET:-10.88.0.0/24}"
-if ! valid_subnet "$BOX_SUBNET"; then
-  echo "ERROR: BOX_SUBNET='$BOX_SUBNET' is not a sane subnet — the stack takes a" >&2
-  echo "       /24 with a zero host octet, e.g. BOX_SUBNET=10.89.0.0/24" >&2
-  exit 1
-fi
+# The one place the stack's subnet is decided. Four deliberate cases (#80's
+# fix #1, completed — the refusal shipped first, this adds the auto-pick):
+#   1. explicit BOX_SUBNET       — use it; a foreign claimant or a disagreeing
+#      bridge still REFUSES. An operator's pin is never silently overridden:
+#      a script that says 10.90 gets 10.90 or a loud stop, never a surprise.
+#   2. no pin, boxnet exists     — converge to the bridge's own subnet: the
+#      bridge IS the pin (boxes hold leases on it; setup-host never
+#      re-addresses it). What used to be an agree-gate refusal on a bare
+#      re-run against a moved bridge is now plain convergence. A FOREIGN
+#      claimant on the bridge's own subnet still refuses — that is #80's
+#      poisoned state, and converging would rebuild on it.
+#   3. no pin, no bridge, 10.88.0.0/24 free — the default, as always.
+#   4. no pin, no bridge, default claimed   — the nested case (a drill or
+#      rehearsal inside a box): scan 10.89.0.0/24 … 10.127.0.0/24 in order,
+#      take the first free candidate, and say so loudly; refuse only when
+#      EVERY candidate is claimed. The scan only ever runs bridge-less —
+#      an existing bridge is case 2, which precedes it.
+# Prints the chosen subnet on stdout, explains itself on stderr, fails when
+# it refuses. Everything downstream (BOX_GW, the bridge, the ACL carve-out,
+# the firewall, the doctor's expectations) derives from the choice, which is
+# why it happens here, before any of them. Pure over `ip` (via
+# subnet_claimant and the bridge read), so test/cli.sh drives every case
+# against canned tables with a shim ip.
+choose_subnet() {
+  local pin="$1" have_gw have_sub hit cand b
+  # ('|| true': under pipefail, `ip … dev boxnet` on a fresh host — no such
+  # device — would kill the script here instead of answering "no bridge".)
+  have_gw="$(ip -4 -o addr show dev boxnet 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
+  have_sub="${have_gw:+${have_gw%.*}.0/24}"
+
+  if [ -n "$pin" ]; then
+    if ! valid_subnet "$pin"; then
+      echo "ERROR: BOX_SUBNET='$pin' is not a sane subnet — the stack takes a" >&2
+      echo "       /24 with a zero host octet, e.g. BOX_SUBNET=10.89.0.0/24" >&2
+      return 1
+    fi
+    if hit="$(subnet_claimant "$pin")"; then
+      echo "ERROR: refusing to build boxnet on $pin — that subnet is already" >&2
+      echo "       claimed here by $hit." >&2
+      echo "       If that is this machine's uplink, you are INSIDE a box: a nested" >&2
+      echo "       stack on the guest's own subnet captures its gateway address and" >&2
+      echo "       blackholes its egress, intermittently (issue #80)." >&2
+      echo "       Nothing was changed. Drop the pin to let setup-host auto-pick a" >&2
+      echo "       free subnet, or pick one yourself:  BOX_SUBNET=<a.b.c.0/24> box setup-host" >&2
+      return 1
+    fi
+    if [ -n "$have_sub" ] && [ "$have_sub" != "$pin" ]; then
+      echo "ERROR: boxnet already exists on $have_sub and the target is $pin —" >&2
+      echo "       setup-host converges an existing bridge, it never re-addresses one." >&2
+      echo "       Re-run with the bridge's own subnet (a bare 'box setup-host'" >&2
+      echo "       converges on it automatically):" >&2
+      echo "         BOX_SUBNET=$have_sub box setup-host" >&2
+      echo "       (or move the bridge first:  incus network set boxnet ipv4.address ${pin%.0/24}.1/24)" >&2
+      return 1
+    fi
+    printf '%s\n' "$pin"
+    return 0
+  fi
+
+  if [ -n "$have_sub" ]; then
+    if hit="$(subnet_claimant "$have_sub")"; then
+      echo "ERROR: boxnet lives on $have_sub, but that subnet is ALSO claimed here" >&2
+      echo "       by $hit — the #80 poisoned state. Converging would rebuild on it." >&2
+      echo "       Move the bridge off the claimed subnet first:" >&2
+      echo "         incus network set boxnet ipv4.address 10.89.0.1/24" >&2
+      echo "       then re-run:  box setup-host" >&2
+      return 1
+    fi
+    if [ "$have_sub" != 10.88.0.0/24 ]; then
+      echo "boxnet already lives on $have_sub — converging to it." >&2
+      echo "(pin it explicitly with BOX_SUBNET=$have_sub if you script this host)" >&2
+    fi
+    printf '%s\n' "$have_sub"
+    return 0
+  fi
+
+  if ! hit="$(subnet_claimant 10.88.0.0/24)"; then
+    printf '10.88.0.0/24\n'
+    return 0
+  fi
+  for b in {89..127}; do
+    cand="10.$b.0.0/24"
+    subnet_claimant "$cand" >/dev/null && continue
+    echo "10.88.0.0/24 is claimed here by $hit —" >&2
+    echo "most likely this machine IS a box (a nested drill or rehearsal, issue #80)." >&2
+    echo "auto-picked $cand for this stack instead." >&2
+    echo "(pin it explicitly with BOX_SUBNET=$cand if you script this host)" >&2
+    printf '%s\n' "$cand"
+    return 0
+  done
+  echo "ERROR: refusing to build boxnet — 10.88.0.0/24 is already claimed here by" >&2
+  echo "       $hit, and so is every candidate through 10.127.0.0/24." >&2
+  echo "       If that first claimant is this machine's uplink, you are INSIDE a" >&2
+  echo "       box: a nested stack on the guest's own subnet captures its gateway" >&2
+  echo "       address and blackholes its egress, intermittently (issue #80)." >&2
+  echo "       Nothing was changed. Pick a free subnet yourself:" >&2
+  echo "         BOX_SUBNET=<a.b.c.0/24> box setup-host" >&2
+  return 1
+}
+
+BOX_SUBNET="$(choose_subnet "${BOX_SUBNET:-}")" || exit 1
 BOX_GW="${BOX_SUBNET%.0/24}.1"
-
-if hit="$(subnet_claimant "$BOX_SUBNET")"; then
-  echo "ERROR: refusing to build boxnet on $BOX_SUBNET — that subnet is already" >&2
-  echo "       claimed here by $hit." >&2
-  echo "       If that is this machine's uplink, you are INSIDE a box: a nested" >&2
-  echo "       stack on the guest's own subnet captures its gateway address and" >&2
-  echo "       blackholes its egress, intermittently (issue #80)." >&2
-  echo "       Nothing was changed. To build a nested stack anyway, pick a free" >&2
-  echo "       subnet:  BOX_SUBNET=10.89.0.0/24 box setup-host" >&2
-  exit 1
-fi
-
-# A bridge this script built before is the one claimant that is NOT a
-# collision — but it must AGREE with the target: setup-host converges an
-# existing bridge, it never re-addresses one (boxes hold leases on it).
-# ('|| true': under pipefail, `ip … dev boxnet` on a fresh host — no such
-# device — would kill the script right here instead of answering "no bridge".)
-have_gw="$(ip -4 -o addr show dev boxnet 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
-if [ -n "$have_gw" ] && [ "$have_gw" != "$BOX_GW" ]; then
-  echo "ERROR: boxnet already exists on ${have_gw%.*}.0/24 and the target is $BOX_SUBNET —" >&2
-  echo "       setup-host converges an existing bridge, it never re-addresses one." >&2
-  echo "       Re-run with the bridge's own subnet:" >&2
-  echo "         BOX_SUBNET=${have_gw%.*}.0/24 box setup-host" >&2
-  echo "       (or move the bridge first:  incus network set boxnet ipv4.address $BOX_GW/24)" >&2
-  exit 1
-fi
 
 # apt, unattended-safe. install.sh now runs us without a human watching, and
 # a fresh cloud image has apt-daily/unattended-upgrades holding the dpkg lock
@@ -229,8 +300,9 @@ fi
 # Isolated NAT network. IPv6 off: one less egress path to reason about.
 # The default is 10.88 — not 10.87: a pre-rename host may still carry
 # claudenet on 10.87 with legacy boxes attached — two bridges must not claim
-# one subnet. BOX_SUBNET (validated and cleared by the #80 guard above) picks
-# another /24; the gateway and every rule below derive from it.
+# one subnet. BOX_SUBNET holds whatever choose_subnet decided above (an
+# explicit pin, the existing bridge, the default, or an auto-picked free
+# /24); the gateway and every rule below derive from it.
 incus network show boxnet >/dev/null 2>&1 || incus network create boxnet \
   ipv4.address="$BOX_GW/24" ipv4.nat=true ipv6.address=none
 
