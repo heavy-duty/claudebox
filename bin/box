@@ -459,8 +459,12 @@ EOF
 Answer "is this host fit to mint boxes?" from ground truth, not config claims:
 is the Incus daemon answering, is a dnsmasq actually serving boxnet, does
 the kernel's bridge port say 'isolated on', is the resolver pinned or is a
-host VPN's DNS leaking into boxes, can a box actually resolve names. Every
-check exists because its fault has happened — most kill a cold mint with a
+host VPN's DNS leaking into boxes, can a box actually resolve names — and
+the #80 nested-stack signature: a default gateway held as a LOCAL address,
+or duplicate connected routes for the uplink subnet, judged on this machine
+AND inside every box it probes (a box stack installed inside a box squats on
+the guest's gateway and blackholes its egress, intermittently). Every check
+exists because its fault has happened — most kill a cold mint with a
 cloud-init error that names none of them.
 
   --fix      also revert what a drill run may have left behind
@@ -484,7 +488,16 @@ install.sh runs it for you, so this is for re-applying by hand.
 One run is enough. If it has to add you to the incus-admin group it re-runs
 itself under that group — no re-login, no second invocation.
 
+The stack's subnet is 10.88.0.0/24 by default; BOX_SUBNET picks another /24
+(the bridge, the gateway carve-out and the firewall all derive from it). It
+REFUSES, before touching anything, where the target subnet is already claimed
+— most tellingly when this machine's own default gateway sits inside it,
+i.e. when you are running setup-host INSIDE a box: a nested stack on the
+guest's own uplink subnet captures its gateway address and blackholes its
+egress, intermittently (issue #80). The sanctioned way to nest:
+
   box setup-host
+  BOX_SUBNET=10.89.0.0/24 box setup-host   # nested, or a conflicted host
 
 Multi-user hosts: setup-host builds the stack once, for everyone. An admin
 then hands individual users the restricted tier with 'box grant <user>' —
