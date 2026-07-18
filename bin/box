@@ -14,6 +14,24 @@ die() { echo "box: $*" >&2; exit 1; }         # 1 = it went wrong
 usage_error() { echo "box: $*" >&2; echo "try 'box help'." >&2; exit 2; }  # 2 = you asked wrong
 version() { echo "box $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)"; }
 
+# Which tier is THIS PROCESS? Decided from live credentials (argless 'id -nG':
+# what the kernel will present when incus opens the socket), never from the
+# group database — the two disagree for exactly as long as a re-login is
+# pending, and that window is where every wrong answer lives.
+#   UID 0 / incus-admin  -> admin       (the full daemon socket)
+#   incus (only)         -> restricted  (incus-user: your own project, nothing else)
+#   neither              -> none        (no socket at all)
+# host/setup-host.sh carries a byte-identical copy (it runs before any install
+# tree exists); test/cli.sh diffs the two so they cannot drift.
+box_tier() {
+  [ "$(id -u)" -eq 0 ] && { printf 'admin\n'; return; }
+  local groups; groups="$(id -nG 2>/dev/null | tr ' ' '\n')"
+  if   printf '%s\n' "$groups" | grep -qx incus-admin; then printf 'admin\n'
+  elif printf '%s\n' "$groups" | grep -qx incus;       then printf 'restricted\n'
+  else printf 'none\n'
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # The command table.
 #
@@ -46,7 +64,7 @@ CMDS=(
   "exec^<box> -- <cmd...>^box^Run a command inside a box^fn:cmd_exec^"
   "tmux^<box> [<session>]^box^Attach or create a tmux session in a box — survives disconnects^fn:cmd_tmux^"
   "snapshot^<box> [<label>]^box^Checkpoint a box (label defaults to manual-<epoch>)^fn:cmd_snapshot^"
-  "restore^<box> <snapshot>^box,arg2^Roll a box back to one of its snapshots^incus:restore^restored {} to {1}"
+  "restore^<box> <snapshot>^box,arg2^Roll a box back to one of its snapshots^incus:snapshot restore^restored {} to {1}"
   "rename^<box> <new-name>^box,arg2,stopped^Rename a box (it must be stopped first)^incus:rename^renamed {} to {1}"
   "down^<box>^box^Stop a box, keeping its state ('start' resumes it)^incus:stop^stopped {}"
   "start^<box>^box^Start a stopped box^incus:start^started {}"
@@ -55,6 +73,8 @@ CMDS=(
   "incus^<box> -- <args...>^box^Escape hatch: run any incus command against a box^fn:cmd_incus^"
   "doctor^[--fix | --pin-dns]^^Is this host fit to mint boxes? Diagnose the daemon, network, DNS, isolation^fn:cmd_doctor^"
   "setup-host^^^One-time host setup: Incus, the boxnet stack, the profile, the firewall^fn:cmd_setup_host^"
+  "grant^<user>^^Admin: give a host user the restricted tier — their own boxes, on the hardened boxnet^fn:cmd_grant^"
+  "revoke^<user> [--purge]^^Admin: take the restricted tier back (--purge also deletes their boxes)^fn:cmd_revoke^"
   "teardown-host^[--purge-incus]^^Remove the box host stack (both name generations)^fn:cmd_teardown_host^"
   "migrate-host^--box <n> | --all-boxes | --retire-legacy^^Move a host from the pre-0.4.0 stack onto box^fn:cmd_migrate_host^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
@@ -179,6 +199,10 @@ THE MODEL
   box owns a command when it must enforce something Incus cannot see: the
   user.box=1 boundary, the isolation stack, or the creds-free snapshot
   workflow. Everything else is Incus's job — and 'box incus' is the door.
+
+  On a shared host, an admin hands out the restricted tier per user
+  ('box grant <user>'): their own boxes, the same hardened network, and
+  no view of anyone else's. 'box help grant' has the contract.
 
   Docs: https://github.com/heavy-duty/box
 EOF
@@ -394,6 +418,48 @@ One run is enough. If it has to add you to the incus-admin group it re-runs
 itself under that group — no re-login, no second invocation.
 
   box setup-host
+
+Multi-user hosts: setup-host builds the stack once, for everyone. An admin
+then hands individual users the restricted tier with 'box grant <user>' —
+their own boxes, on this same hardened network, seeing nobody else's.
+EOF
+;;
+    grant) cat <<'EOF'
+Give a host user the restricted tier. They get their own Incus project (via
+incus-user), and every box they mint lands on the SAME hardened boxnet as an
+admin's — the full isolation contract (ACL, DNS isolation, resolver pin,
+port isolation, the box-to-box drop), with no view of anyone else's boxes.
+
+What it converges, idempotently (safe to re-run, and re-run after upgrades):
+  · puts the user in the 'incus' group (not incus-admin — that is the point)
+  · creates their user-<uid> project by touching incus-user for them
+  · points the project at boxnet and ONLY boxnet — the private incusbr-<uid>
+    bridge incus-user auto-creates carries none of box's hardening, so it is
+    unreferenced and unreachable, not just unused
+  · allows snapshots (incus-user blocks them; box's clone workflow needs them)
+  · installs the box-net profile into their project
+
+The user's surface: new/list/info/shell/exec/tmux/snapshot/restore/rm on
+their own boxes. Not theirs: expose (edits daemon-global state), setup-host,
+grant. Admin boxes and other users' boxes are invisible to them, and the
+existing box-to-box drop means even their instances cannot reach a sibling.
+
+  box grant dev1
+EOF
+;;
+    revoke) cat <<'EOF'
+Take the restricted tier back from a user. Without --purge, this removes
+them from the 'incus' group: their project and boxes stay (still running!)
+and 'box grant' restores access untouched. Group membership is read at
+LOGIN, so a session they already hold keeps the socket until it ends —
+revoke says so and names the loginctl command when it happens. With
+--purge, their sessions are terminated first (a stale session could quietly
+recreate the project, unhardened, afterwards — measured, not theoretical),
+then their boxes, images, project, private bridge and trust-store
+certificate are removed — irreversible, so it asks first.
+
+  box revoke dev1            # take the tier; their boxes keep running
+  box revoke dev1 --purge    # ...or end their sessions and delete everything
 EOF
 ;;
     teardown-host) cat <<'EOF'
@@ -471,7 +537,7 @@ while [ $# -gt 0 ]; do
       # expose's own flags (--list, --remove) are positional to it, not box's
       if [ "$cmd" = expose ]; then args+=("$1"); shift; continue; fi
       # the host verbs delegate their flags to the scripts they wrap
-      case "$cmd" in setup-host|teardown-host|migrate-host) args+=("$1"); shift; continue ;; esac
+      case "$cmd" in setup-host|teardown-host|migrate-host|grant|revoke) args+=("$1"); shift; continue ;; esac
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
@@ -688,6 +754,21 @@ cmd_templates() {
 
 cmd_new() {
   [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
+  # The placement contract must exist before any mint — in the DEFAULT project
+  # for an admin (setup-host builds it), in YOUR project for a restricted user
+  # (box grant converges it). Its absence has a different fix per tier, and
+  # incus's own "Profile not found" at launch time names neither.
+  if [ -z "$remote" ] && ! timeout 10 incus profile show box-net >/dev/null 2>&1 </dev/null; then
+    # A missing profile and a daemon that is not answering are different
+    # faults with different fixes — "run setup-host" at a wedged daemon
+    # (the #26 shape) is wrong advice. Separate them before diagnosing.
+    timeout 10 incus list >/dev/null 2>&1 </dev/null \
+      || die "the incus daemon is not answering — diagnose it: box doctor"
+    if [ "$(box_tier)" = restricted ]; then
+      die "your project has no box-net profile — the restricted tier is granted per user, by an admin: box grant $(id -un)"
+    fi
+    die "no box-net profile — the host stack is missing. Build it: box setup-host"
+  fi
   local instance; instance="$(iname_of "$name")"
   if [ -n "$from" ]; then
     [ -z "$template" ] || usage_error "--from clones an existing box; its template rides along (drop --template)"
@@ -942,6 +1023,10 @@ cmd_status() {
 cmd_doctor() {
   local script="$root/drill/doctor.sh"
   [ -f "$script" ] || die "doctor script not found at $script — re-run install.sh"
+  # The doctor's verdict depends on who is asking: a restricted user cannot
+  # see the nft tables or the kernel's bridge state, and telling them the
+  # host is broken because THEY cannot read it would be a wrong diagnosis.
+  export BOX_TIER; BOX_TIER="$(box_tier)"
   exec bash "$script" "${args[@]}"
 }
 
@@ -957,6 +1042,8 @@ host_script() {   # $1 = script basename under host/
 cmd_setup_host()    { host_script setup-host.sh; }
 cmd_teardown_host() { host_script teardown-host.sh; }
 cmd_migrate_host()  { host_script migrate-host.sh; }
+cmd_grant()         { host_script grant-user.sh; }
+cmd_revoke()        { host_script revoke-user.sh; }
 
 cmd_help() { show_help "${args[0]:-}"; }
 
@@ -1014,6 +1101,15 @@ exposure_dev() { echo "expose-$1"; }   # device name for a port
 
 cmd_expose() {
   local box="${args[0]}" a2="${args[1]:-}" a3="${args[2]:-}"
+
+  # Before ANY incus call: the door's plumbing (the box-isolate ACL, the
+  # host firewall's route_localnet + masquerade) is daemon-global state a
+  # restricted certificate cannot touch. Without this guard the failure is
+  # a lie — box_net_ip cannot read boxnet's (redacted) config, so the
+  # restricted user is told their running box "has no boxnet address yet".
+  if [ "$(box_tier)" = restricted ]; then
+    die "box expose edits the daemon-global ACL and firewall, which the restricted tier cannot modify — ask an incus-admin. (see #74)"
+  fi
 
   # --list
   if [ "$a2" = "--list" ]; then

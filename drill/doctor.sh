@@ -45,6 +45,65 @@ timeout 10 incus list >/dev/null 2>&1 || {
   exit 1
 }
 
+# The tier changes what this doctor can SEE, so it changes what it may JUDGE.
+# bin/box exports BOX_TIER; unset means a hand-run, which was always admin.
+# A restricted (incus-group) user cannot read the nft tables, the kernel's
+# bridge ports, or boxnet's (redacted) config — reporting those as DIRTY
+# would blame the host for the reader's own, correct, confinement. They get
+# the checks that are theirs: is the tier granted, is the contract in their
+# project, do their boxes actually resolve and route.
+TIER="${BOX_TIER:-admin}"
+if [ "$TIER" = restricted ]; then
+  head_ "Access tier — restricted (the incus group: your own boxes, nothing else)"
+  inf "the host stack (network, ACL, firewall, kernel state) is admin-owned;"
+  inf "this doctor judges only what is yours to see"
+  if [ "$FIX" = 1 ] || [ "$PIN" = 1 ]; then
+    inf "--fix / --pin-dns are admin levers — ignored on this tier"
+    FIX=0; PIN=0
+  fi
+
+  head_ "Your project — is the tier granted?"
+  if incus profile show box-net >/dev/null 2>&1 </dev/null; then
+    ok "the box-net profile is in your project — 'box new' lands on the hardened boxnet"
+    iso="$(incus profile device get box-net eth0 security.port_isolation </dev/null 2>/dev/null)"
+    [ "$iso" = "true" ] \
+      && ok "security.port_isolation = true (as shipped)" \
+      || no "security.port_isolation is NOT set in your box-net profile — re-grant refreshes it: ask an admin to re-run 'box grant $(id -un)'"
+  else
+    no "no box-net profile in your project — the restricted tier is granted per user"
+    inf "fix:  an admin runs:  box grant $(id -un)"
+  fi
+  if incus network show boxnet >/dev/null 2>&1 </dev/null; then
+    ok "boxnet is reachable from your project"
+  else
+    no "boxnet is not visible from your project — ask an admin to re-run 'box grant $(id -un)'"
+  fi
+
+  head_ "Can one of your boxes actually resolve DNS?"
+  probe="$({ incus list "user.box=1" --format csv --columns ns 2>/dev/null
+             incus list "user.claudebox=1" --format csv --columns ns 2>/dev/null; } \
+           | awk -F, '$2 == "RUNNING" { print $1; exit }')"
+  if [ -n "$probe" ]; then
+    inf "probing inside '$probe':"
+    timeout -k 5 25 incus exec "$probe" -- curl -sS -m 10 -o /dev/null https://1.1.1.1 </dev/null 2>/dev/null \
+      && ok "reaches 1.1.1.1 by address — egress routing is fine" \
+      || no "cannot reach 1.1.1.1 by address — egress routing is broken (an admin problem: box doctor as admin)"
+    timeout -k 5 25 incus exec "$probe" -- getent hosts deb.debian.org </dev/null >/dev/null 2>&1 \
+      && ok "resolves deb.debian.org — DNS works" \
+      || no "CANNOT resolve deb.debian.org — an admin problem (the resolver pin lives on the host): box doctor as admin"
+  else
+    inf "no running box to probe with (mint one: box new --name work)"
+  fi
+
+  head_ "Verdict"
+  if [ "$bad" -eq 0 ]; then
+    printf '  \033[32mclean\033[0m — your tier is granted and your boxes are fit.\n\n'
+    exit 0
+  fi
+  printf '  \033[31m%s problem(s)\033[0m — see the fixes above (most need an admin).\n\n' "$bad"
+  exit 1
+fi
+
 # A FRESH host (no boxnet) is not a DIRTY one. Everything below that would
 # scream about a missing piece must first ask: missing from a stack, or never
 # set up? setup-host creates all of it, and the drill runs setup-host itself —
@@ -189,6 +248,15 @@ for b in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
   if incus config show "$b" >/dev/null 2>&1; then
     no "leftover drill box: $b"
     [ "$FIX" = 1 ] && { timeout 60 incus delete -f "$b" >/dev/null 2>&1 && inf "reverted: deleted $b"; }
+  fi
+done
+# An interrupted multiuser.sh leaves its users (and their projects) behind —
+# and nothing else on this host will ever mention them. Its own cleanup is
+# 'box revoke --purge + userdel'; say so rather than absorbing them silently.
+for u in boxdrill1 boxdrill2 boxdrill3 boxdrill4; do
+  if getent passwd "$u" >/dev/null 2>&1; then
+    no "leftover rehearsal user: $u (an interrupted drill/multiuser.sh run)"
+    inf "fix:  sudo BOX_YES=1 box revoke $u --purge && sudo userdel -r $u"
   fi
 done
 

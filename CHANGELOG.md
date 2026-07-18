@@ -7,6 +7,28 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **The restricted tier: multi-user hosts** (#74, redesigning #72) — an admin
+  runs `box grant <user>` and that user gets their own boxes on the same
+  hardened `boxnet`, seeing nobody else's; `box revoke <user>` takes it back
+  (`--purge` deletes their world, and asserts the absence). The tier rides
+  incus-user, whose defaults miss box's contract three measured ways (Debian
+  13 / Incus 6.0.4): a private *unhardened* NAT bridge per user, snapshots
+  blocked, the `box-net` profile invisible — so grant is an idempotent
+  convergence: project narrowed to `boxnet` **and only boxnet** (listing the
+  private bridge too, the obvious fix, would keep an unhardened network one
+  `--network` flag away), snapshots allowed, the shipped profile installed
+  into their project. `box_tier()` (live credentials, argless `id -nG`)
+  drives the tier-aware surface: `expose` refuses honestly before any daemon
+  call, `setup-host` and `doctor` answer at the caller's tier. Rehearsed
+  end-to-end by `drill/multiuser.sh` (criteria a–n: confinement, lifecycle,
+  cross-user visibility, name collisions, the in-box isolation contract,
+  escape hatches, re-sync survival, revoke incl. the live-session case) —
+  54/54 on the design host (container and VM mode), including the raw-attach scoped-guarantee measurement and both grant-failure injections demanded by #75's review.
+- **CI runs the multi-user rehearsal on a real Incus** — a second `rehearsal`
+  job stands up the full stack on the runner (setup-host, doctor, then
+  `multiuser.sh --container`), so every PR proves the tier's semantics
+  against a live daemon, not a mock. The VM trust boundary itself remains a
+  real-hardware ritual, like the full drill.
 - **Global / root install** (#71) — run as root, box installs *once* to
   `/opt/box` (world-readable) with the `box` symlink on `/usr/local/bin`, so
   every operator on a shared host runs the same tree. Per-user installs are
@@ -24,6 +46,12 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **`box restore` never worked against Incus 6** — the command table
+  dispatched `incus restore`, a subcommand that does not exist (Incus 6
+  spells it `incus snapshot restore`), so every restore died on "unknown
+  command". Found by #74's rehearsal exercising the full lifecycle as a
+  restricted user; fixed for every tier, and the rehearsal + a grep-guard in
+  `test/cli.sh` now hold it.
 - **`box tmux` works on every template** (#65) — `box tmux` runs
   `tmux new-session` *inside* the box, but the templates did not install tmux, so
   it failed with `tmux: command not found`. `tmux` is now in each template's

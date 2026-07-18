@@ -106,6 +106,51 @@ re-homes each legacy box onto `boxnet` (authed state preserved), and
 `box migrate-host --retire-legacy` removes the old bridge and profile once no
 legacy box remains.
 
+## Multi-user hosts: the restricted tier
+
+One host, several people, and not everyone should hold the daemon. Incus's
+socket is all-or-nothing — `incus-admin` group members own every instance on
+the machine — so box layers a second tier on
+[incus-user](https://linuxcontainers.org/incus/docs/main/projects/):
+
+| tier | who | what they hold |
+|---|---|---|
+| **admin** | root, or the `incus-admin` group | everything: all boxes, the stack, `setup-host`, `expose`, `grant` |
+| **restricted** | the `incus` group | their **own** boxes only, on the same hardened network |
+| none | everyone else | no socket, nothing |
+
+An admin hands the tier out per user, and takes it back:
+
+```sh
+box grant dev1              # dev1 can now: box new / list / shell / snapshot / rm — their boxes only
+box revoke dev1             # tier removed; their boxes survive (grant again restores).
+                            #   a session they already hold keeps the socket until it
+                            #   ends — revoke warns and names the loginctl command
+box revoke dev1 --purge     # ...or end their sessions and delete everything they had
+```
+
+`grant` is an idempotent convergence, not a flag flip, because incus-user's
+defaults miss box's contract three ways (measured on Debian 13 / Incus 6.0.4,
+see [the plan doc](docs/plans/2026-07-18-restricted-tier.md)): it pins each
+user to a private *unhardened* NAT bridge, it blocks snapshots, and it cannot
+see the `box-net` profile. Granting rewires all three: the user's project is
+restricted to `boxnet` **and only boxnet** — the hardened network is not their
+default placement but the only one their certificate can express — snapshots
+are allowed, and the shipped profile is installed into their project. Re-run
+`box grant <user>` after upgrading box to refresh the profile, like
+`setup-host` for the stack.
+
+What a restricted user gets is the full contract: same ACL, same DNS
+isolation, same pinned resolver, same port isolation, same box↔box drop —
+and their boxes cannot reach another user's box, which is the same
+box↔box drop doing its one job. What they can't do stays honest: `box
+expose` (daemon-global state) says to ask an admin, `box setup-host` and
+`box doctor` answer at their tier instead of failing at it.
+
+`drill/multiuser.sh` rehearses all of it live — two users, real grants, real
+boxes, probes from inside — and CI runs it on every PR (container mode; the
+VM boundary itself is proven on real hardware, like the rest of the drill).
+
 ## Quick start
 
 ```sh

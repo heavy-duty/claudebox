@@ -127,7 +127,71 @@ The rule that keeps this honest: **isolation claims are tested, never reasoned
 about.** The box→box hole existed because a plausible code reading said it could
 not. See `drill/RUNS.md`.
 
+## Multi-user hosts: access tiers
+
+The daemon socket is binary — `incus-admin` holds everything on the machine —
+so a shared host needs a second tier, and Incus ships one: **incus-user**
+confines an `incus`-group member to an auto-created project `user-<uid>`,
+behind a restricted certificate that cannot name any other project. The tier
+is decided once, from the process's live credentials (`box_tier()`: UID 0 or
+`incus-admin` → admin; `incus` alone → restricted; neither → none), and every
+tier-aware verb reads that one function.
+
+What incus-user does *not* do is honor box's contract — measured on Debian 13
+/ Incus 6.0.4 (#74), after the design that assumed it (#72) was vetoed by its
+own Task-0 rehearsal:
+
+- it pins each user's project to a private auto-created bridge
+  (`incusbr-<uid>`) — a stock NAT bridge with **none** of the hardening: no
+  ACL, no `dns.mode=none`, no resolver pin, IPv6 on;
+- it blocks snapshots — box's entire reuse workflow;
+- the `box-net` profile lives in the default project, invisible to theirs.
+
+So the tier is an **admin-run convergence** (`box grant <user>`), not a
+group membership: put them in `incus`, touch incus-user once as them (the
+project is created lazily; nothing exists to converge until it does), then
+rewire the project — network access narrowed to `boxnet` **and only
+`boxnet`**, snapshots allowed, the shipped profile installed. Narrowing is
+the load-bearing decision: granting `boxnet,incusbr-<uid>` (the obvious fix)
+would leave an unhardened NAT bridge one `--network` flag away from any box
+they mint. With the private bridge unreferenced (its `eth0` is removed from
+their default profile) and outside `restricted.networks.access`, the hardened
+network is not their default placement — it is the only placement their
+certificate can express. The grant survives incus-user restarts by that
+tool's own design (it configures a project only at creation), and a restricted
+certificate cannot widen its own project — both measured, not read.
+
+Cross-USER isolation is the same mechanism as cross-box isolation, on
+purpose: their instances share `boxnet` with everyone's, and the bridge-family
+drop + port isolation + `dns.mode=none` already make any two boxes strangers.
+A restricted user CAN strip `security.port_isolation` from the profile copy
+in their own project — or skip the profile entirely and attach `boxnet` raw
+(`--network boxnet`); the network must be usable for the profile to work, and
+Incus has no allow-via-profile-only lever. So the guarantee is scoped, and
+said plainly: **per-NIC port isolation is guaranteed for box-minted
+instances; a raw attachment keeps every network-owned control (the ACL,
+`dns.mode=none`, the resolver pin) and every host-owned one (the nft bridge
+drop) — losing only the redundant per-NIC L2 layer.** Scoped, and measured:
+`drill/multiuser.sh` criterion (m) launches exactly that raw instance and
+probes egress, RFC1918, both sibling directions and name enumeration from
+inside it. Defense in depth, every layer measured (criteria a–n).
+
+`box revoke` is two strengths: bare, it removes the group — their boxes keep
+*running* (revoking a person does not kill their workloads), `grant` restores
+everything, and because supplementary groups are read at login, revoke warns
+when live sessions keep the socket until they end (and names the `loginctl`
+command). `--purge` terminates those sessions *first* — a stale-group process
+could otherwise touch incus-user after the purge and lazily recreate the
+project with stock, unhardened defaults, undoing the grant's whole point —
+then deletes their world (boxes, images, project, private bridge, trust-store
+certificate) and asserts the absence afterwards. A failed `grant` backs its
+own group-add out on exit for the same reason: no half-granted user holding
+an un-narrowed socket.
+
 ## Non-goals
 
-- No unattended/CI bring-up — the flow is interactive.
+- Interactive-first: install and setup prompt by default (`BOX_YES=1` and the
+  CI rehearsal job are the sanctioned unattended paths).
 - No credential storage or injection by the tool.
+- No per-user resource quotas on the restricted tier (Incus's
+  `limits.*`/`restricted.*` project keys exist when someone needs them).
