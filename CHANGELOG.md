@@ -5,6 +5,64 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Added
+
+- **Versioned installs** (#66's stance, made livable) — install.sh now lands
+  each version side by side at `<root>/versions/<v>` (its own `VERSION` +
+  `INSTALLED_FROM`), with a `current` symlink tracking the default and
+  `$BINDIR/box` riding the chain, the way plenty of CLIs manage theirs. New
+  verbs: `box versions` (lists installs, marks the current default and the
+  running tree), `box use <version>` (flips the default, converges the PATH
+  symlinks, and *asserts the effective result* — `current` must resolve to
+  the asked-for version and the chain's `box --version` must answer it).
+  Re-running the installer with an installed version is a converging no-op
+  (`BOX_REINSTALL=1` replaces that version's tree); a **new** version installs
+  side-by-side and flips `current` only when no boxes exist — under existing
+  boxes the flip is refused loudly, naming the boxes (#66: never change
+  versions under a user's boxes; `box use` keeps the same refusal). A
+  pre-0.7.0 **flat tree is migrated in place** (two renames, the operator's
+  tree preserved bit for bit), so upgrading from 0.6.0 is seamless; a stale
+  or dangling `$BINDIR/box` is healed instead of wedging the install; and the
+  installer warns when the *other* tier's install (/opt/box vs ~/.local)
+  coexists, since PATH order decides which wins.
+- **A real uninstall** — `box uninstall [<version>] [--all] [--purge-host]`
+  replaces the "rm -rf two paths" prose. One version: refuses the current one
+  (`box use` off it first). Everything: runs in the safe order — refuses
+  while boxes exist (naming them) unless `--purge-host` runs teardown-host
+  first — then removes every version, the `current` and PATH symlinks, and
+  the legacy claudebox crumbs (both name generations), and **ends with an
+  absence assert**: every removed path is re-checked, and any survivor makes
+  it exit 1 as `uninstall INCOMPLETE` naming the leftovers (the
+  `revoke --purge` discipline). `teardown-host.sh` gains `--yes`/`BOX_YES=1`
+  for automation and now points at `box uninstall` when done.
+- **`BOX_INSTALL_SOURCE=<dir-or-tarball>`** — installs from a local tree,
+  bypassing the download. CI's rehearsal job now installs via install.sh
+  itself (proving the installer under review, not a `cp -r` mimic of it), and
+  ends with an **uninstall drill**: grant + `revoke --purge` a throwaway
+  user, `teardown-host`, `box uninstall --all`, then assert **zero residue**
+  — no networks, profiles, ACLs, nft tables, systemd units, files or
+  symlinks.
+- **test/cli.sh drives real installs** — still dependency-free, non-root, no
+  daemon: `BOX_INSTALL_SOURCE` + throwaway `BOX_HOME`/`BOX_BIN` roots and a
+  fake `incus` on PATH (`$FAKE_BOXES`) turn layout, chain, no-op/converge,
+  reinstall, side-by-side upgrade, the three #66 refusals (install flip,
+  `use`, `uninstall` — boxes named), flat-tree migration, symlink healing,
+  single-version and zero-residue uninstalls, and the `INCOMPLETE` scream
+  into *driven* tests instead of greps (154 checks).
+
+### Fixed
+
+- **`revoke --purge` re-checks the incus-user state** — the purge removed
+  `/var/lib/incus/users/<uid>` without ever asserting its absence, the one
+  path its own absence block did not cover; and the stat now rides
+  `$SUDO test -d` (`/var/lib/incus` is not traversable by a non-root admin,
+  so a bare `[ -d ]` answered "absent" for a directory that was there).
+- **A wedged `$BINDIR/box` no longer blocks installing** — the old
+  no-op-if-installed check keyed off the symlink's existence OR the tree's,
+  so a stale symlink (or a half-removed tree) could fake "already installed"
+  forever. Installed-ness is now judged from `versions/<v>` itself; symlinks
+  are converged with `ln -sfn`, never trusted as the signal.
+
 ## 0.6.0 — 2026-07-18
 
 ### Added

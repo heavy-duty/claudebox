@@ -202,10 +202,11 @@ EOF
     export BOX_SKIP_SETUP_HOST=1
   fi
 
-  # The installer is a no-op when box is already installed — upgrading is
-  # uninstall-then-install, by design. The drill re-proves a tree from scratch
-  # every run, so it does the uninstall itself: clear any prior tree and symlink
-  # before installing, or install.sh would correctly refuse to touch them.
+  # The installer converges when a version is already installed (0.7.0's
+  # versioned layout: re-running the same version is a no-op, and an upgrade
+  # lands side-by-side without flipping under boxes). The drill re-proves a
+  # tree from SCRATCH every run — a fresh host, not a converged one — so it
+  # removes the whole install root and symlink first.
   rm -rf "$HOME/.local/share/box" "$HOME/.local/bin/box"
 
   # The installer prompts (install? set up host?) and reads /dev/tty. The drill
@@ -224,7 +225,7 @@ EOF
   # reads BOX_* — the vars were ignored, main was installed, and the run drilled
   # the wrong tree while reporting success. A drill that silently drills the
   # wrong code is worse than one that fails.
-  got="$(cat "$HOME/.local/share/box/INSTALLED_FROM" 2>/dev/null || echo '<unknown>')"
+  got="$(cat "$HOME/.local/share/box/current/INSTALLED_FROM" 2>/dev/null || echo '<unknown>')"
   if [ "$got" != "$REPO@$REF" ]; then
     echo "drill: FATAL — asked to install $REPO@$REF, but the tree says '$got'." >&2
     echo "  Your local drill.sh is probably STALE (pre-0.5.0 it passed CLAUDEBOX_*," >&2
@@ -302,7 +303,7 @@ if [ "${DRILL_OWNS_SETUP:-0}" != 1 ]; then
     echo "  install.sh is supposed to run the host setup itself (#64), and setup-host" >&2
     echo "  is supposed to converge in one run (#63). One of those did not happen." >&2
     echo "  reproduce with the output visible:" >&2
-    echo "    ~/.local/share/box/host/setup-host.sh" >&2
+    echo "    ~/.local/share/box/current/host/setup-host.sh" >&2
     echo "  or hand setup back to the drill:  DRILL_OWNS_SETUP=1 $SELF" >&2
     exit 1
   fi
@@ -361,7 +362,7 @@ left="$(incus list --format csv --columns n 2>/dev/null | tr '\n' ' ')"
 # proves is idempotency: a second run over a cleaned host is a no-op that
 # restores the stack rather than a fresh build.
 inf "running setup-host.sh (post-clean convergence: restores dns.mode and any reverted mutations)…"
-if ! timeout -k 10 300 ~/.local/share/box/host/setup-host.sh; then
+if ! timeout -k 10 300 ~/.local/share/box/current/host/setup-host.sh; then
   echo "drill: setup-host.sh failed or timed out (>5 min)." >&2
   echo "  it should take seconds on a host that already has incus. usual causes:" >&2
   echo "    · instances still attached to boxnet while its ACLs are reconfigured" >&2
@@ -469,7 +470,7 @@ phase "B. The box surface"
 # ===========================================================================
 # Compare against the installed tree's VERSION file, not a hardcoded number —
 # a pinned literal here would fail the drill on every release.
-expected="$(cat "$HOME/.local/share/box/VERSION" 2>/dev/null || echo '?')"
+expected="$(cat "$HOME/.local/share/box/current/VERSION" 2>/dev/null || echo '?')"
 v="$(box --version 2>&1)"
 case "$v" in *"$expected"*) ok "box --version → $v" ;; *) no "version mismatch: CLI says '$v', VERSION file says '$expected'" ;; esac
 
@@ -498,7 +499,7 @@ box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
 # The one rule that keeps templates honest: no key can name a network. Plant a
 # bad template in the installed tree (the drill owns this host), expect the
 # parser to reject it BY NAME, remove it.
-badt="$HOME/.local/share/box/templates/cbdrill-bad"
+badt="$HOME/.local/share/box/current/templates/cbdrill-bad"
 mkdir -p "$badt" && printf 'BOX_IMAGE="x"\nBOX_USER="y"\nBOX_NETWORK="lan"\n' >"$badt/box.env" && : >"$badt/user-data.yaml"
 box new --name tpl --template cbdrill-bad 2>&1 | grep -q "unknown key 'BOX_NETWORK'" \
   && ok "a template cannot name a network — BOX_NETWORK rejected by name" \
@@ -889,7 +890,7 @@ phase "M. Migration — the pre-0.4.0 → box transition (host/migrate-host.sh)"
 # tag on the OLD network — exactly what a pre-0.4.0 host carries. Then prove
 # migrate-host.sh moves it onto the new stack with its identity intact, and
 # retires the legacy stack only once it is empty.
-MIG="$HOME/.local/share/box/host/migrate-host.sh"
+MIG="$HOME/.local/share/box/current/host/migrate-host.sh"
 if [ ! -f "$MIG" ]; then
   no "migrate-host.sh not installed — cannot drill the transition"
 else
@@ -985,5 +986,5 @@ fi
 echo
 inf "this host still has Incus, boxnet, the ACL, the profile and the firewall rules"
 inf "(plus, unless re-run: dns.mode=none and NIC filtering from the D phase)."
-inf "to undo:  ~/.local/share/box/host/teardown-host.sh [--purge-incus]"
+inf "to undo:  box uninstall --purge-host   (or ~/.local/share/box/current/host/teardown-host.sh)"
 [ "$fail" -eq 0 ]

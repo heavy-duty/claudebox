@@ -42,29 +42,48 @@ design rationale.
 curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
 ```
 
-It asks first — **"Install box?"** — then, if box is not already installed,
-downloads the tree to `~/.local/share/box`, links `box` onto your `PATH`, and
-asks a second question: **"Set up this machine as a box host now?"** Say yes and
-it builds the whole isolation stack for you (it may ask for `sudo`); say no and
-you can run `box setup-host` later. (No `git clone` needed.)
+It asks first — **"Install box?"** — then downloads the tree into a
+**versioned** install (the way plenty of CLIs manage theirs), links `box` onto
+your `PATH`, and on a fresh host asks a second question: **"Set up this
+machine as a box host now?"** Say yes and it builds the whole isolation stack
+for you (it may ask for `sudo`); say no and you can run `box setup-host`
+later. (No `git clone` needed.)
 
-**Re-running is a safe no-op.** If box is already installed, the installer tells
-you so and changes nothing — a stray re-run can never clobber your install or
-rebuild the stack under your boxes. Upgrading is therefore explicit: uninstall
-what you have and install fresh. Preserve any boxes first — `box down <box>`,
-copy out anything you need (a portable `box export` is
+The layout, under the install root (`~/.local/share/box`, or `/opt/box` for a
+root install):
+
+```
+versions/<version>/          one full tree per installed version
+current -> versions/<v>      the tracked default
+$BINDIR/box -> current/bin/box    the PATH entry, riding the chain
+```
+
+**Re-running is a safe converge.** Installing a version you already have
+changes nothing and says so (`BOX_REINSTALL=1` replaces that version's tree);
+a stray re-run can never clobber your install or rebuild the stack under your
+boxes. Installing a **new** version lands it side by side and flips `current`
+only when you have **no boxes** — under existing boxes the flip is refused
+(never change versions under a user's boxes,
+[#66](https://github.com/heavy-duty/box/issues/66)) and switching stays a
+deliberate act: preserve what you care about — `box down <box>`, copy out
+anything you need (a portable `box export` is
 [#70](https://github.com/heavy-duty/box/issues/70)), then `box rm <box>`
 (which deletes the box _and_ its snapshots) — then:
 
 ```sh
-rm -rf ~/.local/share/box ~/.local/bin/box   # uninstall
-curl -fsSL https://raw.githubusercontent.com/heavy-duty/box/main/install.sh | bash
+box versions        # what is installed, which is current, which is running
+box use <version>   # flip the default (same refusal while boxes exist)
 ```
 
-A version-aware upgrade that migrates boxes instead of asking you to is
-[#67](https://github.com/heavy-duty/box/issues/67). For unattended installs
-(CI, images), `BOX_YES=1` answers every prompt yes and `BOX_SKIP_SETUP_HOST=1`
-declines the host-setup step.
+A pre-0.7.0 flat install is migrated into `versions/` automatically on the
+next installer run — the tree is moved, not re-downloaded, and your boxes are
+untouched. A version-aware upgrade that migrates boxes instead of asking you
+to is [#67](https://github.com/heavy-duty/box/issues/67). For unattended
+installs (CI, images), `BOX_YES=1` answers every prompt yes,
+`BOX_SKIP_SETUP_HOST=1` declines the host-setup step, and
+`BOX_INSTALL_SOURCE=<dir-or-tarball>` installs from a local tree instead of
+downloading (how CI proves the installer under review, and how the drill can
+install an unpushed branch).
 
 ### Global vs per-user install
 
@@ -83,7 +102,9 @@ box's tree is _executed by other users_ — so it cannot hide in one user's home
 
 `BOX_HOME` / `BOX_BIN` override the destination on either path. A per-user
 install under `/root` would be `0700` and unreadable to everyone else — which
-is exactly the bug the root branch fixes.
+is exactly the bug the root branch fixes. When both tiers are installed, PATH
+order decides which `box` wins — the installer warns when it sees the other
+tier's tree.
 
 ## One-time host setup (Ubuntu 24.04 / Debian 13)
 
@@ -206,8 +227,7 @@ form; flags win). The template's identity (name, user) is stamped onto the insta
 so `shell`, `exec` and `tmux` land in the right user — and a clone still
 knows, because `incus copy` carries the metadata.
 
-## Log in once, reuse via snapshotsrm -rf ~/.local/share/box ~/.local/bin/box          # per-user install
-sudo rm -rf /opt/box /usr/local/bin/box             # global (root) install
+## Log in once, reuse via snapshots
 
 Because every fresh box is creds-free, re-authenticating each time would be
 toil. Snapshot an authenticated box and clone from it instead:
@@ -388,12 +408,28 @@ documentation, not a host-executed script. See
 
 ## Uninstall
 
+`box uninstall` is the real uninstall, and it runs in the safe order — boxes
+first, then the stack, then the tree — and **ends with an absence assert**:
+every path it removed is re-checked, and any survivor makes it exit 1 naming
+the leftovers instead of reporting a clean uninstall that wasn't (the same
+discipline as `box revoke --purge`).
+
 ```sh
-box teardown-host                                    # boxes, network, ACL, profile, firewall
-box teardown-host --purge-incus                      # ...and Incus itself
-rm -rf ~/.local/share/box ~/.local/bin/box           # per-user install
-sudo rm -rf /opt/box /usr/local/bin/box              # global (root) install
+box uninstall <version>            # one non-current version (side-by-side cleanup)
+box uninstall --all --purge-host   # everything: teardown-host (all boxes, the
+                                   #   boxnet stack, the firewall), then every
+                                   #   version, the symlinks, legacy claudebox crumbs
+box uninstall                      # just the install — refuses while boxes exist
+                                   #   (and names them); run teardown-host first,
+                                   #   or use --purge-host
 ```
+
+The full-removal order on a multi-user host: `box revoke <user> --purge` each
+granted user (it asserts its own zero-residue, including the incus-user state
+under `/var/lib/incus/users/`), then `box teardown-host` (add `--purge-incus`
+to drop Incus itself, `--yes`/`BOX_YES=1` for automation), then
+`box uninstall`. CI drills exactly this sequence and asserts zero residue —
+no networks, profiles, nft tables, systemd units, files or symlinks.
 
 ## Non-goals
 

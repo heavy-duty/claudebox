@@ -3,20 +3,34 @@
 # ancestor created, so one teardown cleans a host of any generation: all boxes
 # (both tags), the boxnet/claudenet networks + ACLs, the box-net/claude-dev
 # profiles, and both generations of firewall units and nft tables.
-# Usage: ./host/teardown-host.sh [--purge-incus]
+# Usage: ./host/teardown-host.sh [--purge-incus] [--yes]
 #   --purge-incus  also apt-purge Incus itself (skipped if non-box
 #                  instances still exist on this host)
+#   --yes          skip the confirmation (BOX_YES=1 does the same) — for
+#                  automation: CI's uninstall drill and 'box uninstall
+#                  --purge-host' run this unattended
 set -euo pipefail
 
-purge=false
-[ "${1:-}" = "--purge-incus" ] && purge=true
+purge=false; yes=0
+for arg in "$@"; do
+  case "$arg" in
+    --purge-incus) purge=true ;;
+    --yes|-y) yes=1 ;;
+    *) echo "teardown-host: unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
+[ -n "${BOX_YES:-}" ] && yes=1
 
 echo "This removes ALL boxes (uncommitted work in them is lost), the"
 echo "boxnet/claudenet networks, ACLs, profiles, and the box firewall rules"
 echo "(both current and pre-0.4.0 names)."
 $purge && echo "Incus itself will also be uninstalled (--purge-incus)."
-read -rp "Continue? [y/N] " a
-case "$a" in y|Y) ;; *) echo "aborted"; exit 1 ;; esac
+if [ "$yes" -eq 1 ]; then
+  echo "(confirmed non-interactively: --yes/BOX_YES)"
+else
+  read -rp "Continue? [y/N] " a
+  case "$a" in y|Y) ;; *) echo "aborted"; exit 1 ;; esac
+fi
 
 # Instances — both tag generations, one delete at a time (a multi-name
 # 'incus delete' aborts at the first missing name).
@@ -72,4 +86,4 @@ if $purge; then
   fi
 fi
 
-echo "Teardown complete. (Your ~/.local/bin/box symlink and ~/.local/share/box remain — remove by hand if wanted.)"
+echo "Teardown complete. (The box install tree itself remains — 'box uninstall' removes it, with a zero-residue check.)"

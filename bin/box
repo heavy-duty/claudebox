@@ -77,6 +77,9 @@ CMDS=(
   "revoke^<user> [--purge]^^Admin: take the restricted tier back (--purge also deletes their boxes)^fn:cmd_revoke^"
   "teardown-host^[--purge-incus]^^Remove the box host stack (both name generations)^fn:cmd_teardown_host^"
   "migrate-host^--box <n> | --all-boxes | --retire-legacy^^Move a host from the pre-0.4.0 stack onto box^fn:cmd_migrate_host^"
+  "versions^^^List the installed box versions — the current default and the running one^fn:cmd_versions^"
+  "use^<version>^^Switch the default box version (refuses while boxes exist)^fn:cmd_use^"
+  "uninstall^[<version>] [--all] [--purge-host]^^Remove one installed version, or the whole install — asks first, asserts the absence^fn:cmd_uninstall^"
   "status^^^Deprecated alias for 'list'^fn:cmd_status^"
   "help^[<command>]^^This help, or 'box help <command>' for one command^fn:cmd_help^"
 )
@@ -481,6 +484,56 @@ the profile, then verifies the box works on its new network leg.
   box migrate-host --retire-legacy # remove the old stack (once no legacy box remains)
 EOF
 ;;
+    versions) cat <<'EOF'
+List the versions installed under this install root — install.sh lands each
+one side by side at <root>/versions/<v>, and a 'current' symlink tracks the
+default (what the box on your PATH runs). The default is marked (current);
+the tree answering THIS command is marked (running) — they differ when your
+PATH resolves a different install (say, a global /opt/box shadowing yours).
+
+  box versions
+  box use <version>        # switch the default
+  # install another version side by side: re-run install.sh
+EOF
+;;
+    use) cat <<'EOF'
+Switch the default box version — repoint the 'current' symlink (and the PATH
+symlink riding it) at an installed version. Refuses while ANY box exists:
+never change versions under a user's boxes (#66) — 'box down' what you keep,
+copy out what you need via 'box shell'/'box exec' (a portable 'box export'
+is #70), 'box rm' each box, then switch. The flip is asserted afterwards:
+current must resolve to the version you asked for, and the chain's
+'box --version' must answer it.
+
+  box versions             # what is installed
+  box use 0.6.0
+EOF
+;;
+    uninstall) cat <<'EOF'
+Remove one installed version, or the whole install — the real uninstall,
+replacing the old "rm -rf two paths by hand" instructions.
+
+  box uninstall <version>     one NON-current version ('box use' another
+                              first if you are on it)
+  box uninstall               everything: every version, the current and
+  box uninstall --all         PATH symlinks, and any legacy claudebox crumbs
+  box uninstall --purge-host  run teardown-host first (all boxes, the boxnet
+                              stack, the firewall — its own confirmation),
+                              then remove the install
+
+The full uninstall runs in the safe order: boxes first — it refuses while
+any exist (and names them) unless --purge-host tears them down; then the
+trees and symlinks; and it ENDS with an absence assert — every removed path
+is re-checked, and anything still present makes it exit 1 naming the
+leftovers instead of reporting a clean uninstall that wasn't (the same
+discipline as 'box revoke --purge'). Asks before removing; --force or
+BOX_YES=1 skips the prompt. On a multi-user host, revoke granted users
+first: 'box revoke <user> --purge'.
+
+  box uninstall 0.5.0
+  box uninstall --all --purge-host
+EOF
+;;
     status) cat <<'EOF'
 Deprecated alias for 'box list'. It ignored the <box> argument it
 advertised, so it was split into 'list' (all boxes) and 'info <box>' (one). It
@@ -536,8 +589,9 @@ while [ $# -gt 0 ]; do
       if [ "$cmd" = doctor ]; then args+=("$1"); shift; continue; fi
       # expose's own flags (--list, --remove) are positional to it, not box's
       if [ "$cmd" = expose ]; then args+=("$1"); shift; continue; fi
-      # the host verbs delegate their flags to the scripts they wrap
-      case "$cmd" in setup-host|teardown-host|migrate-host|grant|revoke) args+=("$1"); shift; continue ;; esac
+      # the host verbs delegate their flags to the scripts they wrap;
+      # uninstall parses its own (--all, --purge-host) the same way
+      case "$cmd" in setup-host|teardown-host|migrate-host|grant|revoke|uninstall) args+=("$1"); shift; continue ;; esac
       if [ "$cmd" = exec ] || [ "$cmd" = incus ]; then
         usage_error "unknown option: $1 — a command's own flags go after --, as in '$(synopsis_of "$cmd")'"
       fi
@@ -1044,6 +1098,258 @@ cmd_teardown_host() { host_script teardown-host.sh; }
 cmd_migrate_host()  { host_script migrate-host.sh; }
 cmd_grant()         { host_script grant-user.sh; }
 cmd_revoke()        { host_script revoke-user.sh; }
+
+# --- the versioned install (#66's stance, made livable in 0.7.0) ------------
+# install.sh lands each version at <install-root>/versions/<v>, with a
+# 'current' symlink naming the default and $BINDIR/box pointing through it.
+# $root (readlink -f, line 8) already resolved the whole chain, so a versioned
+# install always runs from .../versions/<v> — and a git checkout does not,
+# which is how these verbs know to refuse instead of uninstalling somebody's
+# working copy.
+install_root() {
+  local vdir; vdir="$(dirname "$root")"
+  [ "$(basename "$vdir")" = versions ] || return 1
+  dirname "$vdir"
+}
+
+# A version is a DIRECTORY NAME under versions/ — nothing else. One strict
+# gate for every caller that builds a path from one (the installer's new_ver,
+# migration's flat_ver, and bin/box's 'use'/single-version uninstall): only
+# [A-Za-z0-9._+-], no leading '.' or '-'. That forbids '/', '..'-escapes,
+# spaces and option-lookalikes by construction — a crafted version dies HERE,
+# never in an rm -rf or an ln. install.sh carries a byte-identical copy;
+# test/cli.sh diffs the two so the gates cannot drift.
+valid_version() {
+  case "$1" in
+    ''|.*|-*) return 1 ;;
+    *[!A-Za-z0-9._+-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Which boxes exist on this host, at THIS caller's tier? Prints their names
+# (both tag generations) and succeeds when at least one exists; fails when
+# none are visible — including when incus is absent or not answering, because
+# #66's stance protects BOXES from a version change, and a daemon that cannot
+# answer has none to protect. install.sh carries a byte-identical copy (it
+# runs before any install tree exists); test/cli.sh diffs the two so they
+# cannot drift.
+existing_boxes() {
+  command -v incus >/dev/null 2>&1 || return 1
+  { timeout 10 incus list user.box=1 --format csv --columns n </dev/null
+    timeout 10 incus list user.claudebox=1 --format csv --columns n </dev/null
+  } 2>/dev/null | awk -F, 'NF && !seen[$1]++ { print $1 }' | grep .
+}
+
+# #66, kept at flip time: never change (or remove) the version under existing
+# boxes. Names every box and the remedy, then dies — a refusal that does not
+# say which boxes block it sends the operator off to rediscover 'box list'.
+die_under_boxes() {   # $1 = the act being refused, $2 = the retry command
+  local names n
+  names="$(existing_boxes)" || return 0
+  {
+    echo "box: this host has existing boxes:"
+    while IFS= read -r n; do echo "box:   · $n"; done <<<"$names"
+    echo "box: refusing to $1 under them (#66: never change versions under a user's boxes)."
+    echo "box: preserve what you care about — 'box down <box>', copy out via 'box shell'/'box exec'"
+    echo "box: (a portable 'box export' is #70) — then 'box rm <box>' each, and re-run: $2"
+  } >&2
+  exit 1
+}
+
+# The PATH symlinks that could ride this install: the one this invocation came
+# in on, BOX_BIN's, and the tier default's. Candidates only — every consumer
+# checks where a link actually points before touching it, so a symlink that is
+# somebody else's (another install root, a hand-rolled wrapper) is never moved.
+bin_links() {
+  local c=()
+  [ -L "${BASH_SOURCE[0]}" ] && c+=("${BASH_SOURCE[0]}")
+  [ -n "${BOX_BIN:-}" ] && c+=("$BOX_BIN/box")
+  if [ "$(id -u)" -eq 0 ]; then c+=(/usr/local/bin/box); else c+=("$HOME/.local/bin/box"); fi
+  printf '%s\n' "${c[@]}" | awk '!seen[$0]++'
+}
+
+converge_bin_links() {   # $1 = install root: point our PATH symlinks through current
+  local ir="$1" p t
+  while IFS= read -r p; do
+    [ -L "$p" ] || continue
+    t="$(readlink -f "$p" 2>/dev/null || true)"
+    [ -n "$t" ] || t="$(readlink "$p" 2>/dev/null || true)"
+    case "$t" in
+      "$ir"/*) ln -sfn "$ir/current/bin/box" "$p" ;;
+    esac
+  done < <(bin_links)
+}
+
+cmd_versions() {
+  local ir cur d v mark
+  ir="$(install_root)" || die "this box runs from a working tree ($root), not a versioned install — nothing to list"
+  cur="$(readlink -f "$ir/current" 2>/dev/null || true)"
+  echo "VERSIONS  ($ir)"
+  for d in "$ir/versions"/*/; do
+    [ -d "$d" ] || continue
+    v="$(basename "$d")"
+    mark=""
+    [ "$(readlink -f "$d")" = "$cur" ] && mark=" (current)"
+    [ "$(readlink -f "$d")" = "$root" ] && mark="$mark (running)"
+    printf '  %s%s\n' "$v" "$mark"
+  done
+  echo
+  echo "switch the default:  box use <version>"
+  echo "install another:     re-run install.sh (versions land side by side)"
+}
+
+cmd_use() {
+  local v="${args[0]:-}" ir eff expect out
+  [ -n "$v" ] || usage_error "usage: $(synopsis_of use)"
+  ir="$(install_root)" || die "this box runs from a working tree ($root), not a versioned install — nothing to switch"
+  valid_version "$v" || die "not a sane version name: '$v' (a version is a directory name under versions/ — see 'box versions')"
+  [ -d "$ir/versions/$v" ] || die "no such version: $v (see 'box versions')"
+  die_under_boxes "switch the default box version" "box use $v"
+  # An atomic flip, not unlink+create: ln -sfn leaves a window where current
+  # is missing; a rename over it does not.
+  ln -sfn "versions/$v" "$ir/current.new.$$" && mv -Tf "$ir/current.new.$$" "$ir/current"
+  converge_bin_links "$ir"
+  # Assert the EFFECTIVE result, not the intent: current must resolve to the
+  # version asked for, and the chain's own binary must answer that version —
+  # a flip that "worked" while the operator's box still runs the old tree is
+  # exactly the flakiness this verb exists to end.
+  eff="$(basename "$(readlink -f "$ir/current" 2>/dev/null || true)")"
+  [ "$eff" = "$v" ] || die "the flip did not take — current resolves to '${eff:-nothing}', not $v"
+  expect="$(cat "$ir/versions/$v/VERSION" 2>/dev/null || true)"
+  if [ -n "$expect" ]; then
+    out="$("$ir/current/bin/box" --version 2>&1 || true)"
+    case "$out" in
+      *"$expect"*) : ;;
+      *) die "current/bin/box answers '$out', not version $expect — the symlink chain is broken" ;;
+    esac
+  fi
+  echo "box: switched to $v (current -> versions/$v)"
+}
+
+# The uninstall's own confirmation. NOT confirm() above: that one is for box
+# lifecycle verbs and must never auto-accept from the environment (the drill
+# exports BOX_YES=1 for the installer and still expects 'box rm' to refuse
+# without --force). Uninstalling is installer-family, and BOX_YES is the
+# installer-family consent contract — same as install.sh and revoke --purge.
+uninstall_confirm() {   # $1 = question. --force, or BOX_YES=1, or a TTY.
+  [ "$force" -eq 1 ] && return 0
+  [ -n "${BOX_YES:-}" ] && return 0
+  [ -t 0 ] || usage_error "refusing to $1 without --force (no terminal to confirm on; BOX_YES=1 also means yes)"
+  local reply
+  printf 'box: %s? [y/N] ' "$1"
+  read -r reply
+  case "$reply" in y|Y|yes|YES|Yes) return 0 ;; *) die "aborted." ;; esac
+}
+
+# 'box uninstall' — the real uninstall #66 left as two rm -rf lines of prose.
+# The full removal runs in the documented order: boxes first (refuse while
+# they exist, or --purge-host tears the stack down with them), then trees and
+# symlinks, and it ENDS by PROVING the absence — like revoke --purge, the
+# last word is a re-check, not a hope.
+cmd_uninstall() {
+  local ir a ver="" all=0 purge_host=0 cur p t granted leftover=""
+  local targets=()
+  for a in ${args[@]+"${args[@]}"}; do
+    case "$a" in
+      --all) all=1 ;;
+      --purge-host) purge_host=1 ;;
+      -*) usage_error "unknown option: $a (see 'box help uninstall')" ;;
+      *) [ -z "$ver" ] || usage_error "usage: $(synopsis_of uninstall)"; ver="$a" ;;
+    esac
+  done
+  ir="$(install_root)" || die "this box runs from a working tree ($root), not a versioned install — nothing to uninstall (a checkout is removed with plain rm)"
+  [ -w "$ir" ] || die "cannot write $ir — a global install is uninstalled as root: sudo box uninstall"
+
+  # -- one version -----------------------------------------------------------
+  if [ -n "$ver" ] && [ "$all" -eq 0 ]; then
+    [ "$purge_host" -eq 0 ] || usage_error "--purge-host goes with the full uninstall, not a single version"
+    valid_version "$ver" || die "not a sane version name: '$ver' (a version is a directory name under versions/ — see 'box versions')"
+    [ -d "$ir/versions/$ver" ] || die "no such version: $ver (see 'box versions')"
+    cur="$(basename "$(readlink -f "$ir/current" 2>/dev/null || true)")"
+    # A broken current makes the CURRENT guard below unfireable (cur empty
+    # when the link is missing; cur naming a non-directory when it dangles —
+    # readlink -f resolves a link whose last component does not exist). Heal
+    # first, then decide; never delete around a broken default.
+    { [ -n "$cur" ] && [ -d "$ir/versions/$cur" ]; } \
+      || die "current is dangling — 'box use <version>' to repoint the default first (refusing to remove versions while it is broken)"
+    [ "$ver" != "$cur" ] || die "$ver is the CURRENT version — 'box use <other>' first, or 'box uninstall --all' for everything"
+    uninstall_confirm "remove box version $ver from $ir"
+    # rm's exit code is not the verdict — the absence re-check below is (a
+    # half-removed tree must be reported as INCOMPLETE, not as a crash).
+    rm -rf "$ir/versions/$ver" || true
+    if [ -e "$ir/versions/$ver" ] || [ -L "$ir/versions/$ver" ]; then
+      echo "box: uninstall INCOMPLETE — still present: $ir/versions/$ver" >&2
+      exit 1
+    fi
+    echo "box: removed version $ver (the default stays $cur)"
+    return 0
+  fi
+  [ -z "$ver" ] || usage_error "usage: $(synopsis_of uninstall) — a version and --all together is ambiguous"
+
+  # -- everything ------------------------------------------------------------
+  if [ "$purge_host" -eq 1 ]; then
+    # Granted users' worlds are not ours to erase silently — name them first;
+    # 'box revoke <user> --purge' is the clean path (and asserts its absence).
+    granted="$(timeout 10 incus project list --format csv 2>/dev/null </dev/null | cut -d, -f1 | grep '^user-' | tr '\n' ' ' || true)"
+    [ -n "${granted% }" ] && echo "box: NOTE — granted users still have projects (${granted% }) — 'box revoke <user> --purge' removes each world cleanly first" >&2
+    # Consent forwards: --force and BOX_YES are this verb's installer-family
+    # yes, and teardown-host must hear it too — otherwise a non-interactive
+    # 'uninstall --all --purge-host --force' dies at teardown's own prompt
+    # (EOF on read) with the tree untouched but the promise broken.
+    if [ "$force" -eq 1 ] || [ -n "${BOX_YES:-}" ]; then
+      bash "$root/host/teardown-host.sh" --yes \
+        || die "teardown-host did not complete — stopping BEFORE removing the install (the tree is untouched; fix the error and re-run)"
+    else
+      bash "$root/host/teardown-host.sh" \
+        || die "teardown-host did not complete — stopping BEFORE removing the install (the tree is untouched; fix the error and re-run)"
+    fi
+  else
+    die_under_boxes "uninstall box" "box uninstall (or 'box uninstall --purge-host' to tear the host stack down with them)"
+  fi
+  uninstall_confirm "remove the ENTIRE box install at $ir (every version)"
+
+  # The removal set, gathered BEFORE anything is deleted, so the absence
+  # assert below re-checks exactly what was promised gone. PATH symlinks are
+  # removed only when they resolve into (or dangle at) THIS install root.
+  targets+=("$ir")
+  while IFS= read -r p; do
+    [ -L "$p" ] || continue
+    t="$(readlink -f "$p" 2>/dev/null || true)"
+    [ -n "$t" ] || t="$(readlink "$p" 2>/dev/null || true)"
+    case "$t" in "$ir"/*) targets+=("$p") ;; esac
+  done < <(bin_links)
+  # Legacy crumbs: the pre-0.4.0 command name and the pre-0.5.0 tree. A real
+  # uninstall leaves neither generation behind.
+  while IFS= read -r p; do
+    p="$(dirname "$p")/claudebox"
+    [ -L "$p" ] && targets+=("$p")
+  done < <(bin_links)
+  [ -d "$HOME/.local/share/claudebox" ] && targets+=("$HOME/.local/share/claudebox")
+  mapfile -t targets < <(printf '%s\n' "${targets[@]}" | awk '!seen[$0]++')
+
+  # rm's exit code is not the verdict — the absence assert below is (a
+  # half-removed tree must be reported as INCOMPLETE by name, not as a crash).
+  for p in "${targets[@]}"; do rm -rf "$p" || true; done
+
+  # END WITH THE ABSENCE ASSERT: every path re-checked — file, dir OR symlink.
+  # A leftover makes this exit 1 by name; "uninstalled" is a claim, and claims
+  # get verified (the revoke --purge discipline).
+  for p in "${targets[@]}"; do
+    if [ -e "$p" ] || [ -L "$p" ]; then leftover="$leftover $p"; fi
+  done
+  if [ -n "$leftover" ]; then
+    echo "box: uninstall INCOMPLETE — still present:$leftover" >&2
+    echo "box: remove them by hand, and re-check each path is really gone." >&2
+    exit 1
+  fi
+  echo "box: uninstalled — removed:"
+  for p in "${targets[@]}"; do echo "box:   · $p"; done
+  if [ "$purge_host" -eq 0 ]; then
+    echo "box: note — the host stack (boxnet, firewall), if this host has one, was NOT touched:"
+    echo "box: run teardown-host from a checkout (host/teardown-host.sh), or use --purge-host next time."
+  fi
+}
 
 cmd_help() { show_help "${args[0]:-}"; }
 

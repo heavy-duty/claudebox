@@ -227,7 +227,7 @@ check "revoke: purge refuses under unkillable sessions" 0 "" \
 check "revoke: bare revoke warns about held sessions" 0 "" \
   grep -qF 'live sessions' "$ROOT/host/revoke-user.sh"
 check "revoke: the purge asserts the certificate's absence too" 0 "" \
-  bash -c 'grep -A6 "Assert absence" "'"$ROOT"'/host/revoke-user.sh" | grep -q "config trust list"'
+  bash -c 'awk "/Assert absence/,0" "'"$ROOT"'/host/revoke-user.sh" | grep -q "config trust list"'
 # A failed grant must not leave a half-granted user: if THIS run added the
 # group, the exit path takes it back (and the trap disarms only on success).
 check "grant: backs out its own group-add on failure" 0 "" \
@@ -276,8 +276,272 @@ check "multiuser.sh refuses without the env gate" 2 "opt in" \
   bash "$ROOT/drill/multiuser.sh" --yes
 check "grant-user.sh is valid bash"  0 "" bash -n "$ROOT/host/grant-user.sh"
 check "revoke-user.sh is valid bash" 0 "" bash -n "$ROOT/host/revoke-user.sh"
+check "teardown-host.sh is valid bash" 0 "" bash -n "$ROOT/host/teardown-host.sh"
+
+# ---------------------------------------------------------------------------
+# Revoke leaves NOTHING (the grant/revoke cleanliness pass). The gap this
+# closes: --purge removed /var/lib/incus/users/<uid> but never RE-CHECKED it —
+# the one path its own absence assert did not cover. And the stat must ride
+# $SUDO: /var/lib/incus is not traversable by a non-root admin, so a bare
+# [ -d ] answers "absent" for a directory that is very much there.
+# ---------------------------------------------------------------------------
+check "revoke: purge removes the incus-user state directory" 0 "" \
+  grep -qF '/var/lib/incus/users/' "$ROOT/host/revoke-user.sh"
+check "revoke: the absence assert covers the incus-user state too" 0 "" \
+  bash -c 'awk "/Assert absence/,0" "'"$ROOT"'/host/revoke-user.sh" | grep -q "/var/lib/incus/users/"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "revoke: the state checks go through \$SUDO test (an unprivileged stat lies)" 0 "" \
+  grep -qF '$SUDO test -d "/var/lib/incus/users/$uid"' "$ROOT/host/revoke-user.sh"
+
+# ---------------------------------------------------------------------------
+# The versioned install (#66 → 0.7.0). BOX_INSTALL_SOURCE bypasses the network,
+# so these are REAL runs of install.sh against throwaway BOX_HOME/BOX_BIN
+# roots — layout, symlink chain, flat-tree migration, symlink healing, use and
+# uninstall are all DRIVEN, not grepped. A fake `incus` on PATH answers the
+# existing-boxes gate ($FAKE_BOXES names them), so the #66 refusals — refuse
+# to flip, refuse to switch, refuse to uninstall under boxes — run for real
+# too, with no daemon anywhere near this suite.
+# ---------------------------------------------------------------------------
+VER="$(cat "$ROOT/VERSION")"
+WORK="$(mktemp -d)"
+FAKEHOME="$WORK/home"; mkdir -p "$FAKEHOME"
+
+ISHIM="$WORK/ishim"; mkdir -p "$ISHIM"
+cat > "$ISHIM/incus" <<'SHIM'
+#!/usr/bin/env bash
+# Fake incus: 'list' prints $FAKE_BOXES (whitespace-separated names, one per
+# line); everything else succeeds silently. Just enough for the existing-boxes
+# gate that guards version flips.
+case " $* " in
+  *" list "*) for b in ${FAKE_BOXES:-}; do printf '%s\n' "$b"; done ;;
+esac
+exit 0
+SHIM
+chmod +x "$ISHIM/incus"
+
+# A fabricated "newer release": the same CLI, a different VERSION — what an
+# upgrade actually is, from the installer's point of view.
+SRC9="$WORK/src-9.9.9"; mkdir -p "$SRC9/bin"
+cp "$ROOT/bin/box" "$SRC9/bin/box"; chmod +x "$SRC9/bin/box"
+echo "9.9.9-drill" > "$SRC9/VERSION"
+SRC8="$WORK/src-8.8.8"; mkdir -p "$SRC8/bin"
+cp "$ROOT/bin/box" "$SRC8/bin/box"; chmod +x "$SRC8/bin/box"
+echo "8.8.8-drill" > "$SRC8/VERSION"
+
+inst() {  # inst <box_home> <box_bin> [VAR=val ...] — run install.sh for real
+  local h="$1" b="$2"; shift 2
+  env HOME="$FAKEHOME" PATH="$ISHIM:$PATH" FAKE_BOXES= \
+      BOX_HOME="$h" BOX_BIN="$b" BOX_YES=1 BOX_SKIP_SETUP_HOST=1 \
+      BOX_INSTALL_SOURCE="$ROOT" "$@" bash "$ROOT/install.sh"
+}
+ibox() {  # ibox [VAR=val ...] <cmd...> — run an installed box under the shim
+  env HOME="$FAKEHOME" PATH="$ISHIM:$PATH" FAKE_BOXES= "$@"
+}
+
+# --- fresh install: the layout and the chain --------------------------------
+H1="$WORK/h1"; B1="$WORK/b1"
+check "install: a fresh install runs clean" 0 "done" inst "$H1" "$B1"
+check "install: the tree lands in versions/<v>" 0 "" test -x "$H1/versions/$VER/bin/box"
+check "install: 'current' points at versions/<v>" 0 "versions/$VER" readlink "$H1/current"
+check "install: the PATH symlink rides the chain" 0 "$H1/current/bin/box" readlink "$B1/box"
+check "install: box --version answers through the whole chain" 0 "box $VER" ibox "$B1/box" --version
+check "install: INSTALLED_FROM records the local source" 0 "local:" cat "$H1/versions/$VER/INSTALLED_FROM"
+
+# --- converge, don't clobber ------------------------------------------------
+touch "$H1/versions/$VER/CANARY"
+check "install: a same-version re-run is a no-op that says so (#66)" 0 "already installed" inst "$H1" "$B1"
+check "install: the no-op left the tree untouched" 0 "" test -e "$H1/versions/$VER/CANARY"
+check "install: BOX_REINSTALL=1 replaces that version's tree" 0 "reinstalled" inst "$H1" "$B1" BOX_REINSTALL=1
+check "install: the reinstall really replaced it (canary gone)" 1 "" test -e "$H1/versions/$VER/CANARY"
+
+# --- a second version: side-by-side, and the no-boxes flip ------------------
+check "install: a second version installs side-by-side" 0 "" inst "$H1" "$B1" BOX_INSTALL_SOURCE="$SRC9"
+check "install: ...into its own versions dir" 0 "" test -x "$H1/versions/9.9.9-drill/bin/box"
+check "install: ...and the old version stays" 0 "" test -d "$H1/versions/$VER"
+check "install: with no boxes, the default flips to the new version" 0 "box 9.9.9-drill" ibox "$B1/box" --version
+
+# --- box versions -----------------------------------------------------------
+check "versions: lists the installed versions" 0 "$VER" ibox "$B1/box" versions
+check "versions: marks the current default" 0 "(current)" ibox "$B1/box" versions
+check "versions: marks the running one" 0 "(running)" ibox "$B1/box" versions
+
+# --- box use ----------------------------------------------------------------
+check "use: no argument is a usage error" 2 "usage: box use" ibox "$B1/box" use
+check "use: an unknown version is refused by name" 1 "no such version" ibox "$B1/box" use 1.2.3
+# A version is a directory NAME — a crafted one must die at the gate, never
+# reach the ln (current pointing outside the root) or an rm -rf.
+check "use: a path-traversal version dies at the gate" 1 "not a sane version name" \
+  ibox "$B1/box" use '../../tmp/evil'
+check "use: refuses under existing boxes, naming them (#66)" 1 "wedged" \
+  ibox FAKE_BOXES="wedged stuck" "$B1/box" use "$VER"
+check "use: the refusal points at the remedy (box rm, then re-run)" 1 "box rm" \
+  ibox FAKE_BOXES=wedged "$B1/box" use "$VER"
+check "use: with no boxes, flips the default" 0 "switched to $VER" ibox "$B1/box" use "$VER"
+check "use: the flip is effective through the PATH chain" 0 "box $VER" ibox "$B1/box" --version
+check "install: an installed-but-not-current version is a no-op too" 0 "already installed" \
+  inst "$H1" "$B1" BOX_INSTALL_SOURCE="$SRC9"
+check "install: ...and does not move the default" 0 "box $VER" ibox "$B1/box" --version
+
+# --- the upgrade-under-boxes refusal, driven end to end ---------------------
+H2="$WORK/h2"; B2="$WORK/b2"
+check "refusal drill: baseline install" 0 "done" inst "$H2" "$B2"
+check "upgrade under boxes: REFUSES the default flip (#66)" 0 "refusing to change the default box version" \
+  inst "$H2" "$B2" BOX_INSTALL_SOURCE="$SRC9" FAKE_BOXES=work
+check "upgrade under boxes: the new version IS installed side-by-side" 0 "" \
+  test -d "$H2/versions/9.9.9-drill"
+check "upgrade under boxes: the default stayed put" 0 "box $VER" ibox "$B2/box" --version
+check "upgrade under boxes: the blocking boxes are NAMED" 0 "· work" \
+  inst "$H2" "$B2" BOX_INSTALL_SOURCE="$SRC8" FAKE_BOXES=work
+check "upgrade under boxes: the refusal names the deliberate flip" 0 "" \
+  bash -c 'grep -q "then flip the default:  box use" "'"$ROOT"'/install.sh"'
+
+# --- migration: a 0.6.0 flat tree becomes a versioned one -------------------
+H3="$WORK/h3"; B3="$WORK/b3"; mkdir -p "$H3/bin" "$B3"
+cp "$ROOT/bin/box" "$H3/bin/box"; chmod +x "$H3/bin/box"
+cp "$ROOT/VERSION" "$H3/VERSION"
+echo "test@flat" > "$H3/INSTALLED_FROM"
+ln -s "$H3/bin/box" "$B3/box"
+check "migrate: a pre-0.7.0 flat tree is moved into versions/" 0 "migrating" inst "$H3" "$B3"
+check "migrate: the OPERATOR'S tree moved (not a fresh copy)" 0 "test@flat" \
+  cat "$H3/versions/$VER/INSTALLED_FROM"
+check "migrate: nothing flat remains at the root" 1 "" test -e "$H3/bin"
+check "migrate: current points at the migrated version" 0 "versions/$VER" readlink "$H3/current"
+check "migrate: the PATH symlink was re-pointed through current" 0 "$H3/current/bin/box" readlink "$B3/box"
+check "migrate: the migrated install answers --version" 0 "box $VER" ibox "$B3/box" --version
+
+# ...and the seamless 0.6.0 → 0.7.0 upgrade: flat tree in, new version beside it.
+H4="$WORK/h4"; B4="$WORK/b4"; mkdir -p "$H4/bin" "$B4"
+cp "$ROOT/bin/box" "$H4/bin/box"; chmod +x "$H4/bin/box"
+cp "$ROOT/VERSION" "$H4/VERSION"
+ln -s "$H4/bin/box" "$B4/box"
+check "migrate+upgrade: flat 0.6.0 in, new version installed beside it" 0 "" \
+  inst "$H4" "$B4" BOX_INSTALL_SOURCE="$SRC9"
+check "migrate+upgrade: both versions present" 0 "" \
+  bash -c "[ -d '$H4/versions/$VER' ] && [ -d '$H4/versions/9.9.9-drill' ]"
+check "migrate+upgrade: no boxes → the new version is the default" 0 "box 9.9.9-drill" \
+  ibox "$B4/box" --version
+
+# A broken current must halt the single-version path BEFORE any decision: the
+# CURRENT guard keys off what current resolves to, and a dangling link makes
+# that answer a lie. Drive the version tree's own binary — the current chain
+# is exactly what is broken. H4 has two versions; heal current afterwards.
+ln -sfn "versions/gone" "$H4/current"
+check "uninstall: refuses while current is dangling (heal before delete)" 1 "dangling" \
+  ibox "$H4/versions/$VER/bin/box" uninstall 9.9.9-drill --force
+check "uninstall: ...and both version trees survived the refusal" 0 "" \
+  bash -c "[ -d '$H4/versions/$VER' ] && [ -d '$H4/versions/9.9.9-drill' ]"
+ln -sfn "versions/9.9.9-drill" "$H4/current"
+
+# The migration reads VERSION off the old tree — disk data, not installer
+# data. A hostile value must refuse BEFORE the tree moves anywhere.
+H9="$WORK/h9"; B9="$WORK/b9"; mkdir -p "$H9/bin" "$B9"
+cp "$ROOT/bin/box" "$H9/bin/box"; chmod +x "$H9/bin/box"
+printf '%s\n' '../pwn' > "$H9/VERSION"
+check "migrate: a hostile flat VERSION refuses to migrate" 1 "not a sane directory name" \
+  inst "$H9" "$B9"
+check "migrate: ...with the flat tree untouched where it was" 0 "" test -x "$H9/bin/box"
+
+# --- healing: a wedged \$BINDIR/box must never block an install -------------
+H5="$WORK/h5"; B5="$WORK/b5"; mkdir -p "$B5"
+ln -s "$WORK/nowhere/box" "$B5/box"                    # dangling
+check "heal: a DANGLING \$BINDIR/box does not wedge the install" 0 "done" inst "$H5" "$B5"
+check "heal: ...and got repointed" 0 "box $VER" ibox "$B5/box" --version
+H6="$WORK/h6"; B6="$WORK/b6"; mkdir -p "$B6"
+ln -s /bin/true "$B6/box"                              # stale, but resolvable
+check "heal: a STALE \$BINDIR/box with no tree does not fake 'installed'" 0 "installing $VER" \
+  inst "$H6" "$B6"
+check "heal: ...the install is real and answers" 0 "box $VER" ibox "$B6/box" --version
+
+# --- box uninstall: one version ---------------------------------------------
+check "uninstall: refuses to remove the CURRENT version" 1 "CURRENT" \
+  ibox "$B1/box" uninstall "$VER" --force
+check "uninstall: an unknown version is refused by name" 1 "no such version" \
+  ibox "$B1/box" uninstall 5.5.5 --force
+check "uninstall: a path-traversal version dies at the gate (never an rm -rf)" 1 "not a sane version name" \
+  ibox "$B1/box" uninstall '../../../../etc' --force
+check "uninstall: a version plus --all is ambiguous (usage error)" 2 "" \
+  ibox "$B1/box" uninstall 9.9.9-drill --all --force
+check "uninstall: removes a non-current version" 0 "removed version" \
+  ibox "$B1/box" uninstall 9.9.9-drill --force
+check "uninstall: that version dir is gone" 1 "" test -e "$H1/versions/9.9.9-drill"
+check "uninstall: the current version still answers" 0 "box $VER" ibox "$B1/box" --version
+
+# --- box uninstall: everything, in the safe order ---------------------------
+check "uninstall: refuses while boxes exist, naming them" 1 "wedged" \
+  ibox FAKE_BOXES=wedged "$B1/box" uninstall --all --force
+check "uninstall: the refusal offers --purge-host" 1 "purge-host" \
+  ibox FAKE_BOXES=wedged "$B1/box" uninstall --all --force
+check "uninstall: refuses without --force when no terminal" 2 "refusing" \
+  ibox bash -c "'$B1/box' uninstall --all </dev/null"
+# Plant legacy crumbs: a real uninstall leaves neither name generation behind.
+mkdir -p "$FAKEHOME/.local/share/claudebox"
+ln -s "$WORK/gone" "$B1/claudebox"
+check "uninstall --all: removes the whole install" 0 "uninstalled" \
+  ibox "$B1/box" uninstall --all --force
+check "uninstall --all: ZERO residue — root, symlinks, legacy names" 0 "" bash -c "
+  [ ! -e '$H1' ] && [ ! -L '$H1' ] &&
+  [ ! -e '$B1/box' ] && [ ! -L '$B1/box' ] &&
+  [ ! -e '$B1/claudebox' ] && [ ! -L '$B1/claudebox' ] &&
+  [ ! -e '$FAKEHOME/.local/share/claudebox' ]"
+# The last word is a re-check: a survivor must turn into a loud INCOMPLETE,
+# never a cheerful "uninstalled". (Root ignores file modes, so this drill is
+# meaningful — and runnable — for a non-root runner only.)
+if [ "$(id -u)" -ne 0 ]; then
+  H7="$WORK/h7"; B7="$WORK/b7"
+  inst "$H7" "$B7" >/dev/null 2>&1
+  mkdir -p "$H7/versions/$VER/stuck"; touch "$H7/versions/$VER/stuck/pin"
+  chmod 555 "$H7/versions/$VER/stuck"
+  check "uninstall: a survivor makes it scream INCOMPLETE (exit 1)" 1 "INCOMPLETE" \
+    ibox "$B7/box" uninstall --all --force
+  chmod -R u+w "$H7" 2>/dev/null
+fi
+
+# --- the versioned verbs from a working tree: refuse, don't guess -----------
+check "uninstall: refuses from a working tree" 1 "not a versioned install" "$BOX" uninstall --all --force
+check "versions: refuses from a working tree" 1 "not a versioned install" "$BOX" versions
+check "use: refuses from a working tree" 1 "not a versioned install" "$BOX" use 1.0.0
+
+# The existing-boxes gate must be ONE decision: install.sh and bin/box carry
+# byte-identical copies (the installer runs before any tree exists), and a
+# drifted copy is two #66 stances pretending to be one.
+EBBIN="$(mktemp)"; EBINST="$(mktemp)"
+awk '/^existing_boxes\(\) \{/,/^\}/' "$ROOT/bin/box"     > "$EBBIN"
+awk '/^existing_boxes\(\) \{/,/^\}/' "$ROOT/install.sh"  > "$EBINST"
+check "existing_boxes: extracted from bin/box (guards the awk)" 0 "user.box=1" cat "$EBBIN"
+check "existing_boxes: bin/box and install.sh copies are byte-identical" 0 "" diff "$EBBIN" "$EBINST"
+rm -f "$EBBIN" "$EBINST"
+
+# Same discipline for the version-name gate: one policy, two copies, no drift
+# — a version that install.sh would refuse must not be one 'box use' accepts.
+VVBIN="$(mktemp)"; VVINST="$(mktemp)"
+awk '/^valid_version\(\) \{/,/^\}/' "$ROOT/bin/box"     > "$VVBIN"
+awk '/^valid_version\(\) \{/,/^\}/' "$ROOT/install.sh"  > "$VVINST"
+check "valid_version: extracted from bin/box (guards the awk)" 0 "A-Za-z0-9" cat "$VVBIN"
+check "valid_version: bin/box and install.sh copies are byte-identical" 0 "" diff "$VVBIN" "$VVINST"
+rm -f "$VVBIN" "$VVINST"
+
+# --purge-host must FORWARD installer-family consent: under --force/BOX_YES
+# the teardown call carries --yes, or a non-interactive combined uninstall
+# dies at teardown's own prompt with the flag's promise broken.
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "uninstall: --purge-host forwards consent to teardown-host (--yes)" 0 "" \
+  grep -qF -- 'bash "$root/host/teardown-host.sh" --yes' "$ROOT/bin/box"
+
+# --- the help keeps its promises --------------------------------------------
+check "help: the table lists 'versions'"                0 "versions"   "$BOX" help
+check "help use: names the #66 stance"                  0 "boxes"      "$BOX" help use
+check "help uninstall: names --purge-host"              0 "purge-host" "$BOX" help uninstall
+check "help uninstall: promises the absence re-check"   0 "absence"    "$BOX" help uninstall
+
+# --- automation hooks the CI uninstall drill rides ---------------------------
+check "teardown-host: honors --yes/BOX_YES (CI runs it unattended)" 0 "" \
+  grep -qF 'BOX_YES' "$ROOT/host/teardown-host.sh"
+check "teardown-host: points at box uninstall when done" 0 "" \
+  grep -qF "box uninstall" "$ROOT/host/teardown-host.sh"
+check "drill: reads the installed tree through current/" 0 "" \
+  grep -qF '.local/share/box/current/VERSION' "$ROOT/drill/drill.sh"
 
 echo "---"
 echo "$PASS passed, $FAIL failed"
-rm -rf "$SHIMDIR"
+rm -rf "$SHIMDIR" "$WORK"
 [ "$FAIL" -eq 0 ]
