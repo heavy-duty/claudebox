@@ -250,6 +250,15 @@ for b in drill clone archive peer payroll cbprobe cbcopy cbnotours; do
     [ "$FIX" = 1 ] && { timeout 60 incus delete -f "$b" >/dev/null 2>&1 && inf "reverted: deleted $b"; }
   fi
 done
+# An interrupted multiuser.sh leaves its users (and their projects) behind —
+# and nothing else on this host will ever mention them. Its own cleanup is
+# 'box revoke --purge + userdel'; say so rather than absorbing them silently.
+for u in boxdrill1 boxdrill2; do
+  if getent passwd "$u" >/dev/null 2>&1; then
+    no "leftover rehearsal user: $u (an interrupted drill/multiuser.sh run)"
+    inf "fix:  sudo BOX_YES=1 box revoke $u --purge && sudo userdel -r $u"
+  fi
+done
 
 # --- the box's DNS comes from the HOST's resolver. See issue #33. -----------
 head_ "Host resolver — a box's DNS is forwarded through this"
