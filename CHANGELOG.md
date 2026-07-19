@@ -374,6 +374,31 @@ which records not just what changed but what each drill run proved.
   and *above* the first `incus` call, so the refusal costs no daemon and
   `test/cli.sh` drives it for real rather than grepping for it.
 
+- **`drill/wipe.sh` no longer carries #102's SIGPIPE shape, and the pin now
+  sweeps the class** (#107) — the file piped `ufw status` straight into
+  `grep -q "Status: active"`. `Status: active` is ufw's FIRST line, so the
+  reader matches, closes the pipe, ufw dies of SIGPIPE, and the pipeline
+  yields 141. This was **correct today and only by accident**: `wipe.sh` is
+  `set -u` with no `pipefail`, so the 141 was discarded and grep's 0 carried
+  the branch. It was also one line from wrong — adding `set -o pipefail` for
+  unrelated robustness, the kind of tweak that reads as an obvious
+  improvement, would have silently skipped every UFW removal on a host the
+  operator was told is wiped, with no error and no red X (measured on a shim:
+  5/5 runs took the wrong branch under `pipefail`, 3/3 the right one
+  without). Now it captures `ufw_status` once and matches with `[[ ]]`, and
+  the numbered-delete loop — whose condition was itself an early-exit reader,
+  plus an un-captured re-read to get the number — reads one capture per
+  iteration and breaks on absence. That is #106's pattern transplanted
+  verbatim from `host/teardown-host.sh`, so both files now read alike.
+  The `test/cli.sh` pin is **generalized from the single site to the class**:
+  it sweeps every `host/*.sh` and `drill/*.sh` for the racing shape and names
+  the offenders, so a new script in either directory inherits the pin instead
+  of being one more site to remember. Comment lines are stripped before
+  matching — each fix's own commentary quotes the racing shape to explain it,
+  and a prose-blind pin would fail on the very comment documenting why it
+  exists. (`drill/doctor.sh` was checked and needs nothing: it already reads
+  into `ufw_out` and is safe by construction, not by absent `pipefail`.)
+
 ## 0.8.0 — 2026-07-19
 
 ### Added

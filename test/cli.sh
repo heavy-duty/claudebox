@@ -2006,26 +2006,42 @@ check "teardown-host: points at box uninstall when done" 0 "" \
 check "teardown-host: refuses without a TTY and names the override (#113)" 2 \
   "--yes (or BOX_YES=1) means yes" env -u BOX_YES bash "$ROOT/host/teardown-host.sh" </dev/null
 
-# #102's race, in the one other file that sets pipefail. A daemon-free run
-# cannot exercise a UFW teardown, so the shape is pinned instead: no `ufw
-# status` may be piped into an early-exit reader here, because under this
-# file's pipefail the reader's match closes the pipe, ufw takes SIGPIPE, and
-# the branch silently reads false — skipping crumb removal on a host the
-# operator was told is clean. Both directions: the racing shape absent, the
-# capture present.
-# Comment lines are stripped before matching: the fix's own commentary quotes
+# #102's race, pinned as a CLASS rather than at the one site that had it
+# (#107). A daemon-free run cannot exercise a UFW teardown, so the shape is
+# pinned instead: nowhere under host/ or drill/ may `ufw status` be piped into
+# a reader that exits on its first match. `Status: active` is ufw's FIRST line,
+# so the reader matches, closes the pipe, ufw takes SIGPIPE, and the pipeline
+# yields 141 — under pipefail the branch silently reads false and the whole
+# firewall block is skipped on a host the operator was told is clean.
+#
+# Swept, not per-file, because absence of pipefail is what made drill/wipe.sh
+# survive the same shape: a file is only ever one `set -o pipefail` — the kind
+# of robustness tweak that sails through review — from being #102 again. The
+# sweep closes the class, so a new host/ or drill/ script inherits the pin for
+# free instead of being one more site someone has to remember.
+# Comment lines are stripped before matching: each fix's own commentary quotes
 # the racing shape to explain it, and a pin that cannot tell prose from code
 # would fail on the very comment documenting why it exists.
 # shellcheck disable=SC2016  # "$1" is the subshell's positional, passed below
-check "teardown-host: no 'ufw status' piped into an early-exit reader" 0 "" \
-  bash -c 'grep -vE "^[[:space:]]*#" "$1" | grep -qE "ufw status[^|]*\| *grep" && exit 1; exit 0' \
-    _ "$ROOT/host/teardown-host.sh"
-# shellcheck disable=SC2016  # the $-strings are literals in the target file
-check "teardown-host: the UFW branch reads a captured snapshot" 0 "" \
-  grep -qF 'if [[ "$ufw_status" == *"Status: active"* ]]; then' "$ROOT/host/teardown-host.sh"
-# shellcheck disable=SC2016  # ditto
-check "teardown-host: the numbered-delete loop breaks on absence, not on a pipe" 0 "" \
-  grep -qF '[ -n "$line" ] || break' "$ROOT/host/teardown-host.sh"
+check "no 'ufw status' is piped into an early-exit reader under host/ or drill/" 0 "" \
+  bash -c 'bad=""
+    for f in "$1"/host/*.sh "$1"/drill/*.sh; do
+      grep -vE "^[[:space:]]*#" "$f" | grep -qE "ufw status[^|]*\| *grep" && bad="$bad ${f#"$1"/}"
+    done
+    [ -z "$bad" ] || { printf "racing ufw reads in:%s\n" "$bad"; exit 1; }' \
+    _ "$ROOT"
+
+# The other direction, per file that removes UFW rules: the capture present and
+# the delete loop breaking on absence, so the sweep above cannot be satisfied by
+# deleting the block instead of fixing it.
+for f in host/teardown-host.sh drill/wipe.sh; do
+  # shellcheck disable=SC2016  # the $-strings are literals in the target files
+  check "$f: the UFW branch reads a captured snapshot" 0 "" \
+    grep -qF 'if [[ "$ufw_status" == *"Status: active"* ]]; then' "$ROOT/$f"
+  # shellcheck disable=SC2016  # ditto
+  check "$f: the numbered-delete loop breaks on absence, not on a pipe" 0 "" \
+    grep -qF '[ -n "$line" ] || break' "$ROOT/$f"
+done
 check "drill: reads the installed tree through current/" 0 "" \
   grep -qF '.local/share/box/current/VERSION' "$ROOT/drill/drill.sh"
 

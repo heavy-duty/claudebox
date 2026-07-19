@@ -117,10 +117,39 @@ for t in "inet box" "bridge box" "inet claudebox" "bridge claudebox"; do
   # shellcheck disable=SC2086 # the table spec is two words by design
   sudo nft delete table $t >/dev/null 2>&1 && say "deleted nft table $t"
 done
-if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q "Status: active"; then
+# Every ufw read is CAPTURED before it is matched, never piped into a reader
+# that exits on its first match (#102, #107).
+#
+# `ufw status | grep -q "Status: active"` returns the WRITER's exit: grep
+# matches on the first line ufw prints, closes the pipe, ufw takes SIGPIPE,
+# and the pipeline yields 141. This file is 'set -u' with no pipefail, so
+# that 141 is discarded, grep's 0 is the pipeline's result, and the branch
+# held — the defect was latent here, never live. It was also one line from
+# live: adding 'set -o pipefail' for unrelated robustness would silently turn
+# this into #102, skipping every UFW removal on a host the operator was told
+# is wiped, with no error and no red X to see. Captured and matched with
+# [[ ]], it is correct under any future 'set' line.
+#
+# The numbered loop had the same defect for a different reason: its condition
+# was also an early-exit reader, so it could end while rules remained, and it
+# re-read un-captured to get the number. It now reads one capture per
+# iteration and breaks on absence — the re-scan is still per-delete (numbers
+# shift after each removal), just no longer racing.
+ufw_status=""
+if command -v ufw >/dev/null; then
+  # '|| true': ufw exits non-zero when it cannot read its config, and "no
+  # usable ufw here" is nothing-to-clean, not a failure to report.
+  ufw_status="$(sudo ufw status 2>/dev/null || true)"
+fi
+
+if [[ "$ufw_status" == *"Status: active"* ]]; then
   for net in boxnet claudenet; do
-    while sudo ufw status numbered | grep -q "on $net"; do
-      n="$(sudo ufw status numbered | grep -m1 "on $net" | sed -E 's/^\[ *([0-9]+)\].*/\1/')"
+    while :; do
+      numbered="$(sudo ufw status numbered 2>/dev/null || true)"
+      line="$(printf '%s\n' "$numbered" | grep -m1 "on $net" || true)"
+      [ -n "$line" ] || break
+      n="$(printf '%s\n' "$line" | sed -E 's/^\[ *([0-9]+)\].*/\1/')"
+      [ -n "$n" ] || break
       sudo ufw --force delete "$n" >/dev/null && say "deleted UFW rule on $net"
     done
   done
