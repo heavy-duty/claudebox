@@ -776,6 +776,122 @@ check "box exports BOX_TIER to the doctor" 0 "" \
 # does not exist and the verb was broken for everyone until #74's rehearsal hit it.
 check "restore: dispatches 'incus snapshot restore'" 0 "" \
   grep -qF '^incus:snapshot restore^' "$ROOT/bin/box"
+
+# ---------------------------------------------------------------------------
+# The confirm gate (#105) — DRIVEN, not grepped.
+#
+# Until #105 the only coverage restore had was the two argument-validation
+# checks above: neither ever reached dispatch, so the verb spent four releases
+# handing a running box straight to 'incus snapshot restore' with no prompt
+# and no --force, and nothing in this suite could have noticed. Both halves of
+# the gate are now exercised against a fake incus that logs what it was asked
+# to do — refusing must leave the log EMPTY (an assertion about an absence is
+# the only way to prove a gate held), and --force must produce the restore.
+#
+# Stdin is closed on every run on purpose: confirm() branches on '[ -t 0 ]',
+# and a suite run from a terminal would otherwise inherit one and sit there
+# waiting for a human to type 'y'.
+# ---------------------------------------------------------------------------
+CSHIM="$(mktemp -d)"; CWORK="$(mktemp -d)"
+cat > "$CSHIM/incus" <<'SHIM'
+#!/usr/bin/env bash
+# Fake incus for the destructive-path drive. Logs every call, and answers the
+# one probe resolve_box makes so a box called 'work' exists and is ours.
+[ -n "${FAKE_INCUS_LOG:-}" ] && printf 'incus %s\n' "$*" >> "$FAKE_INCUS_LOG"
+case "$*" in
+  "config get work user.box") echo 1 ;;
+  "config get "*)             exit 1 ;;
+esac
+exit 0
+SHIM
+chmod +x "$CSHIM/incus"
+
+runbox() {  # runbox <logfile> <args...> — the real box, shimmed, no TTY
+  local log="$1" rc; shift
+  : > "$log"
+  # Output is kept in <log>.out as well as replayed, so a check can assert on
+  # what the run PRINTED after the fact — check() swallows the output of a run
+  # it passes, and the "the prompt does not say 'delete'" assertion is exactly
+  # that: a claim about text from a run that already passed on its exit code.
+  env FAKE_INCUS_LOG="$log" PATH="$CSHIM:$PATH" "$BOX" "$@" </dev/null >"$log.out" 2>&1
+  rc=$?
+  cat "$log.out"
+  return "$rc"
+}
+
+# --- restore: the gate refuses, and nothing is destroyed --------------------
+RLOG="$CWORK/restore.log"
+check "restore: refuses without --force when there is no terminal (#105)" \
+  2 "refusing to roll work back to snapshot 'authed'" \
+  runbox "$RLOG" restore work authed
+# The exact no-TTY wording, pinned. This is the regression test for the CI
+# failure this PR produced: the multi-user rehearsal drives restore unattended
+# on real Incus, took this refusal, and recorded '(b) restore failed' — a
+# 40-minute job catching what a 15-second suite should have. box refuses
+# rather than assuming consent, and it says which of the two ways out applies.
+check "restore: ...and the refusal names the missing terminal, not a bad usage (#105)" \
+  2 "no terminal to confirm on" \
+  runbox "$CWORK/r-tty.log" restore work authed
+# The load-bearing assertion: the refusal actually PREVENTED the rollback.
+# 'grep -q' on an absence, so an empty log passes and a logged restore fails.
+check "restore: ...and the refusal reached incus with no restore (#105)" 1 "" \
+  grep -qF 'snapshot restore' "$RLOG"
+# The prompt must name the SNAPSHOT and the loss, not rm's wording. This is
+# the entire point of making the prompt row-driven: adding the 'confirm' token
+# alone would have asked the operator to confirm deleting the box.
+check "restore: the prompt names what is lost, not a deletion (#105)" \
+  2 "discard everything in the box since it was taken" \
+  runbox "$CWORK/r2.log" restore work authed
+check "restore: the prompt does NOT offer to delete the box (#105)" 1 "" \
+  grep -qF 'delete work' "$CWORK/r2.log.out"
+
+# --- restore: --force is the way through, and it still restores -------------
+FLOG="$CWORK/force.log"
+check "restore --force: skips the prompt and restores (#105)" 0 "restored work to authed" \
+  runbox "$FLOG" restore work authed --force
+check "restore --force: ...and incus was really asked for the rollback (#105)" 0 "" \
+  grep -qF 'incus snapshot restore work authed' "$FLOG"
+
+# --- rm: its wording is unchanged, and its gate still holds -----------------
+# #105 moved the prompt out of the dispatch line and into the rows. rm's text
+# was the string that lived there, so it is pinned verbatim: a refactor that
+# rewords the ONE verb that already asked correctly is a regression.
+MLOG="$CWORK/rm.log"
+check "rm: still refuses without --force, in its own words (#105 refactor)" \
+  2 "refusing to delete work and all its snapshots" \
+  runbox "$MLOG" rm work
+check "rm: ...and nothing was deleted" 1 "" grep -qF 'delete' "$MLOG"
+check "rm --force: still deletes" 0 "removed work" runbox "$CWORK/rmf.log" rm work --force
+check "rm --force: ...via 'incus delete -f'" 0 "" \
+  grep -qF 'incus delete -f work' "$CWORK/rmf.log"
+
+# --- the table invariant: a confirm row must carry its own words ------------
+# Fail-closed on the shape itself, so a future 'confirm' row cannot ship with
+# an empty prompt field and inherit whatever the dispatch happens to say.
+# shellcheck disable=SC2016  # $3/$7/$1 are awk's fields, not the shell's
+check "table: every 'confirm' row supplies a prompt (#105)" 0 "" \
+  awk -F'^' '
+    /^CMDS=\(/ { in_t = 1; next }
+    in_t && /^\)/ { exit }
+    in_t && /^  "/ && $3 ~ /(^|,)confirm(,|$)/ {
+      seen = 1
+      if (NF < 7) { print "row for " $1 " is marked confirm with no prompt field"; bad = 1; next }
+      p = $7; sub(/"$/, "", p)
+      if (p == "") { print "row for " $1 " has an empty confirm prompt"; bad = 1 }
+    }
+    END { if (!seen) { print "no confirm rows found — the pin is not reading the table"; bad = 1 }
+          exit (bad ? 1 : 0) }
+  ' "$ROOT/bin/box"
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "dispatch: the confirm prompt comes from the row, not a constant (#105)" 0 "" \
+  grep -qF 'confirm "$(fill "$cnf" "$inst")"' "$ROOT/bin/box"
+# The rehearsal drives restore unattended on real Incus, so it must consent
+# EXPLICITLY — the gate is only real if the one automated caller had to change.
+# Pinned here because the rehearsal itself needs a daemon and this suite has none.
+check "rehearsal: the unattended restore passes --force (#105)" 0 "" \
+  grep -qF 'box restore mine s1 --force' "$ROOT/drill/multiuser.sh"
+rm -rf "$CSHIM" "$CWORK"
+
 # ---------------------------------------------------------------------------
 # export / import (#70) — a box's state that survives the box and the host.
 # Usage errors and the pure pre-incus refusals are DRIVEN; every daemon-gated

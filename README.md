@@ -320,7 +320,10 @@ box new --name feature --from work/authed   # clone the authed state into a new 
 
 `--from` copies the whole box (agent login, git creds, clones and all) while
 preserving isolation. You can also `box new --name x --from work` to clone
-a box's live state, or roll a box back with `box restore work authed`.
+a box's live state, or roll a box back with `box restore work authed` — which
+asks first, since a rollback discards everything since the snapshot (`--force`
+skips the prompt, and scripts must pass it: with no terminal to ask on, box
+refuses rather than assuming yes).
 
 Forgotten what you called a checkpoint? `box info work` prints the box's
 snapshot labels and the `--from` line to clone one.
@@ -388,7 +391,8 @@ box shell <box>              # enter as the template's user
 box exec <box> -- <cmd...>   # run a command in the box
 box tmux <box> [session]     # attach/create a tmux session — survives disconnects
 box snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
-box restore <box> <snap>     # roll back to a snapshot
+box restore <box> <snap> [--force]
+                             # roll back to a snapshot — destructive, asks first
 box export <box> [<file>] [--instance-only]
                              # one portable file (snapshots incl.) — survives rm & host
 box import <file> [--name <box>]

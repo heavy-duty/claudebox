@@ -34,6 +34,43 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **`box restore` asks before it destroys — and the confirmation prompt is
+  now the row's, not rm's** (#105) — `restore` and `rm` both irreversibly
+  discard user state, and only one of them asked. The table gave `restore`
+  the preconditions `box,arg2`: the instance is ours, a snapshot name is
+  present, go. So `box restore work stale-label` silently threw away
+  everything done in the box since that snapshot, with no prompt, no
+  `--force`, and no way to take it back — a warning in `--help` is not a
+  gate. It has been that way since the verb shipped, and it is about to
+  become routine rather than rare (heavy-duty/rig#62's pristine snapshot),
+  which is the wrong time to still be relying on the operator typing the
+  right label. The reason it stayed ungated is worth recording, because it
+  is the actual bug: `confirm` was already a precondition token, but the
+  dispatch line hardcoded the *words* — `confirm "delete $inst and all its
+  snapshots"` — so the one-token fix would have gated restore behind a
+  prompt offering to DELETE the box the operator was trying to rescue. A
+  gate that names the wrong act is worse than no gate; it is how people
+  learn to answer `y` without reading. So the prompt moved into the table
+  as a seventh field, each row saying what it is about to do in its own
+  words, and `restore` now asks to "roll `<box>` back to snapshot
+  `<label>` and discard everything in the box since it was taken" — naming
+  the label, because picking the wrong one is the whole risk. `rm`'s
+  wording is unchanged and pinned verbatim by a test, since rewording the
+  one verb that already worked would be a regression shipped as a
+  refactor. A row marked `confirm` with no words is now a hard internal
+  error rather than a blank question. `--force` and the no-TTY refusal come
+  free — `confirm()` already had both. The one automated caller had to
+  consent explicitly: `drill/multiuser.sh` drives restore unattended on real
+  Incus and now passes `--force`, which is the rehearsal proving the gate
+  rather than working around it — the CI run of this very PR failed there
+  first, which is the shape a gate is supposed to have. Coverage went from two
+  argument-validation checks that never reached dispatch to the destructive
+  path itself, driven against a fake incus: refusing leaves the call log
+  empty, `--force` produces exactly one `incus snapshot restore`. Not
+  changed, deliberately: `restore` still does not require the box stopped
+  (#105 makes that case separately and it deserves its own call), and
+  `--help` now says plainly that a rollback of a running box is
+  crash-consistent, because these snapshots are stateless.
 - **`box-firewall` could hand a UFW host the no-UFW firewall, ~2% of the
   time** (#102) — filed as an intermittent test flake (`test/cli.sh`'s
   fresh-UFW block going four-assertions-red on an unmodified `main`,
