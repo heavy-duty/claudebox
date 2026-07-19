@@ -40,7 +40,11 @@ on:
     tags: ["**"]
 
 permissions:
-  contents: write # create the tag ref + gh release create
+  contents: write # create the tag ref + gh release create + the bump push
+  # Two consumers (a declared permissions: block zeroes every unspecified
+  # scope): the decide step's label read (commits/<sha>/pulls) and the bump
+  # fallback's `gh pr create --label`.
+  pull-requests: write
 
 jobs:
   # The merge door (#96), riding pushes to main (see the trigger comment:
@@ -120,7 +124,7 @@ jobs:
         run: |
           bash .github/scripts/release-notes.sh "$(cat VERSION)" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
-      - name: nothing may exist yet — no tag, no release (idempotency)
+      - name: nothing may exist yet — no tag, no release (re-runs refuse loudly)
         if: steps.decide.outputs.ceremony == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}

@@ -70,10 +70,14 @@ A release is a PR, and merging it ships it
    commit bare `X.Y.Z` by hand and pushing the tag still publishes the same
    way (release.yml asserts the tag names the tree's own `VERSION`) — for
    backfills, or the day the merge path is red.
-3. **Immediately after: bump `main`'s `VERSION` to `X.Y.(Z+1)-dev`.** Not
-   cosmetic — the versioned layout names install trees after `VERSION`, so a
-   `main` install without the bump would land in `versions/X.Y.Z` and
-   impersonate the release you just cut.
+3. **The release re-arms main itself**: the same workflow run bumps
+   `VERSION` to `X.Y.(Z+1)-dev` and pushes the commit straight to main —
+   no follow-up PR (it opens one only if branch protection refuses the
+   direct push, and says so loudly). Not cosmetic — the versioned layout
+   names install trees after `VERSION`, so a `main` install without the
+   bump would land in `versions/X.Y.Z` and impersonate the release just
+   cut. On the *manual* tag path the bump stays yours: open the one-line
+   PR after publishing.
 
 ## Labels — who sets what
 
