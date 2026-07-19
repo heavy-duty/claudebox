@@ -7,6 +7,13 @@
 # a fixture, or grep the load-bearing line so a deleted guard cannot ship green.
 # Deliberately no `set -e` — the harness asserts on failing commands.
 set -u
+# BOX_YES is this family's documented automation switch, so an operator's CI
+# wrapper may well export it. Checks that drive a destructive script for real
+# would then take the CONSENT arm instead of the refusal they are asserting —
+# turning this suite into `box uninstall --purge-host` on the host it runs on.
+# Individual call sites use `env -u BOX_YES`; this is the belt to that braces,
+# so the header's "runnable anywhere" promise cannot be broken by one export.
+unset BOX_YES
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PASS=0 FAIL=0
 
@@ -1997,7 +2004,7 @@ check "teardown-host: points at box uninstall when done" 0 "" \
 # terminal to ask on is a usage error, not a mute 'aborted'. Driven for real —
 # the gate sits above the first 'incus' call, so a daemon-free run reaches it.
 check "teardown-host: refuses without a TTY and names the override (#113)" 2 \
-  "--yes (or BOX_YES=1) means yes" bash "$ROOT/host/teardown-host.sh" </dev/null
+  "--yes (or BOX_YES=1) means yes" env -u BOX_YES bash "$ROOT/host/teardown-host.sh" </dev/null
 
 # #102's race, in the one other file that sets pipefail. A daemon-free run
 # cannot exercise a UFW teardown, so the shape is pinned instead: no `ufw
