@@ -5,6 +5,8 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+## 0.8.0 — 2026-07-19
+
 ### Added
 
 - **Merging the release PR IS the release — and the release re-arms main
