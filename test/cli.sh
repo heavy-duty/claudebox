@@ -373,6 +373,59 @@ check "new: the auto-run sits under the T_BOOTSTRAP_ROLE guard" 0 "" bash -c '
 check "new: a failed tenant role names the re-run (the role converges)" 0 "" bash -c '
   awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
     | grep -q "sudo rig bootstrap"'
+
+# The launch phase, narrated and time-boxed (#93) — grepped the way the other
+# mint-path guards are (a daemon-free run cannot mint). Twice in the
+# 2026-07-19 release drill the child 'incus launch' wedged silently before
+# the create was even accepted, once for 56 minutes. The narration must order
+# BEFORE the launch call (a wedge after the line is visible at a glance; a
+# wedge before it is the old silent hang), the call itself must sit under
+# 'timeout -k' with the BOX_LAUNCH_TIMEOUT override and pinned stdin (RUNS.md
+# trap 13: bare 'timeout N' cannot kill an incus call that owns a TTY), and
+# the budget's failure must be LOUD — no server-side operation, the measured
+# retry-succeeds hint, and the doctor as the next move.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the launch narration orders before incus launch (#93)" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  say="$(printf "%s\n" "$fn" | grep -n "launching instance" | head -1 | cut -d: -f1)"
+  run="$(printf "%s\n" "$fn" | grep -n "timeout -k.*incus launch" | head -1 | cut -d: -f1)"
+  [ -n "$say" ] && [ -n "$run" ] && [ "$say" -lt "$run" ]'
+check "new: incus launch is time-boxed (timeout -k on the budget)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "timeout -k" | grep "budget" | grep -q "incus launch"'
+check "new: the budget is BOX_LAUNCH_TIMEOUT, default 600s (the BOX_CPU knob shape)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "budget=" | grep -q "BOX_LAUNCH_TIMEOUT:-600"'
+check "new: the launch pins stdin (RUNS.md trap 13)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -F "extra[@]" | grep -qF "</dev/null"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the wedge failure is loud — retry hint, the doctor, and #93" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  printf "%s\n" "$fn" | grep -A6 "WEDGED" | grep -q "observed to succeed" &&
+  printf "%s\n" "$fn" | grep -q "box doctor" &&
+  printf "%s\n" "$fn" | grep "did not finish inside" | grep -q "#93"'
+# timeout proves only that the CLIENT overran the budget: launch is
+# create-then-start, so a slow launch may have REGISTERED the instance and a
+# blind "never created, retry" would send the operator into 'Instance already
+# exists' (#94 round-1, all three reviewers). The timeout path must probe the
+# instance, tell the two stories apart, and best-effort delete either way so
+# the retry advice is safe in both worlds.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the timeout path probes before claiming never-created (#94 r1)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "incus info" | grep -q "\$instance"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the timeout path best-effort deletes, so retry is always clean" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "incus delete --force" | grep -q "|| true"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: the overran-but-registered branch says so (not the wedge story)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "OVERRAN" | grep -q "budget"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "new: BOX_LAUNCH_TIMEOUT is documented in box help new" 0 "" bash -c '
+  "'"$ROOT"'/bin/box" help new | grep "BOX_LAUNCH_TIMEOUT" | grep -q 600'
 # staging's creds-holding join stays OPERATOR-run: cmd_new may print it as a
 # next step, but no template and no code path auto-runs "rig bootstrap
 # workload" — the one absence that keeps box creds-free end to end.

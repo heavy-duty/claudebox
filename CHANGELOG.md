@@ -204,6 +204,27 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **A wedged `incus launch` fails loudly, not forever — the mint's launch
+  phase is narrated and time-boxed** (#93) — twice in the 2026-07-19
+  release drill (Debian 13, Incus 6.x, /dev/kvm present, images cached),
+  the child `incus launch` under `box new` hung with *no server-side
+  operation*: `incus operation list` empty, the instance never created, the
+  daemon journal quiet — one wedge ran 56 minutes before being killed by
+  hand, and an immediate retry of the identical command succeeded in
+  minutes, both times. `box new` inherited that as an indefinite silent
+  hang, indistinguishable from a cold mint working. It now prints
+  `launching instance …` before the call, and the call rides
+  `timeout -k 5 $BOX_LAUNCH_TIMEOUT` (seconds, default 600 — generous: the
+  coldest measured mint is minutes, never an hour; the same scripting-knob
+  shape as `BOX_CPU`/`BOX_MEMORY`), with stdin pinned per the drill's own
+  trap list. On the budget firing it probes whether the instance was ever
+  registered and tells the two stories apart — the measured #93 wedge (no
+  server-side operation; an immediate retry has been observed to succeed)
+  vs a slow launch that overran the budget with the instance already
+  created — then best-effort deletes either way, so the retry advice is
+  clean in both worlds, and points at `box doctor` for the host. The
+  `--from` clone path is untouched: `incus copy` of a local instance is a
+  different operation and has never been observed to wedge this way.
 - **UFW's gateway carve-out converges with the bridge, and the doctor can
   see it** (the #86 review's blind spot) — `box-firewall` gated its whole
   UFW block behind "a `DENY on boxnet` rule exists", pinning every UFW host
