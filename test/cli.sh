@@ -1695,6 +1695,27 @@ check "teardown-host: honors --yes/BOX_YES (CI runs it unattended)" 0 "" \
   grep -qF 'BOX_YES' "$ROOT/host/teardown-host.sh"
 check "teardown-host: points at box uninstall when done" 0 "" \
   grep -qF "box uninstall" "$ROOT/host/teardown-host.sh"
+
+# #102's race, in the one other file that sets pipefail. A daemon-free run
+# cannot exercise a UFW teardown, so the shape is pinned instead: no `ufw
+# status` may be piped into an early-exit reader here, because under this
+# file's pipefail the reader's match closes the pipe, ufw takes SIGPIPE, and
+# the branch silently reads false — skipping crumb removal on a host the
+# operator was told is clean. Both directions: the racing shape absent, the
+# capture present.
+# Comment lines are stripped before matching: the fix's own commentary quotes
+# the racing shape to explain it, and a pin that cannot tell prose from code
+# would fail on the very comment documenting why it exists.
+# shellcheck disable=SC2016  # "$1" is the subshell's positional, passed below
+check "teardown-host: no 'ufw status' piped into an early-exit reader" 0 "" \
+  bash -c 'grep -vE "^[[:space:]]*#" "$1" | grep -qE "ufw status[^|]*\| *grep" && exit 1; exit 0' \
+    _ "$ROOT/host/teardown-host.sh"
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "teardown-host: the UFW branch reads a captured snapshot" 0 "" \
+  grep -qF 'if [[ "$ufw_status" == *"Status: active"* ]]; then' "$ROOT/host/teardown-host.sh"
+# shellcheck disable=SC2016  # ditto
+check "teardown-host: the numbered-delete loop breaks on absence, not on a pipe" 0 "" \
+  grep -qF '[ -n "$line" ] || break' "$ROOT/host/teardown-host.sh"
 check "drill: reads the installed tree through current/" 0 "" \
   grep -qF '.local/share/box/current/VERSION' "$ROOT/drill/drill.sh"
 

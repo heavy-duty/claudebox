@@ -57,10 +57,37 @@ sudo systemctl daemon-reload
 
 # Firewall crumbs — UFW rules mentioning either network (numbers shift after
 # each delete, so re-scan and remove the first match until none remain)
-if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q "Status: active"; then
+# Every ufw read is CAPTURED before it is matched, never piped into a reader
+# that can exit early — the same discipline box-firewall.sh now uses, and for
+# the same measured reason (#102). This file sets `pipefail` (line 12), so
+# `ufw status | grep -q "Status: active"` returns the WRITER's exit: grep
+# matches on the first line ufw prints, closes the pipe, ufw takes SIGPIPE,
+# and the pipeline yields 141. A plainly-active UFW then reads as inactive
+# and this entire block silently skips, leaving stale boxnet/claudenet rules
+# on a host the operator was told is clean. It is a branch condition, so
+# errexit never fires — there is no error to see, which is exactly why it
+# went unnoticed here while the same shape was being measured next door.
+#
+# The numbered loop had the same defect for a different reason: its condition
+# was also an early-exit reader, so it could end while rules remained. It now
+# reads one capture per iteration and breaks on absence — the re-scan is still
+# per-delete (numbers shift after each removal), just no longer racing.
+ufw_status=""
+if command -v ufw >/dev/null; then
+  # '|| true': ufw exits non-zero when it cannot read its config, and under
+  # pipefail+errexit that would kill a teardown instead of correctly deciding
+  # "no usable ufw here, nothing to clean".
+  ufw_status="$(sudo ufw status 2>/dev/null || true)"
+fi
+
+if [[ "$ufw_status" == *"Status: active"* ]]; then
   for net in boxnet claudenet; do
-    while sudo ufw status numbered | grep -q "on $net"; do
-      n="$(sudo ufw status numbered | grep -m1 "on $net" | sed -E 's/^\[ *([0-9]+)\].*/\1/')"
+    while :; do
+      numbered="$(sudo ufw status numbered 2>/dev/null || true)"
+      line="$(printf '%s\n' "$numbered" | grep -m1 "on $net" || true)"
+      [ -n "$line" ] || break
+      n="$(printf '%s\n' "$line" | sed -E 's/^\[ *([0-9]+)\].*/\1/')"
+      [ -n "$n" ] || break
       sudo ufw --force delete "$n"
     done
   done
