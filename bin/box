@@ -1017,14 +1017,43 @@ cmd_new() {
     # The template's identity is stamped ONTO the instance: which template,
     # which user. 'incus copy' preserves user.* keys (audit B2), so a clone
     # knows what it is without ever consulting the template again.
-    incus launch "$T_IMAGE" "$instance" --profile box-net \
+    #
+    # The launch is narrated and TIME-BOXED (#93). Twice in the 2026-07-19
+    # release drill the child 'incus launch' wedged before the create was
+    # even accepted — 'incus operation list' empty, the instance never
+    # existed, the daemon journal quiet — once for 56 minutes until killed
+    # by hand. Without a line here that wedge reads exactly like a cold mint
+    # working; without a budget it lasts forever. Ten minutes is generous —
+    # the coldest measured mint (first VM on a fresh pool, see wait_agent)
+    # is minutes, never an hour — and BOX_LAUNCH_TIMEOUT (seconds) overrides
+    # it, the same scripting knob shape as BOX_CPU / BOX_MEMORY. The drill's
+    # lore applies verbatim (RUNS.md trap 13): 'timeout -k' so a launch that
+    # shrugs off TERM still dies, and stdin pinned like every other
+    # non-interactive incus call — only shell/exec/tmux may own the terminal.
+    local budget="${BOX_LAUNCH_TIMEOUT:-600}" rc=0
+    echo "box: launching instance $instance (incus launch, $m mode)..."
+    timeout -k 5 "$budget" incus launch "$T_IMAGE" "$instance" --profile box-net \
       --config user.box=1 \
       --config user.box.template="$t" \
       --config user.box.user="$T_USER" \
       --config limits.cpu="$T_CPU" \
       --config limits.memory="$T_MEMORY" \
       --config cloud-init.user-data="$(render_userdata "$root/templates/$t/user-data.yaml")" \
-      "${extra[@]}"
+      "${extra[@]}" </dev/null || rc=$?
+    # 124 = the budget fired (TERM landed); 137 = the -k KILL was needed.
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+      echo >&2
+      echo "box: 'incus launch' WEDGED — killed after ${budget}s, and the instance was never created." >&2
+      echo "box: this is the #93 failure: the incus client hangs with NO server-side operation" >&2
+      echo "box: ('incus operation list' is empty, the daemon journal is quiet). An immediate" >&2
+      echo "box: retry of the exact same 'box new' has been observed to succeed, both times it" >&2
+      echo "box: was measured. If it persists, diagnose the host:  box doctor" >&2
+      echo "box: (a genuinely slower mint can raise the budget: BOX_LAUNCH_TIMEOUT=<seconds>)" >&2
+      die "incus launch wedged with no server-side operation — retry the same command (#93)"
+    elif [ "$rc" -ne 0 ]; then
+      # Not a wedge: incus refused and said why on stderr, right above.
+      die "incus launch failed (exit $rc)"
+    fi
     wait_agent "$instance"
     echo "box: waiting for phase-1 (cloud-init)..."
     echo "box: (its full narration, live:  incus exec $name -- tail -f /var/log/cloud-init-output.log)"
