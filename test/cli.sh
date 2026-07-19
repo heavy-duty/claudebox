@@ -411,15 +411,19 @@ check "new: the wedge failure is loud — retry hint, the doctor, and #93" 0 "" 
 # exists' (#94 round-1, all three reviewers). The timeout path must probe the
 # instance, tell the two stories apart, and best-effort delete either way so
 # the retry advice is safe in both worlds.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "new: the timeout path probes before claiming never-created (#94 r1)" 0 "" bash -c '
   awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
     | grep "incus info" | grep -q "\$instance"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "new: the timeout path best-effort deletes, so retry is always clean" 0 "" bash -c '
   awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
     | grep "incus delete --force" | grep -q "|| true"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "new: the overran-but-registered branch says so (not the wedge story)" 0 "" bash -c '
   awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
     | grep "OVERRAN" | grep -q "budget"'
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "new: BOX_LAUNCH_TIMEOUT is documented in box help new" 0 "" bash -c '
   "'"$ROOT"'/bin/box" help new | grep "BOX_LAUNCH_TIMEOUT" | grep -q 600'
 # staging's creds-holding join stays OPERATOR-run: cmd_new may print it as a
