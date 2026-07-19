@@ -113,6 +113,73 @@ check "release.yml: the release is bound to the pushed tag (--verify-tag)" 0 "" 
   grep -qF -- '--verify-tag' "$RY"
 
 # ---------------------------------------------------------------------------
+# release.yml, the merge door (#96) — merging the release-labeled PR IS the
+# release. Same daemon-free discipline: the gate, the four asserts, and the
+# same-job tag+publish are grep-pinned, fail-closed.
+# ---------------------------------------------------------------------------
+check "release.yml: the tag-push trigger is still present (manual fallback)" 0 "" \
+  grep -qF 'tags: ["**"]' "$RY"
+# The merge door rides pushes to MAIN, not pull_request events: a fork PR
+# run gets a read-only GITHUB_TOKEN (permissions: cannot raise it), and
+# every ceremony PR this org merges is cross-repo from the bot fork — the
+# tag create would 403 after green asserts (#97 round 1). The label — the
+# operator's intent — is read via the API off the merge commit's PR.
+check "release.yml: the merge door rides pushes to main (fork-token-proof)" 0 "" \
+  grep -qF 'branches: [main]' "$RY"
+check "release.yml: the doors split on the ref — tags to the tag door..." 0 "" \
+  grep -qF "startsWith(github.ref, 'refs/tags/')" "$RY"
+check "release.yml: ...main to the merge door" 0 "" \
+  grep -qF "github.ref == 'refs/heads/main'" "$RY"
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "release.yml: the release label is read via the API off the merge commit" 0 "" \
+  grep -qF 'commits/$GITHUB_SHA/pulls' "$RY"
+check "release.yml: a transition without a labeled PR refuses" 0 "" \
+  grep -qF "no merged, release-labeled PR is behind this commit" "$RY"
+check "release.yml: assert — VERSION at the merge commit is non--dev" 0 "" \
+  grep -qF '*-dev)' "$RY"
+check "release.yml: assert — VERSION changed IN THIS PR (first parent vs merge)" 0 "" \
+  grep -qF 'git show HEAD^1:VERSION' "$RY"
+check "release.yml: assert — no existing tag for the version" 0 "" \
+  grep -qF 'git/ref/tags/' "$RY"
+check "release.yml: assert — no existing release for the version" 0 "" \
+  grep -qF 'gh release view' "$RY"
+check "release.yml: BOTH doors extract notes via the shared script" 0 "2" \
+  grep -cF 'bash .github/scripts/release-notes.sh' "$RY"
+check "release.yml: every failing assert creates NOTHING (both doors)" 0 "5" \
+  grep -cF 'creating nothing' "$RY"
+check "release.yml: the merge door creates the tag ref via the API..." 0 "" \
+  grep -qF 'ref=refs/tags/' "$RY"
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "release.yml: ...at the MERGE commit" 0 "" \
+  grep -qF 'sha=$MERGE_SHA' "$RY"
+check "release.yml: BOTH doors publish bound to an existing tag (--verify-tag)" 0 "2" \
+  grep -cF -- '--verify-tag' "$RY"
+check "release.yml: tag + publish share one job (the anti-recursion shape)" 0 "" \
+  grep -qF 'anti-recursion' "$RY"
+# The decide step tells the label's two meanings apart (LABELS.md gives
+# `release` to release-flow WORK as well as to the ceremony PR — the PR
+# that added the merge door included): work under the label no-ops GREEN —
+# in the -dev steady state and in the post-release window (bare, unchanged,
+# already released) — while every half-ceremony refuses. Pin each verdict
+# and the gating output.
+check "release.yml: decide — dev-tree work no-ops green (not a red run per infra PR)" 0 "" \
+  grep -qF "release-flow work under the release label, not a ceremony" "$RY"
+check "release.yml: decide — a -dev endstate is always work (the bump PR no-ops green)" 0 "" \
+  grep -qF "a dev tree is by definition not a release" "$RY"
+check "release.yml: decide — post-release-window work no-ops green" 0 "" \
+  grep -qF "release-flow work merged in the post-release window" "$RY"
+check "release.yml: decide — bare, unchanged, never released refuses to guess" 0 "" \
+  grep -qF "Refusing to guess" "$RY"
+check "release.yml: decide gates every later merge-door step on ceremony=yes" 0 "4" \
+  grep -cF "if: steps.decide.outputs.ceremony == 'yes'" "$RY"
+# The release re-arms main itself: the post-release -dev bump is arithmetic,
+# not judgment, so it rides the same job — direct push, PR fallback.
+check "release.yml: the release bumps main to the next -dev itself" 0 "" \
+  grep -qF "bump main to the next -dev" "$RY"
+check "release.yml: ...with a PR fallback when the direct push is refused" 0 "" \
+  grep -qF "opening the bump PR instead" "$RY"
+
+# ---------------------------------------------------------------------------
 # latest_release_tag — extracted from install.sh (the source-the-pure-function
 # trick) and driven against a shim curl. The shim serves the ONE seam the
 # function uses: -w '%{redirect_url}' on the releases/latest probe.

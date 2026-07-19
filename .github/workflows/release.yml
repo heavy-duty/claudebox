@@ -1,24 +1,195 @@
 name: release
-# The release publisher (#83), on a bare X.Y.Z tag push (the 0.6.0 tag set
-# the precedent — no 'v' prefix). Two facts, then one act: the tag must name
-# the tree's own VERSION (a mismatch fails loudly and creates NOTHING — a
-# wrong release is worse than a missing one), and the release body is that
-# version's CHANGELOG.md section (.github/scripts/release-notes.sh, shared
-# with test/release.sh) — the curated prose, not the generated PR list. No
-# assets are uploaded: for a pure-bash tree, GitHub's source tarball for the
-# tag IS the package, and install.sh downloads exactly that.
+# The release publisher — two doors into the same act (#83, #96):
+#
+#  * The merge door (#96): merging the `release`-labeled PR into main IS the
+#    release. The label is the intent, the version transition is the
+#    interlock — VERSION at the merge commit must be non-`-dev` AND must have
+#    changed in this PR, so a mislabeled ordinary PR fails loudly and creates
+#    NOTHING. The job then tags the merge commit via the API and publishes,
+#    in the SAME job on purpose: a GITHUB_TOKEN-created tag does not trigger
+#    other workflows (GitHub's anti-recursion), so that tag can never re-enter
+#    the tag door below and double-publish — publishing here is the only
+#    chance, and the no-existing-tag/release assert covers a manual tag
+#    racing the merge.
+#
+#  * The tag door (#83) stays as the documented manual fallback and backfill,
+#    on a bare X.Y.Z tag push (the 0.6.0 tag set the precedent — no 'v'
+#    prefix). The tag must name the tree's own VERSION (a mismatch fails
+#    loudly and creates NOTHING — a wrong release is worse than a missing
+#    one).
+#
+# Both doors publish the release body from that version's CHANGELOG.md
+# section (.github/scripts/release-notes.sh, shared with test/release.sh) —
+# the curated prose, not the generated PR list. No assets are uploaded: for a
+# pure-bash tree, GitHub's source tarball for the tag IS the package, and
+# install.sh downloads exactly that.
 on:
   push:
+    # The merge door rides pushes to MAIN, not pull_request events, for one
+    # load-bearing reason the first review round caught (#97): a workflow
+    # run triggered by a pull_request from a public FORK gets a READ-ONLY
+    # GITHUB_TOKEN — `permissions:` cannot raise that ceiling — and every
+    # ceremony PR this org has ever merged is cross-repo from the bot fork.
+    # The asserts would pass and the tag create would 403, red on main,
+    # every release. A push to main is an in-repo event with the full write
+    # token, whoever authored the PR.
+    branches: [main]
     # Every tag, not a shape filter (rig's precedent): a tag that mismatches
     # VERSION — a habitual v0.7.0, a typo — must fail the assert LOUDLY
     # below, not be silently skipped by a pattern that didn't match.
     tags: ["**"]
 
 permissions:
-  contents: write # gh release create
+  contents: write # create the tag ref + gh release create + the bump push
+  # Two consumers (a declared permissions: block zeroes every unspecified
+  # scope): the decide step's label read (commits/<sha>/pulls) and the bump
+  # fallback's `gh pr create --label`.
+  pull-requests: write
+  # ...and the --label on that fallback PR rides the ISSUES API (labels.yml
+  # grants the same pair for the same reason).
+  issues: write
 
 jobs:
+  # The merge door (#96), riding pushes to main (see the trigger comment:
+  # fork PRs get a read-only token on pull_request events). The hand-set
+  # `release` label (LABELS.md: automation never guesses intent) is read via
+  # the API off the merge commit's PR, inside the decide step below.
+  release-on-merge:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The pushed head plus its first parent (fetch-depth: 2): the
+          # first parent is main the instant before the PR landed, which the
+          # changed-in-this-PR assert compares against.
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+      # The decide step — the version asserts fused, because the `release`
+      # label carries TWO legitimate meanings (LABELS.md: "release flow and
+      # version/packaging work"): the ceremony PR that ships a version, and
+      # ordinary work ON the release machinery — the PR that added this very
+      # job included. The version tells them apart, in four states:
+      #   -dev, unchanged            → work under the label: green NOTICE
+      #                                no-op, not a red run per infra PR
+      #   -dev, changed              → still a dev tree, so still work —
+      #                                the post-release bump PR above all
+      #                                (bare -> -dev after every release):
+      #                                green NOTICE no-op
+      #   bare, unchanged, released  → work merged in the post-release
+      #                                window (ceremony landed, the -dev
+      #                                bump has not): green NOTICE no-op
+      #   bare, unchanged, UNreleased→ the label says ship but this PR did
+      #                                not mint the version: refuse to guess
+      #   bare, changed              → the ceremony: proceed
+      - name: 'decide: ceremony, or release-flow work under the label?'
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(cat VERSION)"
+          base="$(git show HEAD^1:VERSION)"
+          case "$ver" in
+            *-dev)
+              if [ "$base" = "$ver" ]; then
+                echo "NOTICE: VERSION '$ver' is -dev and unchanged by this PR — release-flow work under the release label, not a ceremony. Nothing to publish."
+                echo "ceremony=no" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "NOTICE: VERSION changed ('$base' -> '$ver') and still ends -dev — a dev tree is by definition not a release. This is work (the post-release bump, a renumber); nothing to publish."
+              echo "ceremony=no" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+          esac
+          if [ "$base" = "$ver" ]; then
+            if gh release view "$ver" --json name >/dev/null 2>&1; then
+              echo "NOTICE: VERSION '$ver' is already released and unchanged by this PR — release-flow work merged in the post-release window (before the -dev bump). Nothing to publish."
+              echo "ceremony=no" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "VERSION '$ver' is bare, unchanged by this PR, and never released — the label says ship but this PR did not mint the version. Refusing to guess — creating nothing." >&2
+            exit 1
+          fi
+          # The version transitioned — now the LABEL, the operator's declared
+          # intent, read via the API because a push event carries no PR
+          # payload (and the PR lives on a fork — the trigger comment). No
+          # merged, release-labeled PR behind this commit = a transition
+          # nobody declared: refuse.
+          if ! gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+              -q '[.[] | select(.merged_at != null) | .labels[].name] | index("release") != null' | grep -qx true; then
+            echo "VERSION transitioned ('$base' -> '$ver') but no merged, release-labeled PR is behind this commit — a release is a labeled ceremony PR (#96), not a bare push — creating nothing." >&2
+            exit 1
+          fi
+          echo "ceremony=yes" >> "$GITHUB_OUTPUT"
+      - name: release notes — the version's own CHANGELOG.md section
+        if: steps.decide.outputs.ceremony == 'yes'
+        # release-notes.sh fails loudly on a missing/empty section, which
+        # fails the release here — before anything is created.
+        run: |
+          bash .github/scripts/release-notes.sh "$(cat VERSION)" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: nothing may exist yet — no tag, no release (re-runs refuse loudly)
+        if: steps.decide.outputs.ceremony == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(cat VERSION)"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$ver" --silent 2>/dev/null; then
+            echo "tag '$ver' already exists — a manual tag beat this run, or this is a re-run of a published release — creating nothing." >&2
+            exit 1
+          fi
+          if gh release view "$ver" --json name >/dev/null 2>&1; then
+            echo "release '$ver' already exists — creating nothing." >&2
+            exit 1
+          fi
+      - name: tag the merge commit, then publish — one job, on purpose
+        if: steps.decide.outputs.ceremony == 'yes'
+        # Same job as the asserts: the GITHUB_TOKEN-created tag triggers no
+        # workflows (GitHub's anti-recursion), so the tag door cannot fire
+        # off it — this step is the release's only chance to publish.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.sha }}
+        run: |
+          ver="$(cat VERSION)"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$ver" -f "sha=$MERGE_SHA"
+          gh release create "$ver" --verify-tag --title "$ver" --notes-file "$RUNNER_TEMP/notes.md"
+      # The post-release bump, folded into the release act (#96 followup —
+      # operator decision: a mechanical one-liner deserves no PR of its
+      # own). X.Y.(Z+1)-dev is arithmetic, not judgment: derived, committed
+      # straight to main with this job's token. A GITHUB_TOKEN push fires
+      # no workflows (anti-recursion), so the bump triggers neither this
+      # door nor a red run; should branch protection ever refuse the direct
+      # push, the step opens the bump PR itself and says so, loudly,
+      # instead of leaving main armed to impersonate the release.
+      - name: bump main to the next -dev — the release re-arms main itself
+        if: steps.decide.outputs.ceremony == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(cat VERSION)"
+          next="$(printf '%s' "$ver" | awk -F. '{ printf "%s.%s.%s-dev", $1, $2, $3 + 1 }')"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          printf '%s\n' "$next" > VERSION
+          git add VERSION
+          git commit -m "chore: bump main to $next — a dev install must not impersonate $ver"
+          if ! git push origin main; then
+            echo "direct push refused (branch protection?) — opening the bump PR instead" >&2
+            git checkout -b "chore/bump-$next"
+            git push origin "chore/bump-$next"
+            gh pr create -R "$GITHUB_REPOSITORY" --head "chore/bump-$next" \
+              --title "chore: bump main to $next" \
+              --body "The post-release re-arm, opened by release.yml because the direct push was refused. One file, one line." \
+              --label release
+          fi
+
+  # The tag door (#83) — the manual fallback and backfill, unchanged. Gated
+  # to the push event so a closed PR (the trigger above) never runs it
+  # against a branch ref.
   release:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

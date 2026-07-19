@@ -3,6 +3,35 @@
 History before 0.5.0 lives in git and in [drill/RUNS.md](drill/RUNS.md),
 which records not just what changed but what each drill run proved.
 
+## Unreleased
+
+### Added
+
+- **Merging the release PR IS the release — and the release re-arms main
+  itself** (#96) — the 0.7.0 ceremony ended in an absence: the release PR
+  merged with four approvals and nothing happened, correctly, because
+  publishing hung off a separate, manual, silent-when-forgotten tag push —
+  a failure shape with no error and no red X. The ship decision already
+  lives in the release PR (the one PR whose whole diff is "the version
+  leaves `-dev`"), so `release.yml` now fires on pushes to main
+  (fork-sourced ceremony PRs get a read-only token on `pull_request`
+  events), reading the transition from the push itself: `event.before` to
+  the pushed head. A decide step answers four states — release-flow *work*
+  merged under the `release` label (`-dev` endstates, the post-release
+  window) no-ops green with a NOTICE; the two genuinely ambiguous bare
+  states refuse loudly; a true transition then requires a merged,
+  `release`-labeled PR behind the commit (read via the API — the label is
+  the operator's declared intent) before anything is created. Then, in the
+  same job, it tags the merge commit via the API, publishes — and bumps
+  main to `X.Y.(Z+1)-dev` itself, direct push with a loud open-a-PR
+  fallback, so no follow-up bump PR exists on the paved road. Same-job on
+  purpose: a `GITHUB_TOKEN`-created tag triggers no workflows, which is
+  also what makes double-publish impossible. The tag-push path stays
+  unchanged as the documented manual fallback and backfill (it shipped
+  0.7.0 itself). `test/release.sh` grep-pins the gate, every decide
+  verdict, the single `on.push` key, and the same-job tag+publish+re-arm
+  in the same daemon-free, fail-closed style.
+
 ## 0.7.0 — 2026-07-19
 
 ### Added
