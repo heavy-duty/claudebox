@@ -1993,6 +1993,11 @@ check "teardown-host: honors --yes/BOX_YES (CI runs it unattended)" 0 "" \
   grep -qF 'BOX_YES' "$ROOT/host/teardown-host.sh"
 check "teardown-host: points at box uninstall when done" 0 "" \
   grep -qF "box uninstall" "$ROOT/host/teardown-host.sh"
+# ...and the other side of that contract (#113): consent NOT given and no
+# terminal to ask on is a usage error, not a mute 'aborted'. Driven for real —
+# the gate sits above the first 'incus' call, so a daemon-free run reaches it.
+check "teardown-host: refuses without a TTY and names the override (#113)" 2 \
+  "--yes (or BOX_YES=1) means yes" bash "$ROOT/host/teardown-host.sh" </dev/null
 
 # #102's race, in the one other file that sets pipefail. A daemon-free run
 # cannot exercise a UFW teardown, so the shape is pinned instead: no `ufw

@@ -28,6 +28,18 @@ $purge && echo "Incus itself will also be uninstalled (--purge-incus)."
 if [ "$yes" -eq 1 ]; then
   echo "(confirmed non-interactively: --yes/BOX_YES)"
 else
+  # No terminal to ask on, and no consent given: refuse and say how to proceed,
+  # rather than fall into 'read', hit instant EOF and abort with nothing but
+  # "aborted" (#113). This must stay BELOW the --yes/BOX_YES arm above — the
+  # order is the contract: consent given non-interactively still runs headless
+  # (CI's uninstall drill and 'box uninstall --purge-host --force' depend on
+  # it), consent NOT given without a terminal is a usage error, exit 2, the
+  # same shape as host/revoke-user.sh and install.sh. It also lands before the
+  # first 'incus' call below, so the refusal needs no daemon.
+  if [ ! -t 0 ]; then
+    echo "teardown-host: refusing to run without a terminal to confirm on. --yes (or BOX_YES=1) means yes." >&2
+    exit 2
+  fi
   # EOF (Ctrl-D) refuses, out loud: unguarded, errexit would end the run on
   # this line and the 'aborted' below would never print (#111).
   read -rp "Continue? [y/N] " a || { echo "aborted"; exit 1; }
