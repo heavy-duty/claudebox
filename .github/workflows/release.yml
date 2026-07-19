@@ -56,32 +56,57 @@ jobs:
           # base.sha can be stale; the merge commit's first parent cannot.)
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           fetch-depth: 2
-      - name: VERSION at the merge commit must be a release, not -dev
-        run: |
-          ver="$(cat VERSION)"
-          case "$ver" in
-            *-dev)
-              echo "VERSION is '$ver' — still -dev, so this merge is not a release ceremony, whatever its label says — creating nothing." >&2
-              exit 1 ;;
-          esac
-      - name: VERSION must have CHANGED in this PR — the -dev interlock
-        # Only the release PR moves VERSION off -dev. A mislabeled ordinary
-        # PR merged while main already carries a release version dies here,
-        # loudly, instead of re-releasing whatever VERSION says.
+      # The decide step — the version asserts fused, because the `release`
+      # label carries TWO legitimate meanings (LABELS.md: "release flow and
+      # version/packaging work"): the ceremony PR that ships a version, and
+      # ordinary work ON the release machinery — the PR that added this very
+      # job included. The version tells them apart, in four states:
+      #   -dev, unchanged            → work under the label: green NOTICE
+      #                                no-op, not a red run per infra PR
+      #   -dev, changed              → a bump that forgot to leave -dev:
+      #                                half a ceremony, refuse
+      #   bare, unchanged, released  → work merged in the post-release
+      #                                window (ceremony landed, the -dev
+      #                                bump has not): green NOTICE no-op
+      #   bare, unchanged, UNreleased→ the label says ship but this PR did
+      #                                not mint the version: refuse to guess
+      #   bare, changed              → the ceremony: proceed
+      - name: 'decide: ceremony, or release-flow work under the label?'
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           ver="$(cat VERSION)"
           base="$(git show HEAD^1:VERSION)"
+          case "$ver" in
+            *-dev)
+              if [ "$base" = "$ver" ]; then
+                echo "NOTICE: VERSION '$ver' is -dev and unchanged by this PR — release-flow work under the release label, not a ceremony. Nothing to publish."
+                echo "ceremony=no" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "VERSION changed ('$base' -> '$ver') but is still -dev — half a ceremony; a release PR ships a bare X.Y.Z — creating nothing." >&2
+              exit 1 ;;
+          esac
           if [ "$base" = "$ver" ]; then
-            echo "VERSION '$ver' did not change in this PR (the base commit already carried it) — this is not the release PR — creating nothing." >&2
+            if gh release view "$ver" --json name >/dev/null 2>&1; then
+              echo "NOTICE: VERSION '$ver' is already released and unchanged by this PR — release-flow work merged in the post-release window (before the -dev bump). Nothing to publish."
+              echo "ceremony=no" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "VERSION '$ver' is bare, unchanged by this PR, and never released — the label says ship but this PR did not mint the version. Refusing to guess — creating nothing." >&2
             exit 1
           fi
+          echo "ceremony=yes" >> "$GITHUB_OUTPUT"
       - name: release notes — the version's own CHANGELOG.md section
+        if: steps.decide.outputs.ceremony == 'yes'
         # release-notes.sh fails loudly on a missing/empty section, which
         # fails the release here — before anything is created.
         run: |
           bash .github/scripts/release-notes.sh "$(cat VERSION)" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md"
       - name: nothing may exist yet — no tag, no release (idempotency)
+        if: steps.decide.outputs.ceremony == 'yes'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -95,6 +120,7 @@ jobs:
             exit 1
           fi
       - name: tag the merge commit, then publish — one job, on purpose
+        if: steps.decide.outputs.ceremony == 'yes'
         # Same job as the asserts: the GITHUB_TOKEN-created tag triggers no
         # workflows (GitHub's anti-recursion), so the tag door cannot fire
         # off it — this step is the release's only chance to publish.

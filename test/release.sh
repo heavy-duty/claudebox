@@ -150,6 +150,22 @@ check "release.yml: BOTH doors publish bound to an existing tag (--verify-tag)" 
   grep -cF -- '--verify-tag' "$RY"
 check "release.yml: tag + publish share one job (the anti-recursion shape)" 0 "" \
   grep -qF 'anti-recursion' "$RY"
+# The decide step tells the label's two meanings apart (LABELS.md gives
+# `release` to release-flow WORK as well as to the ceremony PR — the PR
+# that added the merge door included): work under the label no-ops GREEN —
+# in the -dev steady state and in the post-release window (bare, unchanged,
+# already released) — while every half-ceremony refuses. Pin each verdict
+# and the gating output.
+check "release.yml: decide — dev-tree work no-ops green (not a red run per infra PR)" 0 "" \
+  grep -qF "release-flow work under the release label, not a ceremony" "$RY"
+check "release.yml: decide — a half-ceremony (-dev but changed) refuses" 0 "" \
+  grep -qF "half a ceremony" "$RY"
+check "release.yml: decide — post-release-window work no-ops green" 0 "" \
+  grep -qF "release-flow work merged in the post-release window" "$RY"
+check "release.yml: decide — bare, unchanged, never released refuses to guess" 0 "" \
+  grep -qF "Refusing to guess" "$RY"
+check "release.yml: decide gates every later merge-door step on ceremony=yes" 0 "3" \
+  grep -cF "if: steps.decide.outputs.ceremony == 'yes'" "$RY"
 
 # ---------------------------------------------------------------------------
 # latest_release_tag — extracted from install.sh (the source-the-pure-function
