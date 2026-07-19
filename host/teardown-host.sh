@@ -28,7 +28,9 @@ $purge && echo "Incus itself will also be uninstalled (--purge-incus)."
 if [ "$yes" -eq 1 ]; then
   echo "(confirmed non-interactively: --yes/BOX_YES)"
 else
-  read -rp "Continue? [y/N] " a
+  # EOF (Ctrl-D) refuses, out loud: unguarded, errexit would end the run on
+  # this line and the 'aborted' below would never print (#111).
+  read -rp "Continue? [y/N] " a || { echo "aborted"; exit 1; }
   case "$a" in y|Y) ;; *) echo "aborted"; exit 1 ;; esac
 fi
 

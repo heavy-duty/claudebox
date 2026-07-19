@@ -103,7 +103,24 @@ which records not just what changed but what each drill run proved.
   `script`: they were structurally untested before, because `[ -t 0 ]`
   sends a terminal-less suite to the refusal branch and every existing
   check stopped there — which is exactly how this survived four
-  releases.
+  releases. Review caught that the first pass fixed the bug where it was
+  reported and stopped there, while the same defect sat at two more
+  destructive gates in this repo: `host/revoke-user.sh:50`, the prompt
+  guarding `box revoke --purge` — the one whose own text says "this
+  cannot be undone" — and `host/teardown-host.sh:31`, guarding a full
+  host teardown. Both run under `set -euo pipefail`, both died mute on
+  EOF with their `aborted` line never reached; both now carry the guard
+  in their own script's wording. The three `drill/` prompts are
+  deliberately left alone — they run under `set -u` only, so EOF falls
+  through to the `*)` arm and already aborts out loud — and
+  `install.sh:65` was already guarded. What keeps the class closed is a
+  repo-wide sweep in `test/cli.sh`: every statement-initial `read` fed
+  from stdin, in any file that turns on errexit, must carry a `||`
+  guard, with `while read` loops and `<<<` herestrings excluded because
+  neither is a prompt. The sweep flags all four sites when their guards
+  are removed and nothing else across the tree's fifteen shell files —
+  the absence of exactly this check is why the `host/` pair was missed
+  in the first place.
 - **`box restore` asks before it destroys — and the confirmation prompt is
   now the row's, not rm's** (#105) — `restore` and `rm` both irreversibly
   discard user state, and only one of them asked. The table gave `restore`

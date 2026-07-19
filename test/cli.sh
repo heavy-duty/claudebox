@@ -938,6 +938,47 @@ else
   echo "skip: the interactive confirm answers (no util-linux 'script' here; CI has it)"
 fi
 
+# --- the sweep: no prompt-shaped 'read' under 'set -e' may go unguarded (#111)
+# The pty checks above prove the two 'bin/box' gates. This proves the CLASS,
+# repo-wide, and it exists because the class is exactly what the first pass at
+# #111 missed: 'host/revoke-user.sh' and 'host/teardown-host.sh' carried the
+# identical defect and survived, because nothing here was looking for the shape.
+#
+# The shape: a 'read' at the start of a statement, fed from the script's own
+# stdin (so a human, or an EOF), inside a file that turns on errexit. On EOF
+# 'read' returns non-zero and 'set -e' ends the run BEFORE the 'case' that was
+# going to name the abort — the tool goes mute at the moment it asked.
+#
+# What is deliberately NOT flagged, because it is not the shape:
+#   · 'while IFS= read -r' loops — fed by a redirect at 'done', and a non-zero
+#     read is how the loop is supposed to end;
+#   · '<<<' herestring reads — fed from a string, never from a human;
+#   · files without errexit ('drill/wipe.sh', 'drill/drill.sh',
+#     'drill/multiuser.sh' run under 'set -u' only, wipe.sh documents why), where
+#     EOF simply falls through to the '*)' arm and aborts out loud on its own.
+# A guard is any '||' on the read's own line: '|| die', '|| reply=""',
+# '|| { echo …; exit 1; }' — the spelling is each script's to choose, the
+# guard is not.
+eof_guard_sweep() {
+  local f n line bad=0 files
+  files="$(cd "$ROOT" && shopt -s globstar && printf '%s\n' bin/* ./**/*.sh | sed 's|^\./||' | sort -u)"
+  while IFS= read -r f; do
+    [ -f "$ROOT/$f" ] || continue
+    grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*e' "$ROOT/$f" || continue
+    while IFS=: read -r n line; do
+      case "$line" in
+        *'<<<'*) continue ;;   # herestring, not a prompt
+        *'||'*)  continue ;;   # guarded — the whole point
+      esac
+      echo "$f:$n: prompt-shaped 'read' under 'set -e' with no '||' guard:$line"
+      bad=1
+    done < <(grep -nE '^[[:space:]]*(IFS=[^[:space:]]+[[:space:]]+)?read([[:space:]]|$)' "$ROOT/$f")
+  done <<<"$files"
+  return "$bad"
+}
+check "no prompt-shaped 'read' under 'set -e' goes unguarded, repo-wide (#111)" \
+  0 "" eof_guard_sweep
+
 rm -rf "$CSHIM" "$CWORK"
 
 # ---------------------------------------------------------------------------
