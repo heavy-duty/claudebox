@@ -890,6 +890,54 @@ check "dispatch: the confirm prompt comes from the row, not a constant (#105)" 0
 # Pinned here because the rehearsal itself needs a daemon and this suite has none.
 check "rehearsal: the unattended restore passes --force (#105)" 0 "" \
   grep -qF 'box restore mine s1 --force' "$ROOT/drill/multiuser.sh"
+# --- the three answers a human can give — DRIVEN ON A REAL PTY (#111) -------
+# Everything above stops at the no-TTY refusal, because confirm() branches on
+# '[ -t 0 ]' and this suite has no terminal. So the interactive half — 'y',
+# 'n', and Ctrl-D — had never been executed here at all, which is precisely
+# how #111 survived: an unguarded 'read' returns non-zero on EOF, 'set -e'
+# ends the run before the 'case', and the abort happens in total silence.
+#
+# 'script' from util-linux gives the child a pty, so box takes the interactive
+# branch for real and reads the answer we write to the master side. This does
+# NOT hang a suite run from a terminal: script's own stdin is a file or
+# /dev/null on every run below, never the developer's tty, so the answer (or
+# the EOF) is always already waiting.
+if command -v script >/dev/null 2>&1 && script --version 2>/dev/null | grep -q util-linux; then
+  PWORK="$(mktemp -d)"; PLOG="$PWORK/pty.log"
+  printf 'y\n' > "$PWORK/yes"; printf 'n\n' > "$PWORK/no"
+  # Invoked through a file so 'script -c' needs no quoting of its own; the log
+  # path and the shim PATH ride the environment script hands to the child.
+  cat > "$PWORK/run" <<RUNNER
+#!/usr/bin/env bash
+exec env PATH="$CSHIM:\$PATH" "$BOX" rm work
+RUNNER
+  chmod +x "$PWORK/run"
+  ptybox() {  # ptybox <answers-file> — 'box rm work' on a pty, answered
+    : > "$PLOG"
+    FAKE_INCUS_LOG="$PLOG" script -qec "$PWORK/run" /dev/null < "$1"
+  }
+  # The load-bearing assertion is the MESSAGE, not the exit code: before the
+  # fix Ctrl-D also exited 1, just without ever saying why. Asserting on the
+  # code alone would pass against the bug.
+  check "rm: Ctrl-D at the prompt aborts OUT LOUD, not in silence (#111)" \
+    1 "aborted." ptybox /dev/null
+  check "rm: ...and the Ctrl-D abort really deleted nothing (#111)" 1 "" \
+    grep -qF 'incus delete' "$PLOG"
+  check "rm: 'n' at the prompt aborts (#111)" 1 "aborted." ptybox "$PWORK/no"
+  check "rm: ...and 'n' really deleted nothing (#111)" 1 "" \
+    grep -qF 'incus delete' "$PLOG"
+  # The accept path, so the pty rig is proven to be able to reach the work —
+  # three checks that can only ever refuse would pass against a box that
+  # refuses everything.
+  check "rm: 'y' at the prompt goes through (#111)" 0 "removed work" \
+    ptybox "$PWORK/yes"
+  check "rm: ...and 'y' really reached 'incus delete -f' (#111)" 0 "" \
+    grep -qF 'incus delete -f work' "$PLOG"
+  rm -rf "$PWORK"
+else
+  echo "skip: the interactive confirm answers (no util-linux 'script' here; CI has it)"
+fi
+
 rm -rf "$CSHIM" "$CWORK"
 
 # ---------------------------------------------------------------------------
