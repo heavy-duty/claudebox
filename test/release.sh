@@ -158,8 +158,8 @@ check "release.yml: tag + publish share one job (the anti-recursion shape)" 0 ""
 # and the gating output.
 check "release.yml: decide — dev-tree work no-ops green (not a red run per infra PR)" 0 "" \
   grep -qF "release-flow work under the release label, not a ceremony" "$RY"
-check "release.yml: decide — a half-ceremony (-dev but changed) refuses" 0 "" \
-  grep -qF "half a ceremony" "$RY"
+check "release.yml: decide — a -dev endstate is always work (the bump PR no-ops green)" 0 "" \
+  grep -qF "a dev tree is by definition not a release" "$RY"
 check "release.yml: decide — post-release-window work no-ops green" 0 "" \
   grep -qF "release-flow work merged in the post-release window" "$RY"
 check "release.yml: decide — bare, unchanged, never released refuses to guess" 0 "" \
