@@ -542,9 +542,12 @@ What it converges, idempotently (safe to re-run, and re-run after upgrades):
     rides snapshots, 'box export' rides backups — #70)
   · installs the box-net profile into their project
 
-An incus-admin member is provisioned too, not refused (#99): the group step
-is a reported no-op — they already hold more — and everything else converges,
-so they finally have a project of their own. What it is not is a confinement:
+An incus-admin member is provisioned too, not refused (#99): they are added
+to 'incus' like anyone else — not a new privilege, since incus-admin already
+opens the daemon, but the key to a FILE, because incus-user's socket is group
+'incus' mode 0660 and nothing below can provision them without it. Everything
+else converges, so they finally have a project of their own. What it is not
+is a confinement:
 incus-admin wins at the socket, so the restrictions are a default placement
 they can step outside at will, and their own client keeps resolving to the
 admin socket (and the default project) until incus-admin is taken away. The
@@ -569,9 +572,14 @@ recreate the project, unhardened, afterwards — measured, not theoretical),
 then their boxes, images, project, private bridge and trust-store
 certificate are removed — irreversible, so it asks first.
 
-On an incus-admin member there is no membership to drop, so a bare revoke is
-a named no-op and --purge unmakes the provisioning without ending any access:
-only 'gpasswd -d <user> incus-admin' does that, and revoke says so.
+On an incus-admin member a bare revoke takes back the 'incus' membership that
+grant added — reported as 'partial:', because it ends no access: incus-admin
+still opens every project on this host. (One who was never granted is a named
+no-op instead.) Mind what that leaves behind: with 'incus' gone, a later
+'gpasswd -d <user> incus-admin' drops them into NEITHER group and their ready
+project becomes unreachable — grant's "no re-grant needed" holds only while
+they still hold 'incus'. --purge unmakes the provisioning the same way. Only
+'gpasswd -d <user> incus-admin' ends their access, and revoke says so.
 
   box revoke dev1            # take the tier; their boxes keep running
   box revoke dev1 --purge    # ...or end their sessions and delete everything

@@ -479,6 +479,22 @@ check "box revoke with no user exits 2 (via the CLI table)" 2 "usage: box revoke
 check "help grant names the hardened network" 0 "boxnet" "$BOX" help grant
 check "help revoke names --purge"             0 "purge"  "$BOX" help revoke
 
+# The help is the PRE-RUN CONTRACT: an operator reads it to decide whether to
+# run the command at all, so it must not promise a mutation that will not
+# happen (or deny one that will). Round 1 of #101 changed what grant/revoke
+# mutate for an incus-admin member and left this prose describing the
+# superseded design — these pins are why that cannot happen silently again.
+# Both directions: the current sentence must be present, and the superseded
+# one must be gone.
+check "help grant: the admin member's group step is a real add, not a no-op" \
+  0 "like anyone else" "$BOX" help grant
+check "help revoke: a bare revoke of a granted admin member is 'partial:'" \
+  0 "partial:" "$BOX" help revoke
+check "help grant no longer calls the admin group step a no-op" 0 "" \
+  bash -c '! "'"$BOX"'" help grant | grep -q "reported no-op"'
+check "help revoke no longer claims there is no membership to drop" 0 "" \
+  bash -c '! "'"$BOX"'" help revoke | grep -q "no membership to drop"'
+
 # Load-bearing lines a daemon-free run cannot exercise — grepped so a deleted
 # guard cannot ship green (the house test discipline).
 # The expose guard must fire before ANY incus call in cmd_expose: line order.
