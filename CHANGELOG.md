@@ -34,6 +34,36 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **The release ceremony re-arms `CHANGELOG.md`, and CI refuses to let
+  `main` sit disarmed** (#108) — the ceremony stamps `## Unreleased` into
+  `## X.Y.Z — DATE` by hand, and nothing put the heading back, so `main`
+  sat with no `## Unreleased` from the release until the next PR that
+  happened to re-create one. A PR authored *before* the release wrote its
+  entry under `## Unreleased`; with that heading gone, git lands the entry
+  under whatever now occupies the position — **the section that just
+  shipped** — and it merges **cleanly**. No conflict, no error, no red X:
+  the one signal an author would trust is absent exactly when the outcome
+  is wrong, and the changelog credits a released version with a change it
+  does not contain until a human reads the file. Confirmed in the sibling
+  repo (heavy-duty/rig#66); box has not drifted yet, and the reason is
+  luck rather than design — 0.6.0's ceremony (`77599ab`) added its heading
+  *without* removing `## Unreleased`, so main was never disarmed, while
+  0.7.0 did disarm it and left a window that nothing happened to cross.
+  Two halves land together. The ceremony step in `CONTRIBUTING.md` is now
+  explicitly **two edits**: stamp, then put an empty `## Unreleased` back
+  above the section just stamped — it belongs there and not in
+  `release.yml`, which only ever touches `VERSION`. And
+  `.github/scripts/changelog-armed.sh` enforces it in CI, keyed on
+  `VERSION` because the two states are genuinely different: a `-dev` tree
+  must carry `## Unreleased` on top, a bare-`VERSION` tree (the ceremony
+  PR, and the merge that publishes it) may carry either that or its own
+  stamped section. The keying is the whole design and not an
+  over-complication — box previously had **no** top-section guard at all,
+  and the obvious one, an unconditional `## Unreleased` requirement, is
+  false by construction on the ceremony PR's own tree, which is why rig#44
+  and heavy-duty/cast#108 both had to revert it. So a forgotten re-arm
+  does not block the release; it turns `main` red on the very next push,
+  the automatic `-dev` bump the release itself makes.
 - **`box restore` asks before it destroys — and the confirmation prompt is
   now the row's, not rm's** (#105) — `restore` and `rm` both irreversibly
   discard user state, and only one of them asked. The table gave `restore`

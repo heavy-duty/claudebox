@@ -50,7 +50,48 @@ A release is a PR, and merging it ships it
 1. **The release PR** — `release: X.Y.Z`, labeled `release` — bumps `VERSION`
    from `X.Y.Z-dev` and stamps the `## Unreleased` section with version +
    date (feature PRs land their changelog entry as part of the PR, so the
-   section is already written). This PR is where the release ritual hangs:
+   section is already written).
+
+   **Stamping is two edits, not one — the second is re-arming.** After
+   rewriting `## Unreleased` into `## X.Y.Z — DATE`, put an **empty
+   `## Unreleased` back at the top**, immediately above the section you just
+   stamped:
+
+   ```markdown
+   ## Unreleased
+
+   ## 0.7.1 — 2026-07-19
+
+   ### Fixed
+   ...
+   ```
+
+   Not cosmetic, and not deferrable to the next PR that happens to need it.
+   Between the stamp and the next re-creation of that heading, `main` has no
+   `## Unreleased`. A PR authored *before* the release wrote its entry under
+   that heading; with the heading gone, git lands the entry under whatever
+   now occupies the position — **the section that just shipped** — and it
+   merges **cleanly**, no conflict, no signal. The changelog then credits a
+   released version with a change it does not contain, and nothing but a
+   human reading the file will ever say so
+   ([#108](https://github.com/heavy-duty/box/issues/108); confirmed in the
+   sibling repo as
+   [heavy-duty/rig#66](https://github.com/heavy-duty/rig/issues/66)).
+
+   CI enforces the arming rule with
+   [.github/scripts/changelog-armed.sh](.github/scripts/changelog-armed.sh),
+   keyed on `VERSION`: a `-dev` tree must carry `## Unreleased` on top; a
+   bare-`VERSION` tree (the ceremony PR, and the merge that publishes it) may
+   carry either `## Unreleased` or its own stamped section. That is why the
+   guard cannot simply demand `## Unreleased` unconditionally — the
+   unconditional form is false on the ceremony PR's own tree and makes the
+   release unshippable, which is why rig and cast both reverted it. The
+   practical consequence: forgetting to re-arm does **not** block the release
+   PR, it turns `main` red on the very next push — the automatic `-dev` bump
+   the release itself makes. Do it in the ceremony PR and main is never
+   disarmed at all.
+
+   This PR is where the release ritual hangs:
    the full drill on real hardware, recorded in
    [drill/RUNS.md](drill/RUNS.md) — CI proves the tier's semantics on every
    PR, a release still proves the boundary.

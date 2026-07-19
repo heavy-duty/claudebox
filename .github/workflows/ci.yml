@@ -25,6 +25,12 @@ jobs:
         run: bash test/labels-reconcile.sh
       - name: release-flow tests
         run: bash test/release.sh
+      # The changelog is ARMED for the next entry (#108). Its own step rather
+      # than a line inside test/release.sh: this one asserts a fact about THIS
+      # tree, not about the release machinery, so when it goes red the log
+      # says which check found the drift without anyone reading a suite.
+      - name: changelog is armed for the next entry
+        run: bash .github/scripts/changelog-armed.sh
 
   # The multi-user rehearsal, on a REAL incus — a GitHub runner is root on a
   # disposable VM, which is exactly the substrate the rehearsal needs. It runs
