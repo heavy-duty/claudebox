@@ -45,6 +45,9 @@ permissions:
   # scope): the decide step's label read (commits/<sha>/pulls) and the bump
   # fallback's `gh pr create --label`.
   pull-requests: write
+  # ...and the --label on that fallback PR rides the ISSUES API (labels.yml
+  # grants the same pair for the same reason).
+  issues: write
 
 jobs:
   # The merge door (#96), riding pushes to main (see the trigger comment:
