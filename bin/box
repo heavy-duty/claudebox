@@ -542,6 +542,14 @@ What it converges, idempotently (safe to re-run, and re-run after upgrades):
     rides snapshots, 'box export' rides backups — #70)
   · installs the box-net profile into their project
 
+An incus-admin member is provisioned too, not refused (#99): the group step
+is a reported no-op — they already hold more — and everything else converges,
+so they finally have a project of their own. What it is not is a confinement:
+incus-admin wins at the socket, so the restrictions are a default placement
+they can step outside at will, and their own client keeps resolving to the
+admin socket (and the default project) until incus-admin is taken away. The
+grant says all of that out loud when it lands.
+
 The user's surface: new/list/info/shell/exec/tmux/snapshot/restore/export/
 import/rm on their own boxes. Not theirs: expose (edits daemon-global
 state), setup-host, grant. Admin boxes and other users' boxes are invisible to them, and the
@@ -560,6 +568,10 @@ revoke says so and names the loginctl command when it happens. With
 recreate the project, unhardened, afterwards — measured, not theoretical),
 then their boxes, images, project, private bridge and trust-store
 certificate are removed — irreversible, so it asks first.
+
+On an incus-admin member there is no membership to drop, so a bare revoke is
+a named no-op and --purge unmakes the provisioning without ending any access:
+only 'gpasswd -d <user> incus-admin' does that, and revoke says so.
 
   box revoke dev1            # take the tier; their boxes keep running
   box revoke dev1 --purge    # ...or end their sessions and delete everything

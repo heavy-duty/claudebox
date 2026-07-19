@@ -32,6 +32,47 @@ which records not just what changed but what each drill run proved.
   verdict, the single `on.push` key, and the same-job tag+publish+re-arm
   in the same daemon-free, fail-closed style.
 
+### Fixed
+
+- **`box grant` provisions an `incus-admin` member instead of refusing them**
+  (#99) — the refusal read "they already have the admin tier; there is
+  nothing tighter to grant", which is true about *permission* and silent
+  about *provisioning*: the `incus` group is indeed a strict subset of what
+  `incus-admin` opens, but the `user-<uid>` project, the boxnet narrowing,
+  the snapshot and backup allowances, and the `box-net` profile installed
+  into that project are none of them permissions, and an `incus-admin`
+  member had none of them — `box_tier()` resolves them to `admin`, so they
+  worked in the shared default project next to root and every other admin,
+  with no world of their own and no supported way to get one. `box grant`
+  now runs the full convergence for them: the group step is a **reported
+  no-op** (nothing is added — adding `incus` would grant nothing and leave a
+  group list implying a restriction that was never in force), and steps 2–5
+  run unchanged. The touch that provokes the lazy project is **pinned at
+  incus-user's socket**, which the fix turns out to require: the incus client
+  picks its socket by writability (`client/connection.go` — the daemon socket
+  when writable, `unix.socket.user` only otherwise), so for an `incus-admin`
+  member an unpinned touch sails past incus-user and provisions nothing; the
+  user-side proof that closes the grant names their project for the same
+  reason, since an unqualified `profile show` would have answered from the
+  shared default project and proved nothing. On success the grant prints the
+  caveat the hard exit was gesturing at, in the two forms it actually takes:
+  the restrictions are a **default placement, not a confinement** (admin
+  membership still wins at the socket — the default project and other users'
+  instances stay one flag away), and until `incus-admin` goes their own `box`
+  commands keep landing in the default project, at which point the provisioned
+  project becomes their home with no re-grant needed. The failure path knows
+  the new case too: nothing was added, so nothing is rolled back, and the
+  backout says exactly that rather than going quiet. `box revoke` mirrors it —
+  a bare revoke of an `incus-admin` member is a named **no-op** (it makes no
+  privileged call at all: there is no membership to drop), and `--purge`
+  unmakes the provisioning while refusing to call them "out", both naming
+  `gpasswd -d <user> incus-admin` as the only thing that ends their access.
+  Unblocks rig's `users apply` (heavy-duty/rig#49), which had to call `box
+  grant` for a user who is both `incus-admin` by hand and role `box` in the
+  fleet file. Driven end to end in `test/cli.sh` under logging incus/sudo
+  shims — every assertion is made against what the run did, not what the
+  source says it would.
+
 ## 0.7.0 — 2026-07-19
 
 ### Added

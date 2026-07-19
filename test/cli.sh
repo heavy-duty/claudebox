@@ -512,8 +512,8 @@ check "grant: installs the SHIPPED profile into the project" 0 "" \
   grep -qF 'profile edit box-net < "$here/profiles/box-net.yaml"' "$ROOT/host/grant-user.sh"
 check "grant: unpins the private-bridge eth0 from the default profile" 0 "" \
   grep -qF 'profile device remove default eth0' "$ROOT/host/grant-user.sh"
-check "grant: refuses an incus-admin member (nothing tighter to grant)" 0 "" \
-  grep -qF 'incus-admin' "$ROOT/host/grant-user.sh"
+check "grant: an incus-admin member is provisioned, not refused (#99)" 1 "" \
+  grep -qF 'there is nothing tighter to grant' "$ROOT/host/grant-user.sh"
 check "revoke: group removal is the lockout" 0 "" \
   grep -qF 'gpasswd -d' "$ROOT/host/revoke-user.sh"
 # Group membership is read at login: purge must terminate live sessions (a
@@ -554,6 +554,151 @@ check "revoke: purge deletes instances one at a time" 0 "" \
   grep -qF 'delete -f "$inst"' "$ROOT/host/revoke-user.sh"
 check "revoke: purge removes the trust-store certificate" 0 "" \
   grep -qF 'config trust remove' "$ROOT/host/revoke-user.sh"
+
+# ---------------------------------------------------------------------------
+# #99: an incus-admin member is PROVISIONED, not refused. The distinction the
+# old refusal missed is permission (the 'incus' group — theirs already, and
+# stronger) versus provisioning (the user-<uid> project, the boxnet narrowing,
+# snapshots, backups, the box-net profile — theirs not at all). Grepping the
+# new prose would prove only that the prose exists, so both tier scripts are
+# DRIVEN end to end under shims, the same seam setup-host is driven through:
+# every incus and sudo call is logged, and the assertions are made against
+# those logs — what the run did, not what the source says it would do.
+# ---------------------------------------------------------------------------
+GSHIM="$(mktemp -d)"; W99="$(mktemp -d)"
+cat > "$GSHIM/incus" <<'SHIM'
+#!/usr/bin/env bash
+# Fake incus for the driven grant/revoke: logs every call, answers the
+# existence probes from FAKE_*, and models the two state changes the scripts
+# depend on — the project appearing after the incus-user touch, and
+# disappearing after a purge deletes it.
+[ -n "${FAKE_INCUS_LOG:-}" ] && printf 'incus %s\n' "$*" >> "$FAKE_INCUS_LOG"
+case "$*" in *"profile edit"*) cat >/dev/null ;; esac
+case "$*" in
+  "network show boxnet")  [ -n "${FAKE_HAVE_BOXNET:-}" ] || exit 1 ;;
+  "project show "*)
+    [ -e "$FAKE_STATE/deleted" ] && exit 1
+    if [ -n "${FAKE_PROJECT_LAZY:-}" ]; then
+      # Lazy creation: absent on the first look, present afterwards — i.e.
+      # the touch worked. n counts the looks this run has taken.
+      n=0; [ -e "$FAKE_STATE/looks" ] && n="$(cat "$FAKE_STATE/looks")"
+      printf '%s\n' "$((n + 1))" > "$FAKE_STATE/looks"
+      [ "$n" -ge 1 ] || exit 1
+    else
+      [ -n "${FAKE_HAVE_PROJECT:-}" ] || exit 1
+    fi ;;
+  "project delete "*) : > "$FAKE_STATE/deleted" ;;
+  *"restricted.networks.access"*)
+    [ -z "${FAKE_FAIL_NARROW:-}" ] || { echo 'Instance "old" is on incusbr-1000' >&2; exit 1; } ;;
+  *"network show "*) exit 1 ;;   # the private bridge: never there in these runs
+esac
+exit 0
+SHIM
+cat > "$GSHIM/sudo" <<'SHIM'
+#!/usr/bin/env bash
+# Fake sudo: logs and swallows. 'sudo test' must answer honestly-absent —
+# revoke's absence assert reads incus-user's state directory through it, and
+# a blanket exit 0 would report the purge incomplete on a clean machine.
+[ -n "${FAKE_SUDO_LOG:-}" ] && printf 'sudo %s\n' "$*" >> "$FAKE_SUDO_LOG"
+case "${1:-}" in test) exit 1 ;; esac
+exit 0
+SHIM
+printf '#!/usr/bin/env bash\nexit 0\n'                > "$GSHIM/getent"
+printf '#!/usr/bin/env bash\nexit 0\n'                > "$GSHIM/systemctl"
+printf '#!/usr/bin/env bash\nexit 1\n'                > "$GSHIM/pgrep"
+chmod +x "$GSHIM/incus" "$GSHIM/sudo" "$GSHIM/getent" "$GSHIM/systemctl" "$GSHIM/pgrep"
+
+# The pinned incus-user socket. box grant resolves it through INCUS_DIR (the
+# client's own first choice), so a directory here is the whole seam.
+mkdir -p "$W99/incusdir"; : > "$W99/incusdir/unix.socket.user"
+
+rungrant() { # rungrant <groups> <state-dir> [VAR=val ...] — the real grant, shimmed
+  local groups="$1" state="$2"; shift 2
+  mkdir -p "$state"
+  env FAKE_UID=1000 FAKE_GROUPS="$groups" FAKE_STATE="$state" \
+      FAKE_HAVE_BOXNET=1 FAKE_PROJECT_LAZY=1 INCUS_DIR="$W99/incusdir" \
+      FAKE_INCUS_LOG="$state/incus.log" FAKE_SUDO_LOG="$state/sudo.log" \
+      PATH="$GSHIM:$SHIMDIR:$PATH" "$@" bash "$ROOT/host/grant-user.sh" dev1
+}
+
+# --- the admin member: full convergence, no group change, honest caveat -----
+A="$W99/admin"
+check "grant: an incus-admin member CONVERGES (exit 0, no refusal)" 0 "granted:" \
+  rungrant "users incus-admin" "$A"
+check "grant: ...and the group step is a reported no-op" 0 "leaving the group list alone" \
+  rungrant "users incus-admin" "$W99/a2"
+check "grant: ...the caveat calls it a default placement, not a confinement" 0 "DEFAULT PLACEMENT" \
+  rungrant "users incus-admin" "$W99/a3"
+check "grant: ...and names the group that has to go for it to bind" 0 "gpasswd -d dev1 incus-admin" \
+  rungrant "users incus-admin" "$W99/a4"
+# The logs: what the run actually did to the machine.
+check "grant: the admin member is NOT added to 'incus' (nothing to add)" 1 "" \
+  grep -qF 'usermod -aG incus' "$A/sudo.log"
+check "grant: their project is still narrowed to boxnet" 0 "" \
+  grep -qF 'project set user-1000 restricted.networks.access boxnet' "$A/incus.log"
+check "grant: their project still gets snapshots" 0 "" \
+  grep -qF 'project set user-1000 restricted.snapshots allow' "$A/incus.log"
+check "grant: their project still gets backups" 0 "" \
+  grep -qF 'project set user-1000 restricted.backups allow' "$A/incus.log"
+check "grant: box-net is still installed INTO their project" 0 "" \
+  grep -qF -- '--project user-1000 profile edit box-net' "$A/incus.log"
+# The socket pin (#99's teeth): incus's client takes the DAEMON socket when it
+# is writable, and only falls back to unix.socket.user when it is not — so for
+# an incus-admin member an unpinned touch never reaches incus-user at all, and
+# the project it was supposed to create never appears.
+check "grant: the touch is pinned at incus-user's socket (the admin socket would win)" 0 "" \
+  grep -qF "INCUS_SOCKET=$W99/incusdir/unix.socket.user" "$A/sudo.log"
+check "grant: the user-side proof names their project (an unqualified show proves nothing)" 0 "" \
+  grep -qF -- '--project user-1000 profile show box-net' "$A/sudo.log"
+
+# --- the restricted user: unchanged, and unpinned ---------------------------
+R="$W99/restricted"
+check "grant: a plain user is still added to 'incus'" 0 "added dev1 to 'incus'" \
+  rungrant "users" "$R"
+check "grant: ...via usermod (the log, not the prose)" 0 "" \
+  grep -qF 'usermod -aG incus dev1' "$R/sudo.log"
+check "grant: ...and their client is left to its own socket fallback" 1 "" \
+  grep -qF 'INCUS_SOCKET' "$R/sudo.log"
+
+# --- the failure path: nothing was added, so nothing comes back — loudly ----
+F="$W99/failed"
+check "grant: a failed grant for an admin member exits 1" 1 "FAILED" \
+  rungrant "users incus-admin" "$F" FAKE_FAIL_NARROW=1
+check "grant: ...says their admin socket was neither granted nor removed here" 1 "neither granted nor removed" \
+  rungrant "users incus-admin" "$W99/f2" FAKE_FAIL_NARROW=1
+check "grant: ...and rolls nothing back, because nothing was added" 1 "" \
+  grep -qF 'gpasswd -d' "$F/sudo.log"
+
+# --- revoke, the mirror: it cannot take what it never gave ------------------
+# BOX_YES=1 throughout: --purge is destructive and refuses without a terminal
+# to confirm on, and this suite has none. It changes nothing for a bare revoke.
+runrevoke() { # runrevoke <state-dir> [script args...]
+  local state="$1"; shift
+  mkdir -p "$state"
+  env FAKE_UID=1000 FAKE_GROUPS="users incus-admin" FAKE_STATE="$state" BOX_YES=1 \
+      FAKE_HAVE_PROJECT=1 FAKE_INCUS_LOG="$state/incus.log" FAKE_SUDO_LOG="$state/sudo.log" \
+      PATH="$GSHIM:$SHIMDIR:$PATH" bash "$ROOT/host/revoke-user.sh" dev1 "$@"
+}
+V="$W99/revoke"
+check "revoke: a bare revoke of an admin member is a named no-op, not 'revoked'" 0 "no-op:" \
+  runrevoke "$V"
+check "revoke: ...and says their access is incus-admin's, untouched here" 0 "which this does not touch" \
+  runrevoke "$W99/v2"
+check "revoke: ...naming the group that would actually lock them out" 0 "gpasswd -d dev1 incus-admin" \
+  runrevoke "$W99/v3"
+# Stronger than "no gpasswd": a bare revoke of an admin member makes no
+# privileged call whatsoever — the sudo log never comes into existence (the
+# same absence-of-the-log assertion the #80 refusals are held to).
+check "revoke: ...having made NO privileged call at all (no membership to drop)" 1 "" \
+  test -e "$V/sudo.log"
+P="$W99/purge"
+check "revoke --purge: still unmakes the provisioning" 0 "purged:" \
+  runrevoke "$P" --purge
+check "revoke --purge: ...and refuses to call an admin member 'out'" 0 "is NOT out" \
+  runrevoke "$W99/p2" --purge
+check "revoke --purge: ...the project really was deleted (the log, not the summary)" 0 "" \
+  grep -qF 'project delete user-1000' "$P/incus.log"
+rm -rf "$GSHIM" "$W99"
 # shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "setup-host: the restricted gate precedes the sudo resolution" 0 "" bash -c '
   gate="$(grep -n "restricted tier" "'"$ROOT"'/host/setup-host.sh" | head -1 | cut -d: -f1)"
