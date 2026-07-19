@@ -206,7 +206,13 @@ as_u "$U1" box info mine 2>/dev/null | grep -qF "$(boxnet_pfx)" \
   && ok "(g) box info shows a boxnet ($(boxnet_pfx)x) address — placed on the hardened network" \
   || no "(g) mine has no boxnet address in box info"
 as_u "$U1" box snapshot mine s1 >/dev/null 2>&1 && ok "(b) box snapshot mine s1" || no "(b) snapshot refused"
-as_u "$U1" box restore mine s1 >/dev/null 2>&1 && ok "(b) box restore mine s1 (the incus 6 'snapshot restore' spelling)" || no "(b) restore failed"
+# --force, and it is the assertion as much as the fix: restore is destructive
+# and now asks (#105), so an unattended drill MUST consent explicitly. Without
+# the flag this line fails — correctly — because confirm() refuses rather than
+# assuming yes when there is no terminal to ask on. Adding --force here is not
+# working around the gate; it is the drill proving the gate is real, and that
+# the documented non-interactive path through it works on real Incus.
+as_u "$U1" box restore mine s1 --force >/dev/null 2>&1 && ok "(b) box restore mine s1 --force (the incus 6 'snapshot restore' spelling, through the #105 gate)" || no "(b) restore failed"
 as_u "$U1" box new --name c1 --from mine/s1 >/dev/null 2>&1 && ok "(b) box new --from mine/s1 — the clone workflow" || no "(b) clone failed"
 # c1 stays alive through phase g: it is the distinctly-NAMED sibling the
 # enumeration probe needs (both users' primaries are 'mine' by design of d).

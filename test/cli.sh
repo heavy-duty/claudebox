@@ -877,6 +877,11 @@ check "table: every 'confirm' row supplies a prompt (#105)" 0 "" \
 # shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "dispatch: the confirm prompt comes from the row, not a constant (#105)" 0 "" \
   grep -qF 'confirm "$(fill "$cnf" "$inst")"' "$ROOT/bin/box"
+# The rehearsal drives restore unattended on real Incus, so it must consent
+# EXPLICITLY — the gate is only real if the one automated caller had to change.
+# Pinned here because the rehearsal itself needs a daemon and this suite has none.
+check "rehearsal: the unattended restore passes --force (#105)" 0 "" \
+  grep -qF 'box restore mine s1 --force' "$ROOT/drill/multiuser.sh"
 rm -rf "$CSHIM" "$CWORK"
 
 # ---------------------------------------------------------------------------

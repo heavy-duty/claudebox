@@ -59,7 +59,11 @@ which records not just what changed but what each drill run proved.
   one verb that already worked would be a regression shipped as a
   refactor. A row marked `confirm` with no words is now a hard internal
   error rather than a blank question. `--force` and the no-TTY refusal come
-  free — `confirm()` already had both. Coverage went from two
+  free — `confirm()` already had both. The one automated caller had to
+  consent explicitly: `drill/multiuser.sh` drives restore unattended on real
+  Incus and now passes `--force`, which is the rehearsal proving the gate
+  rather than working around it — the CI run of this very PR failed there
+  first, which is the shape a gate is supposed to have. Coverage went from two
   argument-validation checks that never reached dispatch to the destructive
   path itself, driven against a fake incus: refusing leaves the call log
   empty, `--force` produces exactly one `incus snapshot restore`. Not
