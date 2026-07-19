@@ -967,7 +967,13 @@ fi
 # guard is not.
 eof_guard_sweep() {
   local f n line bad=0 files
-  files="$(cd "$ROOT" && shopt -s globstar && printf '%s\n' bin/* ./**/*.sh | sed 's|^\./||' | sort -u)"
+  # dotglob alongside globstar for the same reason CI's shellcheck step carries
+  # it (#116): globstar descends, but a glob does not MATCH a dot-prefixed name,
+  # so this sweep skipped '.github/scripts/*.sh' — the release path — exactly as
+  # the linter did. Those three set errexit, so they are in scope for this class
+  # by construction; today none of them reads at all, which is why widening the
+  # set is a no-op on current code rather than a bug fix.
+  files="$(cd "$ROOT" && shopt -s globstar dotglob && printf '%s\n' bin/* ./**/*.sh | sed 's|^\./||' | sort -u)"
   while IFS= read -r f; do
     [ -f "$ROOT/$f" ] || continue
     grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*e' "$ROOT/$f" || continue

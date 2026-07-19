@@ -14,10 +14,35 @@ jobs:
         # globstar so a script in a new subdirectory is linted without anyone
         # remembering to edit this list; bin/* covers the extensionless entrypoint
         # (bin/box). The file list is printed so under-coverage shows up in the log.
+        #
+        # dotglob is not decoration (#116): globstar makes `**` descend, but a
+        # glob still does not MATCH a dot-prefixed name, so `**/` never entered
+        # `.github/` — and the whole release path (changelog-armed.sh, which
+        # gates every PR, release-notes.sh, labels-reconcile.sh) went unlinted
+        # while the comment above told the next author it was covered.
+        # Measured on this tree: dotglob adds exactly those three and nothing
+        # else — a checkout's `.git` carries no `*.sh` (its hooks ship as
+        # `*.sample`), so `**/*.sh` does not wander into it.
+        #
+        # The sweep below is the CLASS check, same shape as the eof_guard_sweep
+        # in test/cli.sh (#112): the one-time fix is `dotglob`, but what keeps
+        # the gap from reopening is asserting that every TRACKED script is in
+        # the set actually handed to shellcheck. `git ls-files` is the authority
+        # on what the repo contains; if the glob ever drifts from it again —
+        # another dot-directory, another shopt subtlety — CI says which files
+        # escaped instead of quietly linting a subset and passing.
         run: |
-          shopt -s globstar
+          shopt -s globstar dotglob
           files=(bin/* **/*.sh)
           printf 'shellcheck: %s\n' "${files[@]}"
+          missing="$(comm -13 \
+            <(printf '%s\n' "${files[@]}" | sort -u) \
+            <(git ls-files '*.sh' | sort -u))"
+          if [ -n "$missing" ]; then
+            echo "tracked scripts the shellcheck sweep does not cover (#116):"
+            printf '  %s\n' $missing
+            exit 1
+          fi
           shellcheck -x "${files[@]}"
       - name: cli tests
         run: bash test/cli.sh
