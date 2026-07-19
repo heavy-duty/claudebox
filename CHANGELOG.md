@@ -217,9 +217,12 @@ which records not just what changed but what each drill run proved.
   `timeout -k 5 $BOX_LAUNCH_TIMEOUT` (seconds, default 600 — generous: the
   coldest measured mint is minutes, never an hour; the same scripting-knob
   shape as `BOX_CPU`/`BOX_MEMORY`), with stdin pinned per the drill's own
-  trap list. On the budget firing it says exactly what was measured — the
-  client wedged with no server-side operation, an immediate retry has been
-  observed to succeed — and points at `box doctor` for the host. The
+  trap list. On the budget firing it probes whether the instance was ever
+  registered and tells the two stories apart — the measured #93 wedge (no
+  server-side operation; an immediate retry has been observed to succeed)
+  vs a slow launch that overran the budget with the instance already
+  created — then best-effort deletes either way, so the retry advice is
+  clean in both worlds, and points at `box doctor` for the host. The
   `--from` clone path is untouched: `incus copy` of a local instance is a
   different operation and has never been observed to wedge this way.
 - **UFW's gateway carve-out converges with the bridge, and the doctor can
