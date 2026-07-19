@@ -56,21 +56,30 @@ if [ "$purge" -eq 1 ]; then
   fi
 fi
 
-# An incus-admin member is the mirror of grant's #99 case: 'box grant' gives
-# them the provisioning without the group (they already hold strictly more),
-# so revoke has no group to take — and saying "revoked" at that would be the
-# script claiming a lockout it did not perform. Recorded here, spoken below.
+# An incus-admin member is the mirror of grant's #99 case. 'box grant' DOES
+# put them in 'incus' — not for privilege, but because incus-user's socket is
+# a file owned by that group (#101) — so revoke has a real membership to take
+# back here. What it does not have is a lockout: 'incus-admin' opens the
+# daemon and is not this script's to remove, so "revoked" would still be the
+# script claiming something it did not perform. Recorded here, spoken below.
 admin_member=0
 if id -nG "$user" | tr ' ' '\n' | grep -qx incus-admin; then
   admin_member=1
 fi
 
 # The group, first — access ends even if a purge step below trips.
+dropped_group=0
 if id -nG "$user" | tr ' ' '\n' | grep -qx incus; then
   $SUDO gpasswd -d "$user" incus >/dev/null
-  echo "group: removed $user from 'incus'"
+  dropped_group=1
+  if [ "$admin_member" -eq 1 ]; then
+    echo "group: removed $user from 'incus' — that membership was incus-user's socket key, which"
+    echo "       'box grant' added. It is NOT their daemon access: 'incus-admin' is untouched here"
+  else
+    echo "group: removed $user from 'incus'"
+  fi
 elif [ "$admin_member" -eq 1 ]; then
-  echo "group: $user was never in 'incus' — their socket access is 'incus-admin', which this does not touch"
+  echo "group: $user is not in 'incus' — nothing here to take; their socket access is 'incus-admin', which this does not touch"
 else
   echo "group: $user was not in 'incus'"
 fi
@@ -116,17 +125,22 @@ if [ "$purge" -eq 0 ]; then
     echo "kept: project $project and its boxes (still running — revoking a person does not kill their workloads)"
     if [ "$admin_member" -eq 1 ]; then
       # "restores access" would be the wrong promise here: no access was lost.
-      echo "      'box revoke $user --purge' deletes them; 'box grant $user' re-converges the project"
+      echo "      'box revoke $user --purge' deletes them; 'box grant $user' re-converges the project and the membership"
     else
       echo "      'box revoke $user --purge' deletes them; 'box grant $user' restores access"
     fi
   fi
   if [ "$admin_member" -eq 1 ]; then
-    # Not "revoked": there was no tier of theirs to take. What a bare revoke
-    # did here is exactly nothing — the group was never theirs to lose and the
-    # project is kept — so name the two real options instead of a summary that
-    # would read as a lockout.
-    echo "no-op: $user holds the admin tier via 'incus-admin', not the restricted tier — nothing was taken."
+    # Not "revoked", still: what came back is the 'incus' membership grant
+    # added for incus-user's socket, and their access to this host was never
+    # riding on it. The project is kept. So say exactly what was taken and
+    # name the two real options, instead of a summary that reads as a lockout.
+    if [ "$dropped_group" -eq 1 ]; then
+      echo "partial: took $user out of 'incus' — incus-user's socket key, which 'box grant' added."
+      echo "         $user is NOT locked out: 'incus-admin' still opens every project on this host."
+    else
+      echo "no-op: $user was not in 'incus' and holds the admin tier via 'incus-admin' — nothing was taken."
+    fi
     echo "       to remove their access:      gpasswd -d $user incus-admin"
     echo "       to remove the project 'box grant' provisioned for them:  box revoke $user --purge"
     exit 0

@@ -30,6 +30,9 @@
 #      host-owned control — the scoped guarantee, measured (#75 review)
 #   n. a grant that fails is fail-closed: fresh user backed out (verified),
 #      pre-existing member warned loudly, re-run converges (#75 review)
+#   o. an incus-admin-ONLY member is provisioned for real: the group step
+#      opens incus-user's socket, the lazy project appears, and dropping
+#      incus-admin lands them in it with no re-grant (#99, #101 review)
 #
 # ok/no/note return 0 by design — the 'A && ok || no' idiom below is the
 # same one drill.sh is built on (and the reason for the SC2015 disable).
@@ -114,7 +117,7 @@ cleanup() {
   [ "$KEEP" = 1 ] && { echo "(--keep: users and boxes left for inspection)"; return; }
   echo
   echo "── cleanup"
-  for u in "$U1" "$U2" boxdrill3 boxdrill4; do
+  for u in "$U1" "$U2" boxdrill3 boxdrill4 boxdrill5; do
     id "$u" >/dev/null 2>&1 || continue
     # A half-failed purge followed by userdel leaves a project owned by
     # nobody — and doctor's leftover check keys on the USER existing. Keep
@@ -468,6 +471,65 @@ else
   printf '%s\n' "$stage" | tail -3 | sed 's/^/        /'
 fi
 aud "n. fail-closed injections: fresh-user backout verified; pre-existing member warned, not stripped; re-runs converge"
+
+phase "o. an incus-admin-ONLY member — #99's canonical user, on real Incus"
+# The case the shim suite structurally cannot reach: the fake 'incus' in
+# test/cli.sh ignores INCUS_SOCKET and file permissions, so a grant that could
+# never connect() still logged a clean run there. This is the same path over
+# the real daemon, where the socket is a real file with a real owning group.
+#
+# The blocker it exists to catch (#101 review): incus-user's socket is
+# /var/lib/incus/unix.socket.user, group 'incus', mode 0660. incus-admin opens
+# the ADMIN socket and not that one, so an incus-admin-only member without an
+# 'incus' membership takes EACCES on grant's pinned touch — swallowed by its
+# '|| true' — no project is created, and the grant dies blaming a perfectly
+# healthy incus-user. Every assertion below is dead under that implementation.
+U5=boxdrill5
+useradd -m -s /bin/bash "$U5" 2>/dev/null
+usermod -aG incus-admin "$U5"
+gpasswd -d "$U5" incus >/dev/null 2>&1 || true   # stage the ONLY, exactly
+uid5="$(id -u "$U5")"; p5="user-$uid5"
+id -nG "$U5" | tr ' ' '\n' | grep -qx incus \
+  && no "(o) $U5 is already in 'incus' — the admin-ONLY precondition is not staged, so this phase proves nothing" \
+  || ok "(o) $U5 staged in 'incus-admin' only (the precondition the blocker needed)"
+
+out="$(box grant "$U5" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ]; then
+  ok "(o) box grant converges an incus-admin-only member (rc=0)"
+else
+  no "(o) box grant FAILED for the admin-only member (rc=$rc) — #99 is still closed:"
+  printf '%s\n' "$out" | tail -4 | sed 's/^/        /'
+fi
+id -nG "$U5" | tr ' ' '\n' | grep -qx incus \
+  && ok "(o) the grant put them in 'incus' — the group that owns unix.socket.user" \
+  || no "(o) still not in 'incus': the pinned touch cannot connect() to incus-user's socket"
+incus project show "$p5" >/dev/null 2>&1 \
+  && ok "(o) $p5 exists — the lazy touch really reached incus-user AS them" \
+  || no "(o) $p5 was never created — the touch never reached incus-user (the EACCES this phase is for)"
+
+# The socket, directly: the connect() that used to fail, measured as them.
+# Resolved by incus's own directory rule, not hardcoded.
+sockdir=/var/lib/incus; [ -e /run/incus/unix.socket ] && sockdir=/run/incus
+as_u "$U5" env INCUS_SOCKET="$sockdir/unix.socket.user" incus --project "$p5" profile show box-net >/dev/null 2>&1 \
+  && ok "(o) they can open unix.socket.user and read $p5's box-net profile" \
+  || no "(o) EACCES/unreachable on $sockdir/unix.socket.user — the #101 blocker is back"
+acc5="$(incus project get "$p5" restricted.networks.access 2>/dev/null)"
+[ "$acc5" = boxnet ] \
+  && ok "(o) $p5 is narrowed to boxnet like any other granted project" \
+  || no "(o) $p5 restricted.networks.access = '$acc5' — the admin-only grant converged half a project"
+
+# Grant's own closing promise, measured: "gpasswd -d <user> incus-admin (no
+# re-grant needed; the project is ready)". True only because they were left in
+# 'incus' — under the old no-op this drop left them in NEITHER group, box_tier
+# 'none', and a ready project they could not open. So drop it and look.
+gpasswd -d "$U5" incus-admin >/dev/null 2>&1
+projects5="$(as_u "$U5" incus project list --format csv 2>/dev/null | cut -d, -f1)"
+if [ "$(printf '%s\n' "$projects5" | grep -c .)" = 1 ] && printf '%s' "$projects5" | grep -q "$p5"; then
+  ok "(o) dropping incus-admin lands them in $p5 with NO re-grant — the promise holds"
+else
+  no "(o) after dropping incus-admin they see: '$(printf '%s' "$projects5" | tr '\n' ' ')' — grant's no-re-grant promise is false"
+fi
+aud "o. incus-admin-only grant: in-'incus'=$(id -nG "$U5" 2>/dev/null | tr ' ' '\n' | grep -cx incus), project '$p5' access='$acc5', post-drop projects='$(printf '%s' "$projects5" | tr '\n' ' ')'"
 
 echo
 echo "════════════════════════════════════════════"

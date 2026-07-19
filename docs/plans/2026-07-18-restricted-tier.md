@@ -127,11 +127,13 @@ It had never worked.
 ## Rehearsal and CI
 
 `drill/multiuser.sh` (root, opt-in via `BOX_MULTIUSER_REHEARSAL=1`) proves
-criteria (a)–(f) from #74 plus the measured extensions (g)–(n): the in-box
+criteria (a)–(f) from #74 plus the measured extensions (g)–(o): the in-box
 isolation contract (egress, DNS, box→host, RFC1918, cross-user sibling drop,
 name enumeration, IPv6-off), the closed escape hatches, re-sync survival, and
-scoped revoke, the raw-attach scoped guarantee (m) and the grant-failure
-injections (n). Real users, real grants, real mints, probes from inside;
+scoped revoke, the raw-attach scoped guarantee (m), the grant-failure
+injections (n) and the `incus-admin`-only grant (o) — the last of these
+because the shim suite models neither `INCUS_SOCKET` nor socket permissions,
+so the group gate on `unix.socket.user` can only be measured live (#99, #101). Real users, real grants, real mints, probes from inside;
 `--container` for CI, VM mode on real hardware; cleanup deletes everything it
 made.
 
