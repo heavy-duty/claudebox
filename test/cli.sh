@@ -890,6 +890,95 @@ check "dispatch: the confirm prompt comes from the row, not a constant (#105)" 0
 # Pinned here because the rehearsal itself needs a daemon and this suite has none.
 check "rehearsal: the unattended restore passes --force (#105)" 0 "" \
   grep -qF 'box restore mine s1 --force' "$ROOT/drill/multiuser.sh"
+# --- the three answers a human can give — DRIVEN ON A REAL PTY (#111) -------
+# Everything above stops at the no-TTY refusal, because confirm() branches on
+# '[ -t 0 ]' and this suite has no terminal. So the interactive half — 'y',
+# 'n', and Ctrl-D — had never been executed here at all, which is precisely
+# how #111 survived: an unguarded 'read' returns non-zero on EOF, 'set -e'
+# ends the run before the 'case', and the abort happens in total silence.
+#
+# 'script' from util-linux gives the child a pty, so box takes the interactive
+# branch for real and reads the answer we write to the master side. This does
+# NOT hang a suite run from a terminal: script's own stdin is a file or
+# /dev/null on every run below, never the developer's tty, so the answer (or
+# the EOF) is always already waiting.
+if command -v script >/dev/null 2>&1 && script --version 2>/dev/null | grep -q util-linux; then
+  PWORK="$(mktemp -d)"; PLOG="$PWORK/pty.log"
+  printf 'y\n' > "$PWORK/yes"; printf 'n\n' > "$PWORK/no"
+  # Invoked through a file so 'script -c' needs no quoting of its own; the log
+  # path and the shim PATH ride the environment script hands to the child.
+  cat > "$PWORK/run" <<RUNNER
+#!/usr/bin/env bash
+exec env PATH="$CSHIM:\$PATH" "$BOX" rm work
+RUNNER
+  chmod +x "$PWORK/run"
+  ptybox() {  # ptybox <answers-file> — 'box rm work' on a pty, answered
+    : > "$PLOG"
+    FAKE_INCUS_LOG="$PLOG" script -qec "$PWORK/run" /dev/null < "$1"
+  }
+  # The load-bearing assertion is the MESSAGE, not the exit code: before the
+  # fix Ctrl-D also exited 1, just without ever saying why. Asserting on the
+  # code alone would pass against the bug.
+  check "rm: Ctrl-D at the prompt aborts OUT LOUD, not in silence (#111)" \
+    1 "aborted." ptybox /dev/null
+  check "rm: ...and the Ctrl-D abort really deleted nothing (#111)" 1 "" \
+    grep -qF 'incus delete' "$PLOG"
+  check "rm: 'n' at the prompt aborts (#111)" 1 "aborted." ptybox "$PWORK/no"
+  check "rm: ...and 'n' really deleted nothing (#111)" 1 "" \
+    grep -qF 'incus delete' "$PLOG"
+  # The accept path, so the pty rig is proven to be able to reach the work —
+  # three checks that can only ever refuse would pass against a box that
+  # refuses everything.
+  check "rm: 'y' at the prompt goes through (#111)" 0 "removed work" \
+    ptybox "$PWORK/yes"
+  check "rm: ...and 'y' really reached 'incus delete -f' (#111)" 0 "" \
+    grep -qF 'incus delete -f work' "$PLOG"
+  rm -rf "$PWORK"
+else
+  echo "skip: the interactive confirm answers (no util-linux 'script' here; CI has it)"
+fi
+
+# --- the sweep: no prompt-shaped 'read' under 'set -e' may go unguarded (#111)
+# The pty checks above prove the two 'bin/box' gates. This proves the CLASS,
+# repo-wide, and it exists because the class is exactly what the first pass at
+# #111 missed: 'host/revoke-user.sh' and 'host/teardown-host.sh' carried the
+# identical defect and survived, because nothing here was looking for the shape.
+#
+# The shape: a 'read' at the start of a statement, fed from the script's own
+# stdin (so a human, or an EOF), inside a file that turns on errexit. On EOF
+# 'read' returns non-zero and 'set -e' ends the run BEFORE the 'case' that was
+# going to name the abort — the tool goes mute at the moment it asked.
+#
+# What is deliberately NOT flagged, because it is not the shape:
+#   · 'while IFS= read -r' loops — fed by a redirect at 'done', and a non-zero
+#     read is how the loop is supposed to end;
+#   · '<<<' herestring reads — fed from a string, never from a human;
+#   · files without errexit ('drill/wipe.sh', 'drill/drill.sh',
+#     'drill/multiuser.sh' run under 'set -u' only, wipe.sh documents why), where
+#     EOF simply falls through to the '*)' arm and aborts out loud on its own.
+# A guard is any '||' on the read's own line: '|| die', '|| reply=""',
+# '|| { echo …; exit 1; }' — the spelling is each script's to choose, the
+# guard is not.
+eof_guard_sweep() {
+  local f n line bad=0 files
+  files="$(cd "$ROOT" && shopt -s globstar && printf '%s\n' bin/* ./**/*.sh | sed 's|^\./||' | sort -u)"
+  while IFS= read -r f; do
+    [ -f "$ROOT/$f" ] || continue
+    grep -qE '^[[:space:]]*set[[:space:]]+-[a-zA-Z]*e' "$ROOT/$f" || continue
+    while IFS=: read -r n line; do
+      case "$line" in
+        *'<<<'*) continue ;;   # herestring, not a prompt
+        *'||'*)  continue ;;   # guarded — the whole point
+      esac
+      echo "$f:$n: prompt-shaped 'read' under 'set -e' with no '||' guard:$line"
+      bad=1
+    done < <(grep -nE '^[[:space:]]*(IFS=[^[:space:]]+[[:space:]]+)?read([[:space:]]|$)' "$ROOT/$f")
+  done <<<"$files"
+  return "$bad"
+}
+check "no prompt-shaped 'read' under 'set -e' goes unguarded, repo-wide (#111)" \
+  0 "" eof_guard_sweep
+
 rm -rf "$CSHIM" "$CWORK"
 
 # ---------------------------------------------------------------------------

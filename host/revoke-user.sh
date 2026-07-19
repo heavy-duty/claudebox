@@ -47,7 +47,11 @@ if [ "$purge" -eq 1 ]; then
   if [ -z "${BOX_YES:-}" ]; then
     if [ -t 0 ]; then
       printf 'box revoke: delete ALL of %s'\''s boxes, images and their project %s? this cannot be undone. [y/N] ' "$user" "$project"
-      read -r reply
+      # EOF (Ctrl-D) is an answer too, and it is a refusal. Unguarded, 'read'
+      # returns non-zero and errexit ends the run right here — before the
+      # 'case' below can name the abort, so the most destructive prompt box
+      # has would go silent at the moment it asked (#111).
+      read -r reply || { echo "box revoke: aborted." >&2; exit 1; }
       case "$reply" in y|Y|yes|YES|Yes) : ;; *) echo "box revoke: aborted." >&2; exit 1 ;; esac
     else
       echo "box revoke: refusing to --purge without a terminal to confirm on. BOX_YES=1 means yes." >&2

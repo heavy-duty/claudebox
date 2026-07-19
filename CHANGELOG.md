@@ -79,6 +79,48 @@ which records not just what changed but what each drill run proved.
   misnumbered one, and an operator sent to correct a version number that is
   already right will not find the real problem. Matches
   heavy-duty/rig#67, so the three repos agree.
+- **Ctrl-D at a confirmation prompt aborts out loud, instead of exiting
+  in silence** (#111) — `confirm()` and `uninstall_confirm()` both took
+  the operator's answer with a bare `read -r reply`. Every answer a
+  human can type routes through the `case` below it and ends at a
+  `return` or at `die "aborted."` — every answer except EOF. Ctrl-D
+  makes `read` return non-zero, `set -euo pipefail` ends the run on that
+  line, and the `case` is never reached: box exits 1 having printed
+  nothing at all after the question it just asked. It fails closed,
+  which is why this is a small fix and not an incident — nothing is
+  destroyed, the abort is real. The damage is that the tool goes mute at
+  the one moment it had the operator's full attention, and someone who
+  Ctrl-Ds out of `box rm work` cannot tell from the output whether the
+  box is still there. The cure is one token in each function,
+  `read -r reply || die "aborted."`, the same one heavy-duty/rig#43
+  applied to rig's credential prompts so the two repos read alike. The
+  bug predates everything it touches — `rm` has carried a confirm gate
+  for as long as the verb has existed — but #105 took the number of
+  verbs reaching that line from one to two, and both are irreversible,
+  which is the argument for closing it now rather than the next time
+  someone notices. The three answers a human can actually give (`y`,
+  `n`, and Ctrl-D) are now driven for real on a pty via util-linux
+  `script`: they were structurally untested before, because `[ -t 0 ]`
+  sends a terminal-less suite to the refusal branch and every existing
+  check stopped there — which is exactly how this survived four
+  releases. Review caught that the first pass fixed the bug where it was
+  reported and stopped there, while the same defect sat at two more
+  destructive gates in this repo: `host/revoke-user.sh:50`, the prompt
+  guarding `box revoke --purge` — the one whose own text says "this
+  cannot be undone" — and `host/teardown-host.sh:31`, guarding a full
+  host teardown. Both run under `set -euo pipefail`, both died mute on
+  EOF with their `aborted` line never reached; both now carry the guard
+  in their own script's wording. The three `drill/` prompts are
+  deliberately left alone — they run under `set -u` only, so EOF falls
+  through to the `*)` arm and already aborts out loud — and
+  `install.sh:65` was already guarded. What keeps the class closed is a
+  repo-wide sweep in `test/cli.sh`: every statement-initial `read` fed
+  from stdin, in any file that turns on errexit, must carry a `||`
+  guard, with `while read` loops and `<<<` herestrings excluded because
+  neither is a prompt. The sweep flags all four sites when their guards
+  are removed and nothing else across the tree's fifteen shell files —
+  the absence of exactly this check is why the `host/` pair was missed
+  in the first place.
 - **`box restore` asks before it destroys — and the confirmation prompt is
   now the row's, not rm's** (#105) — `restore` and `rm` both irreversibly
   discard user state, and only one of them asked. The table gave `restore`

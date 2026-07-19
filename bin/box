@@ -823,7 +823,9 @@ confirm() {   # $1 = prompt. --force, or a TTY to ask on, or we refuse.
   [ -t 0 ] || usage_error "refusing to $1 without --force (no terminal to confirm on)"
   local reply
   printf 'box: %s? this cannot be undone. [y/N] ' "$1"
-  read -r reply
+  # EOF (Ctrl-D) is an answer, and it means no. Unguarded, 'read' returns
+  # non-zero and 'set -e' ends the run in silence — heavy-duty/rig#43.
+  read -r reply || die "aborted."
   case "$reply" in y|Y|yes|YES|Yes) return 0 ;; *) die "aborted." ;; esac
 }
 
@@ -1651,7 +1653,8 @@ uninstall_confirm() {   # $1 = question. --force, or BOX_YES=1, or a TTY.
   [ -t 0 ] || usage_error "refusing to $1 without --force (no terminal to confirm on; BOX_YES=1 also means yes)"
   local reply
   printf 'box: %s? [y/N] ' "$1"
-  read -r reply
+  # Same EOF cure as confirm() above — Ctrl-D must abort out loud.
+  read -r reply || die "aborted."
   case "$reply" in y|Y|yes|YES|Yes) return 0 ;; *) die "aborted." ;; esac
 }
 
