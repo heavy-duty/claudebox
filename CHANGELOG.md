@@ -5,6 +5,40 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Fixed
+
+- **`box-firewall` could hand a UFW host the no-UFW firewall, ~2% of the
+  time** (#102) — filed as an intermittent test flake (`test/cli.sh`'s
+  fresh-UFW block going four-assertions-red on an unmodified `main`,
+  measured here at 5 failing runs in 40), it was not one. The branch that
+  decides the host's entire firewall stance read
+  `ufw status | grep -q "Status: active"`, and `Status: active` is the FIRST
+  line ufw prints: `grep -q` matches it and exits immediately, closing the
+  pipe while ufw is still writing the rest of the table, so ufw dies of
+  SIGPIPE. `grep` returned 0, but under this script's `set -o pipefail` the
+  PIPELINE returns 141 — the `if` reads false and a host with UFW plainly
+  active takes the nft-fallback branch, never building the DNS carve-out its
+  persisted rules depend on. A pure scheduling race, isolated at ~2% per
+  invocation (`PIPESTATUS` = `141 0`; a draining reader flakes 0/2000, a
+  reader whose match is on the last line flakes 0/2000). Real ufw is a
+  slower, longer writer than the test shim, so production had no reason to
+  be safer. `ufw status` is now read ONCE into a variable and matched with
+  `[[ ]]` — no reader, no race — and the stale-rule scan reads that same
+  snapshot, so the branch decision and the converge loop can no longer
+  disagree. The sibling `ufw status | grep -q` calls in `drill/wipe.sh`,
+  `drill/doctor.sh` and `host/teardown-host.sh` are the same shape but do
+  not set `pipefail`, so the SIGPIPE is discarded there and the branch holds.
+- **A missing firewall log now diagnoses itself** (#102) — the four greps
+  reading `$WFW/*.log` used to fail together with empty output when the
+  driving run took the wrong branch, a signature that looks specific and
+  says nothing (#102 was filed reading it as "the log is not written";
+  the log existed, the mutations did not, and that distinction *was* the
+  diagnosis). `test/cli.sh` now asserts the precondition explicitly before
+  the content greps and, on failure, prints the contents of `$WFW`, the log
+  itself, and the stderr of the run that should have written it. It also
+  keeps `an agreeing UFW host deletes nothing` honest: that check asserts an
+  absence, which a run that did nothing at all passes for the wrong reason.
+
 ### Added
 
 - **Merging the release PR IS the release — and the release re-arms main

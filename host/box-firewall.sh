@@ -19,7 +19,35 @@ NET=boxnet
 # ('|| true': under pipefail an absent bridge would kill the script here.)
 GW="$(ip -4 -o addr show dev "$NET" 2>/dev/null | awk '{ split($4, a, "/"); print a[1]; exit }' || true)"
 
-if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+# Read `ufw status` ONCE, into a variable, instead of piping it at a matcher.
+# The pipe it replaces — `ufw status | grep -q "Status: active"` — was a latent
+# branch-flipper, and the branch it flips is the whole firewall. "Status:
+# active" is the FIRST line ufw prints, so `grep -q` matches it and exits
+# immediately, closing the read end while ufw is still writing the rest of the
+# table; ufw then dies of SIGPIPE (141). `grep` reported 0, but under the
+# `set -o pipefail` at the top of this file the PIPELINE reports 141, so the
+# `if` reads false and a host with UFW plainly active takes the no-UFW branch
+# below — installing the nft fallback table and never building the DNS
+# carve-out its persisted rules are counting on. It is a pure scheduling race
+# between two processes, which is the worst possible property for a decision
+# this load-bearing: measured at ~2% per invocation under test/cli.sh's shims
+# (#102, where it surfaced as an intermittent four-assertions-red test and got
+# read as flakiness for exactly as long as it was cheaper to re-run than to
+# diagnose). Real ufw is a Python program with a slower, longer write than the
+# shim's single printf, so there is no reason to think production is safer.
+# A variable has no reader that can exit early, so the race cannot exist.
+# The capture doubles as the snapshot the converge loop below reads, so the
+# branch decision and the stale-rule scan are made against the same text
+# rather than two reads that could disagree across an intervening change.
+# ('|| true': ufw exits non-zero when it cannot read its config, and under
+# pipefail+errexit that would kill the script instead of falling through to
+# the nft branch, which is the correct answer for "ufw is not usable here".)
+UFW_STATUS=""
+if command -v ufw >/dev/null; then
+  UFW_STATUS="$(ufw status 2>/dev/null || true)"
+fi
+
+if [[ "$UFW_STATUS" == *"Status: active"* ]]; then
   if [ -z "$GW" ]; then
     echo "box-firewall: $NET has no address yet — UFW DNS carve-out left as-is (no rule beats a wrong one; the persisted rules survive boots, and setup-host or a service restart converges them once the bridge is addressed)" >&2
   else
@@ -32,7 +60,9 @@ if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active
     # anywhere else, then ensure the live set: ufw skips a rule that already
     # exists, so the re-run is a no-op and a fresh host gets exactly the
     # rules it always did.
-    for stale in $(ufw status | awk -v net="$NET" -v gw="$GW" '
+    # Scanned off the same $UFW_STATUS snapshot the branch was decided from —
+    # see the capture above for why this is not a second `ufw status` call.
+    for stale in $(printf '%s\n' "$UFW_STATUS" | awk -v net="$NET" -v gw="$GW" '
         $2 ~ /^53\// && $3 == "on" && $4 == net && $1 != gw { print $1 }' | sort -u); do
       ufw delete allow in on "$NET" to "$stale" port 53 proto tcp || true
       ufw delete allow in on "$NET" to "$stale" port 53 proto udp || true
