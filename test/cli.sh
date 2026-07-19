@@ -824,6 +824,14 @@ RLOG="$CWORK/restore.log"
 check "restore: refuses without --force when there is no terminal (#105)" \
   2 "refusing to roll work back to snapshot 'authed'" \
   runbox "$RLOG" restore work authed
+# The exact no-TTY wording, pinned. This is the regression test for the CI
+# failure this PR produced: the multi-user rehearsal drives restore unattended
+# on real Incus, took this refusal, and recorded '(b) restore failed' — a
+# 40-minute job catching what a 15-second suite should have. box refuses
+# rather than assuming consent, and it says which of the two ways out applies.
+check "restore: ...and the refusal names the missing terminal, not a bad usage (#105)" \
+  2 "no terminal to confirm on" \
+  runbox "$CWORK/r-tty.log" restore work authed
 # The load-bearing assertion: the refusal actually PREVENTED the rollback.
 # 'grep -q' on an absence, so an empty log passes and a logged restore fails.
 check "restore: ...and the refusal reached incus with no restore (#105)" 1 "" \
