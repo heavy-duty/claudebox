@@ -115,6 +115,45 @@ which records not just what changed but what each drill run proved.
   deletion near-miss and the real duplicate — each with `changelog-armed.sh`
   asserted green on it, which is the whole reason this script exists.
 
+- **An upgrade over a pre-0.7.0 flat `/opt/box` no longer skips host setup**
+  (#115) — found on the first real host the 0.8.0 drill touched. The
+  installer migrates a flat pre-0.7.0 tree into `versions/<v>`, and
+  `had_install` was computed *after* that migration — so it observed a
+  `versions/` directory the migration had just created, concluded the host
+  was already installed, and skipped `host/setup-host.sh`. The result was
+  silent and self-concealing: `box --version` reported 0.8.0 while every
+  host-side artifact stayed as the old release left it, so the very
+  operator who upgraded *for* the #102 `box-firewall` SIGPIPE fix was the
+  one who did not receive it, with the version string asserting otherwise.
+  `had_install` is now computed **before** the migration block, which is
+  the honest question — a tree that needs migrating has by definition never
+  been converged by this version's `setup-host`. Hosts already on the
+  versioned layout are unaffected: they still read `had_install=1`, for the
+  right reason. The consequence is deliberate: an unattended (`BOX_YES=1`)
+  upgrade on a flat-tree host now *runs* `setup-host`, which the #66 note
+  cautions about — accepted, because `setup-host` converges and is
+  idempotent, and shipping a release whose host half is silently missing is
+  the worse failure.
+- **Host setup runs the version it just installed, not whatever `current`
+  points at** (#115) — a second defect in the same block, reachable only
+  once the fix above lets `setup-host` run at all. The `#66` guard holds
+  the default where it is when the host has existing boxes, so on such a
+  host `current` still names the OLD version; running
+  `$DEST/current/host/setup-host.sh` would then converge the host with the
+  *previous* release's host scripts, reinstating exactly the staleness #115
+  is about, in the one case where the operator's live boxes make it
+  costly. It now runs the installed version's own tree directly.
+- **The pre-0.7.0 migration says what it left behind** (#117) — the
+  migration named itself, but not the *lifecycle*: the old tree becomes a
+  first-class `box versions` entry the operator never installed, and which
+  is indistinguishable from one they deliberately kept as a rollback
+  target. The migration line now names both ways out — keep it to roll back
+  (`box use <v>`) or reap it (`box uninstall <v>`) — and the closing `done`
+  summary re-states it, because the migration line itself scrolls past some
+  250 lines before the install ends. Deleting it automatically stays the
+  wrong default: it is the only thing to roll back *to*, at exactly the
+  moment that matters. No behaviour change.
+
 ## 0.8.0 — 2026-07-19
 
 ### Added

@@ -143,12 +143,39 @@ flip_current() {
   mv -Tf "$DEST/current.new.$$" "$DEST/current"
 }
 
+# Whether ANY version was installed before this run — computed BEFORE the
+# migration below, which is the whole point. It gates the host-setup offer: a
+# host that already ran box has made that decision (and may have live boxes the
+# stack must not be rebuilt under, #66); after an upgrade, 'box setup-host'
+# re-applies stack changes on purpose.
+#
+# Order is load-bearing (#115). The migration converts a pre-0.7.0 flat tree
+# into versions/<flat_ver>, so computing this AFTER it made the test true by
+# its own doing: a flat host looked "already installed", setup-host was
+# skipped, and every host-side artifact stayed at the old version while
+# 'box --version' reported the new one. A tree that needs migrating has by
+# definition never been converged by THIS version's setup-host, so it must
+# read as had_install=0. A genuinely versioned tree still reads 1 — the
+# directory it is testing predates this run.
+had_install=0
+if [ -d "$DEST/versions" ] && [ -n "$(ls -A "$DEST/versions" 2>/dev/null)" ]; then
+  had_install=1
+fi
+
 # --- migrate a pre-0.7.0 flat install --------------------------------------
 # 0.6.0 and earlier installed the tree FLAT at $DEST (bin/box directly under
 # it). Move such a tree to versions/<its-VERSION> BEFORE anything else, so an
 # upgrade from 0.6.0 is seamless and the version comparison below sees the
 # truth. The move is two renames inside one parent directory — no copying, no
 # window with no install — and the operator's tree is preserved bit for bit.
+#
+# What the migration LEAVES is the operator's to decide (#117): the old tree
+# becomes a first-class 'box versions' entry — a rollback target if the new
+# version misbehaves, garbage otherwise. Deleting it here is the wrong default
+# (it is the only thing to roll back TO, at exactly the moment that matters),
+# so name it instead — and name it AGAIN in the closing summary, because a
+# line ~250 lines of output above 'done' is a line the operator scrolled past.
+migrated_from=""
 if [ -e "$DEST/bin/box" ] && [ ! -d "$DEST/versions" ]; then
   flat_ver="$(cat "$DEST/VERSION" 2>/dev/null || echo 0.0.0-unknown)"
   # The flat tree's VERSION is data from disk, not from this installer — the
@@ -164,15 +191,9 @@ if [ -e "$DEST/bin/box" ] && [ ! -d "$DEST/versions" ]; then
   mkdir -p "$BINDIR"
   ln -sfn "$DEST/current/bin/box" "$BINDIR/box"
   log "migrated: it now lives at $DEST/versions/$flat_ver (still current; your boxes are untouched)"
-fi
-
-# Whether ANY version was installed before this run — read before we add one.
-# It gates the host-setup offer below: a host that already ran box has made
-# that decision (and may have live boxes the stack must not be rebuilt under,
-# #66); after an upgrade, 'box setup-host' re-applies stack changes on purpose.
-had_install=0
-if [ -d "$DEST/versions" ] && [ -n "$(ls -A "$DEST/versions" 2>/dev/null)" ]; then
-  had_install=1
+  log "  it is a normal version entry now — 'box versions' lists it. Keep it as a"
+  log "  rollback target ('box use $flat_ver'), or reap it: box uninstall $flat_ver"
+  migrated_from="$flat_ver"
 fi
 
 # --- temp workspace --------------------------------------------------------
@@ -386,6 +407,15 @@ esac
 # 'box setup-host' re-applies stack changes deliberately, after an upgrade.
 # BOX_SKIP_SETUP_HOST=1 answers "no" without prompting (image builds, a host set
 # up by hand); BOX_YES answers "yes".
+#
+# It runs $VDIR's script, NOT $DEST/current's. They are usually the same tree,
+# but 'current' does not always flip: the #66 guard above keeps the default
+# where it is when the host has existing boxes, so on such a host 'current'
+# still names the OLD version. Going through it would converge the host with
+# the old release's host-side scripts — reinstating exactly the stale artifacts
+# #115 is about, in the one case where the operator's boxes make it costly.
+# $VDIR is unambiguously the version this run installed, which is the version
+# whose host contract we are being asked to satisfy.
 setup_ok=""
 setup_declined=""
 if [ "$had_install" -eq 1 ]; then
@@ -396,7 +426,7 @@ elif [ -n "${BOX_SKIP_SETUP_HOST:-}" ]; then
   setup_declined=1
 elif [ "$(id -u)" -ne 0 ] && ! command -v sudo >/dev/null 2>&1; then
   warn "cannot set up the host: it needs root and sudo was not found."
-  warn "  run this as root to finish: $DEST/current/host/setup-host.sh"
+  warn "  run this as root to finish: $VDIR/host/setup-host.sh"
   setup_declined=1
 elif confirm "Set up this machine as a box host now? (installs Incus + the isolation stack; needs sudo)"; then
   # </dev/null because under 'curl … | bash' this script IS stdin: a child that
@@ -404,7 +434,7 @@ elif confirm "Set up this machine as a box host now? (installs Incus + the isola
   # it prompts on /dev/tty, so an interactive host can still authenticate.
   # setup-host re-execs itself under sg incus-admin if it must add you to the
   # group; that re-exec is a child here and completes the whole setup in one go.
-  if bash "$DEST/current/host/setup-host.sh" </dev/null; then
+  if bash "$VDIR/host/setup-host.sh" </dev/null; then
     setup_ok=1
   else
     warn "host setup did not complete — box is installed, the host is not ready."
@@ -421,4 +451,13 @@ elif [ -n "$setup_declined" ]; then
   log "done ($SRCDESC, version $new_ver) — when you want this machine to host boxes: box setup-host"
 else
   log "done ($SRCDESC, version $new_ver) — finish with 'box setup-host', then: box new --name test"
+fi
+
+# Re-state the migration where the operator is actually looking (#117). The
+# line at the migration itself is true but ~250 lines of output ago; this is
+# the last thing printed, and it is where an unexplained 'box versions' entry
+# stops being a surprise.
+if [ -n "$migrated_from" ]; then
+  log "note: your pre-0.7.0 install was migrated to versions/$migrated_from and 'box versions' now lists it."
+  log "  keep it to roll back ('box use $migrated_from'), or remove it: box uninstall $migrated_from"
 fi
