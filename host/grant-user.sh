@@ -9,7 +9,10 @@
 # Incus 6.0.4; the full write-up is in docs/plans/2026-07-18-restricted-tier.md.
 #
 # So granting is a per-user CONVERGENCE, and it must be run by an admin:
-#   1. put the user in the 'incus' group (not incus-admin — that is the tier)
+#   1. put the user in the 'incus' group (not incus-admin — that is the tier).
+#      An incus-admin member goes in too, and NOT for privilege: incus-user's
+#      socket is a FILE, group 'incus', mode 0660, so the membership is the
+#      only thing that lets step 2 connect() at all (#99, #101 review)
 #   2. touch incus-user AS the user, so the lazy project exists to converge
 #   3. unpin the private bridge (drop eth0 from the project's default profile)
 #   4. restrict the project's network access to boxnet and ONLY boxnet —
@@ -63,12 +66,34 @@ getent passwd "$user" >/dev/null || { echo "box grant: no such user: $user" >&2;
 uid="$(id -u "$user")"
 [ "$uid" -eq 0 ] && { echo "box grant: root does not need a tier — UID 0 owns the daemon socket outright." >&2; exit 1; }
 
-# An incus-admin member already holds the full socket; "granting" them the
-# restricted tier would not restrict anything (admin membership wins at the
-# socket), it would only mislead whoever reads the group list later.
+# An incus-admin member gets the full convergence anyway (#99). This used to
+# be a hard refusal, on the reasoning that admin membership wins at the socket
+# so nothing here could restrict them. True — and beside the point, because it
+# conflates the two separate things a grant hands over:
+#   · PERMISSION — the 'incus' group. At the DAEMON API they already hold
+#     strictly more through incus-admin, so this group adds no privilege. It
+#     is still required, because the two sockets are two FILES with two
+#     different owning groups (Debian 13 / Incus 6.0.4, measured):
+#         /var/lib/incus/unix.socket       group incus-admin  0660
+#         /var/lib/incus/unix.socket.user  group incus        0660
+#     incus-admin opens the first and not the second, and the second is the
+#     only one that provisions a user-<uid> project. An earlier revision of
+#     this script skipped the usermod for an admin member, reasoning that
+#     'incus' is a subset of incus-admin — true of the API, false of the
+#     filesystem: the pinned touch below took EACCES, the '|| true' swallowed
+#     it, no project appeared, and the grant died blaming a healthy
+#     incus-user. So the group step is a real convergence for everyone.
+#   · PROVISIONING — the user-<uid> project, the boxnet narrowing, the
+#     snapshot and backup allowances, the box-net profile installed INTO that
+#     project. An incus-admin member has none of it: box_tier() resolves them
+#     to 'admin' (bin/box), so they work in the SHARED default project next to
+#     root and every other admin, with no world of their own. This script is
+#     the only thing that provisions one, and refusing left them unable to get
+#     it without first being taken out of incus-admin.
+# So provision, and say plainly at the end what the provisioning does not do.
+admin_member=0
 if id -nG "$user" | tr ' ' '\n' | grep -qx incus-admin; then
-  echo "box grant: $user is in incus-admin — they already have the admin tier; there is nothing tighter to grant." >&2
-  exit 1
+  admin_member=1
 fi
 
 # The stack the tier converges ONTO must exist first. Checked via the daemon,
@@ -93,7 +118,11 @@ fi
 # admin re-runs. Backing out the group closes that window completely for a
 # fresh grant (their existing sessions predate the membership, so no process
 # holds it yet). A user who was already in the group keeps it: not ours to
-# take on a re-run's failure.
+# take on a re-run's failure. An incus-admin member now takes those same two
+# paths (#101): the membership IS added for them and so IS backed out, with
+# one thing extra to say either way — the rollback closes incus-user's socket
+# and never their daemon access, which outlives this failure by a route the
+# script never granted and must not pretend to control.
 added_group=0; was_member=0
 backout() {
   if [ "$added_group" -eq 1 ]; then
@@ -106,6 +135,16 @@ backout() {
       exit 1
     fi
     echo "box grant: FAILED — removed $user from 'incus' again (verified against the group database); fix the cause and re-run" >&2
+    if [ "$admin_member" -eq 1 ]; then
+      # The rollback is real and verified, but for an admin member it is not a
+      # lockout and must not read as one: what came back was incus-user's
+      # socket key, not the daemon. Say what survives, and what would end it.
+      echo "box grant: NOTE — that rollback closed incus-user's socket, NOT $user's access." >&2
+      echo "           They keep full admin socket access throughout via 'incus-admin', which this run" >&2
+      echo "           neither granted nor removed, so every project on this host stays open to them." >&2
+      echo "           Their project may be part-converged; a re-run converges the rest. To close their" >&2
+      echo "           access you must take the admin group itself:  gpasswd -d $user incus-admin" >&2
+    fi
     # The one window the database cannot close: a login STARTED between our
     # usermod and this backout keeps the group in its session credentials.
     # For a fresh grant that is a rare race, but rare is not never — name it
@@ -122,6 +161,14 @@ backout() {
     echo "box grant: FAILED with $user still holding socket access (their membership predates this run)." >&2
     echo "           their project may be part-converged — harmless in itself, and a re-run converges the rest." >&2
     echo "           if their access is not acceptable while you fix the cause:  box revoke $user" >&2
+    if [ "$admin_member" -eq 1 ]; then
+      # Same correction as above, for the member who was in BOTH groups before
+      # this run: 'box revoke' takes the 'incus' key back, and still leaves
+      # them the whole daemon.
+      echo "box grant: NOTE — $user is also in 'incus-admin', which this run neither granted nor removed:" >&2
+      echo "           'box revoke' takes back incus-user's socket key and nothing more. To close their" >&2
+      echo "           access:  gpasswd -d $user incus-admin" >&2
+    fi
   fi
 }
 trap backout EXIT
@@ -132,17 +179,63 @@ if id -nG "$user" | tr ' ' '\n' | grep -qx incus; then
 else
   $SUDO usermod -aG incus "$user"
   added_group=1
-  echo "group: added $user to 'incus' (their next login picks it up; the grant does not wait)"
+  if [ "$admin_member" -eq 1 ]; then
+    # Say why, because the group list alone would imply a restriction that is
+    # not in force — the concern the old no-op was built around. It was a
+    # cosmetic concern and this is where it gets carried: in output, not in a
+    # skipped mutation that broke the mechanism.
+    echo "group: added $user to 'incus' — NOT a new privilege ('incus-admin' already opens the daemon,"
+    echo "       and box_tier still reads them as 'admin'), but the key to a FILE: incus-user's socket is"
+    echo "       group 'incus' mode 0660, and nothing below can provision $user without it"
+  else
+    echo "group: added $user to 'incus' (their next login picks it up; the grant does not wait)"
+  fi
 fi
 
 project="user-$uid"
+
+# The incus CLI picks its socket by WRITABILITY, not by intent: with no
+# INCUS_SOCKET set it takes $INCUS_DIR/unix.socket when that is writable and
+# only falls back to unix.socket.user when it is not (client/connection.go,
+# stable-6.0 — the same branch that then defaults the project to user-<uid>).
+# For a plain 'incus' member the fallback fires and every command below lands
+# where we want it. For an incus-admin member the daemon socket IS writable,
+# so an unpinned client sails straight past incus-user — the touch would not
+# provision anything and the grant would die claiming incus-user was
+# unhealthy. Pin the socket for them, by incus's own directory rule.
+# INCUS_DIR first, then /run/incus if the daemon socket lives there, else
+# /var/lib/incus: incus's resolution order, not an approximation of it — the
+# pinned path has to name the same directory the client would have chosen.
+user_socket=""
+if [ "$admin_member" -eq 1 ]; then
+  incus_dir="${INCUS_DIR:-}"
+  if [ -z "$incus_dir" ]; then
+    incus_dir="/var/lib/incus"; [ -e /run/incus/unix.socket ] && incus_dir="/run/incus"
+  fi
+  user_socket="$incus_dir/unix.socket.user"
+  # $SUDO test, not a bare [ -e ]: revoke-user.sh documents from measurement
+  # that /var/lib/incus is not traversable by a non-root admin, so an
+  # unprivileged stat answers "absent" for a socket that is very much there —
+  # and this check EXITS on absent. Same discipline, same reason (#101 review).
+  $SUDO test -e "$user_socket" \
+    || { echo "box grant: incus-user is active but $user_socket is not there — nothing can provision $project (journalctl -u incus-user)" >&2; exit 1; }
+fi
+
+# Run the incus CLI as the granted user, on the socket that will actually
+# serve them: pinned to incus-user for an admin member, left to the CLI's own
+# resolution for everyone else (whose fallback already gets it right).
+run_as_incus() {
+  if [ -n "$user_socket" ]; then run_as "$user" env INCUS_SOCKET="$user_socket" "$@"
+  else run_as "$user" "$@"
+  fi
+}
 
 # 2. The project is created LAZILY, on the user's first contact with
 # incus-user — an admin cannot pre-create it (incus-user would fight over
 # it), so make that first contact happen now, as the user.
 if ! incus project show "$project" >/dev/null 2>&1 </dev/null; then
   echo "project: touching incus-user as $user to create $project..."
-  run_as "$user" timeout 60 incus project list >/dev/null 2>&1 || true
+  run_as_incus timeout 60 incus project list >/dev/null 2>&1 || true
   incus project show "$project" >/dev/null 2>&1 </dev/null \
     || { echo "box grant: incus-user did not create $project — is incus-user.socket healthy? (journalctl -u incus-user)" >&2; exit 1; }
   echo "project: $project created"
@@ -205,10 +298,53 @@ echo "profile: box-net installed in $project"
 
 # Prove the grant from the USER's side of the socket — the only side that
 # matters. This catches the failure the steps above cannot see one at a time:
-# a converged project the user still cannot reach.
-run_as "$user" timeout 30 incus profile show box-net >/dev/null 2>&1 \
-  || { echo "box grant: converged, but $user cannot see the box-net profile through incus-user — check journalctl -u incus-user" >&2; exit 1; }
+# a converged project the user still cannot reach. For an admin member the
+# project is named explicitly: an unqualified profile show over the pinned
+# incus-user socket asks about 'default', and over their own admin socket it
+# would answer from the shared default project — a green that proves the
+# convergence nothing at all.
+if [ -n "$user_socket" ]; then
+  run_as_incus timeout 30 incus --project "$project" profile show box-net >/dev/null 2>&1 \
+    || { echo "box grant: converged, but $user cannot reach $project's box-net profile through incus-user — check journalctl -u incus-user" >&2; exit 1; }
+else
+  run_as "$user" timeout 30 incus profile show box-net >/dev/null 2>&1 \
+    || { echo "box grant: converged, but $user cannot see the box-net profile through incus-user — check journalctl -u incus-user" >&2; exit 1; }
+fi
 
 trap - EXIT   # converged and verified: the grant stands
-echo "granted: $user has the restricted tier — their 'box new' lands on the hardened boxnet."
-echo "         (their boxes are theirs alone; 'box revoke $user' takes the tier back)"
+if [ "$admin_member" -eq 1 ]; then
+  # The honest version of what the old refusal was gesturing at. The project
+  # is real, converged and theirs — that is what they were missing and what
+  # this run supplied. What it is NOT is confinement, in two distinct ways
+  # that both come from incus-admin winning at the socket, and both belong in
+  # the output rather than in a hard exit:
+  #   · nothing here binds them. Every restriction converged above describes
+  #     project $project; the default project and every other user's instances
+  #     stay one flag away, and no setting inside $project can say otherwise
+  #     while they hold that group.
+  #   · nothing here even routes them, yet. Their unpinned CLI resolves to the
+  #     writable daemon socket and so to the DEFAULT project (the socket rule
+  #     cited at step 2), so their 'box new' still lands beside the other
+  #     admins' until they either drop incus-admin — at which point this
+  #     project becomes their automatic home, no re-run needed — or pin
+  #     INCUS_SOCKET at incus-user by hand.
+  # That "no re-run needed" is a real promise only because the group step
+  # above put them in 'incus' (#101): dropping incus-admin leaves them a
+  # plain 'incus' member, which is exactly the tier whose client falls back
+  # to unix.socket.user and lands in $project. Under the old no-op they would
+  # have been left in NEITHER group — box_tier 'none', no socket at all, and
+  # a converged project they could not open.
+  echo "granted: $user has their own converged project $project (boxnet-only, snapshots, backups, box-net)."
+  echo "         CAVEAT — $user is in 'incus-admin', which wins at the socket: this is a"
+  echo "         DEFAULT PLACEMENT, not a confinement. They can reach the default project and"
+  echo "         every other user's instances whenever they choose to."
+  echo "         And until incus-admin goes, their own 'box' commands keep landing in the DEFAULT"
+  echo "         project — the admin socket is the one their client picks. To make $project theirs"
+  echo "         for real:  gpasswd -d $user incus-admin   (no re-grant needed: they keep 'incus', so"
+  echo "         their client falls straight back to incus-user and $project is already ready)."
+  echo "         'box revoke $user' unwinds this provisioning and takes the 'incus' membership back;"
+  echo "         it cannot touch their admin access."
+else
+  echo "granted: $user has the restricted tier — their 'box new' lands on the hardened boxnet."
+  echo "         (their boxes are theirs alone; 'box revoke $user' takes the tier back)"
+fi
