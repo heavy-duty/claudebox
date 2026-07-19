@@ -119,16 +119,22 @@ check "release.yml: the release is bound to the pushed tag (--verify-tag)" 0 "" 
 # ---------------------------------------------------------------------------
 check "release.yml: the tag-push trigger is still present (manual fallback)" 0 "" \
   grep -qF 'tags: ["**"]' "$RY"
-check "release.yml: fires on closed pull requests..." 0 "" \
-  grep -qF 'types: [closed]' "$RY"
-check "release.yml: ...into main" 0 "" \
+# The merge door rides pushes to MAIN, not pull_request events: a fork PR
+# run gets a read-only GITHUB_TOKEN (permissions: cannot raise it), and
+# every ceremony PR this org merges is cross-repo from the bot fork — the
+# tag create would 403 after green asserts (#97 round 1). The label — the
+# operator's intent — is read via the API off the merge commit's PR.
+check "release.yml: the merge door rides pushes to main (fork-token-proof)" 0 "" \
   grep -qF 'branches: [main]' "$RY"
-check "release.yml: the merge door gates on merged == true (closed-unmerged never fires)" 0 "" \
-  grep -qF 'github.event.pull_request.merged == true' "$RY"
-check "release.yml: ...AND on the release label, read from the event payload" 0 "" \
-  grep -qF "contains(github.event.pull_request.labels.*.name, 'release')" "$RY"
-check "release.yml: the tag door runs only on a push (a closed PR never reaches it)" 0 "" \
-  grep -qF "github.event_name == 'push'" "$RY"
+check "release.yml: the doors split on the ref — tags to the tag door..." 0 "" \
+  grep -qF "startsWith(github.ref, 'refs/tags/')" "$RY"
+check "release.yml: ...main to the merge door" 0 "" \
+  grep -qF "github.ref == 'refs/heads/main'" "$RY"
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "release.yml: the release label is read via the API off the merge commit" 0 "" \
+  grep -qF 'commits/$GITHUB_SHA/pulls' "$RY"
+check "release.yml: a transition without a labeled PR refuses" 0 "" \
+  grep -qF "no merged, release-labeled PR is behind this commit" "$RY"
 check "release.yml: assert — VERSION at the merge commit is non--dev" 0 "" \
   grep -qF '*-dev)' "$RY"
 check "release.yml: assert — VERSION changed IN THIS PR (first parent vs merge)" 0 "" \
@@ -139,7 +145,7 @@ check "release.yml: assert — no existing release for the version" 0 "" \
   grep -qF 'gh release view' "$RY"
 check "release.yml: BOTH doors extract notes via the shared script" 0 "2" \
   grep -cF 'bash .github/scripts/release-notes.sh' "$RY"
-check "release.yml: every failing assert creates NOTHING (both doors)" 0 "4" \
+check "release.yml: every failing assert creates NOTHING (both doors)" 0 "5" \
   grep -cF 'creating nothing' "$RY"
 check "release.yml: the merge door creates the tag ref via the API..." 0 "" \
   grep -qF 'ref=refs/tags/' "$RY"

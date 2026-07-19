@@ -24,10 +24,16 @@ name: release
 # pure-bash tree, GitHub's source tarball for the tag IS the package, and
 # install.sh downloads exactly that.
 on:
-  pull_request:
-    types: [closed]
-    branches: [main]
   push:
+    # The merge door rides pushes to MAIN, not pull_request events, for one
+    # load-bearing reason the first review round caught (#97): a workflow
+    # run triggered by a pull_request from a public FORK gets a READ-ONLY
+    # GITHUB_TOKEN — `permissions:` cannot raise that ceiling — and every
+    # ceremony PR this org has ever merged is cross-repo from the bot fork.
+    # The asserts would pass and the tag create would 403, red on main,
+    # every release. A push to main is an in-repo event with the full write
+    # token, whoever authored the PR.
+    branches: [main]
     # Every tag, not a shape filter (rig's precedent): a tag that mismatches
     # VERSION — a habitual v0.7.0, a typo — must fail the assert LOUDLY
     # below, not be silently skipped by a pattern that didn't match.
@@ -37,24 +43,20 @@ permissions:
   contents: write # create the tag ref + gh release create
 
 jobs:
-  # The merge door (#96). Closed-unmerged never fires, and a merged PR
-  # without the hand-set `release` label (LABELS.md: automation never guesses
-  # intent) is skipped. The label is read from the event payload, not the
-  # API, so no pull-requests permission is needed.
+  # The merge door (#96), riding pushes to main (see the trigger comment:
+  # fork PRs get a read-only token on pull_request events). The hand-set
+  # `release` label (LABELS.md: automation never guesses intent) is read via
+  # the API off the merge commit's PR, inside the decide step below.
   release-on-merge:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.merged == true &&
-      contains(github.event.pull_request.labels.*.name, 'release')
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          # The merge commit plus its first parent (fetch-depth: 2): the
-          # first parent is main the instant before this PR landed, which the
-          # changed-in-this-PR assert compares against. (The payload's
-          # base.sha can be stale; the merge commit's first parent cannot.)
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          # The pushed head plus its first parent (fetch-depth: 2): the
+          # first parent is main the instant before the PR landed, which the
+          # changed-in-this-PR assert compares against.
+          ref: ${{ github.sha }}
           fetch-depth: 2
       # The decide step — the version asserts fused, because the `release`
       # label carries TWO legitimate meanings (LABELS.md: "release flow and
@@ -100,6 +102,16 @@ jobs:
             echo "VERSION '$ver' is bare, unchanged by this PR, and never released — the label says ship but this PR did not mint the version. Refusing to guess — creating nothing." >&2
             exit 1
           fi
+          # The version transitioned — now the LABEL, the operator's declared
+          # intent, read via the API because a push event carries no PR
+          # payload (and the PR lives on a fork — the trigger comment). No
+          # merged, release-labeled PR behind this commit = a transition
+          # nobody declared: refuse.
+          if ! gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+              -q '[.[] | select(.merged_at != null) | .labels[].name] | index("release") != null' | grep -qx true; then
+            echo "VERSION transitioned ('$base' -> '$ver') but no merged, release-labeled PR is behind this commit — a release is a labeled ceremony PR (#96), not a bare push — creating nothing." >&2
+            exit 1
+          fi
           echo "ceremony=yes" >> "$GITHUB_OUTPUT"
       - name: release notes — the version's own CHANGELOG.md section
         if: steps.decide.outputs.ceremony == 'yes'
@@ -129,7 +141,7 @@ jobs:
         # off it — this step is the release's only chance to publish.
         env:
           GH_TOKEN: ${{ github.token }}
-          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGE_SHA: ${{ github.sha }}
         run: |
           ver="$(cat VERSION)"
           gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$ver" -f "sha=$MERGE_SHA"
@@ -139,7 +151,7 @@ jobs:
   # to the push event so a closed PR (the trigger above) never runs it
   # against a branch ref.
   release:
-    if: github.event_name == 'push'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
