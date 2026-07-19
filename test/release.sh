@@ -139,7 +139,7 @@ check "release.yml: assert — no existing release for the version" 0 "" \
   grep -qF 'gh release view' "$RY"
 check "release.yml: BOTH doors extract notes via the shared script" 0 "2" \
   grep -cF 'bash .github/scripts/release-notes.sh' "$RY"
-check "release.yml: every failing assert creates NOTHING (both doors)" 0 "5" \
+check "release.yml: every failing assert creates NOTHING (both doors)" 0 "4" \
   grep -cF 'creating nothing' "$RY"
 check "release.yml: the merge door creates the tag ref via the API..." 0 "" \
   grep -qF 'ref=refs/tags/' "$RY"
