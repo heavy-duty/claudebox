@@ -170,8 +170,14 @@ check "release.yml: decide — post-release-window work no-ops green" 0 "" \
   grep -qF "release-flow work merged in the post-release window" "$RY"
 check "release.yml: decide — bare, unchanged, never released refuses to guess" 0 "" \
   grep -qF "Refusing to guess" "$RY"
-check "release.yml: decide gates every later merge-door step on ceremony=yes" 0 "3" \
+check "release.yml: decide gates every later merge-door step on ceremony=yes" 0 "4" \
   grep -cF "if: steps.decide.outputs.ceremony == 'yes'" "$RY"
+# The release re-arms main itself: the post-release -dev bump is arithmetic,
+# not judgment, so it rides the same job — direct push, PR fallback.
+check "release.yml: the release bumps main to the next -dev itself" 0 "" \
+  grep -qF "bump main to the next -dev" "$RY"
+check "release.yml: ...with a PR fallback when the direct push is refused" 0 "" \
+  grep -qF "opening the bump PR instead" "$RY"
 
 # ---------------------------------------------------------------------------
 # latest_release_tag — extracted from install.sh (the source-the-pure-function

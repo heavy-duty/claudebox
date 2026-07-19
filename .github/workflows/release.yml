@@ -146,6 +146,37 @@ jobs:
           ver="$(cat VERSION)"
           gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$ver" -f "sha=$MERGE_SHA"
           gh release create "$ver" --verify-tag --title "$ver" --notes-file "$RUNNER_TEMP/notes.md"
+      # The post-release bump, folded into the release act (#96 followup —
+      # operator decision: a mechanical one-liner deserves no PR of its
+      # own). X.Y.(Z+1)-dev is arithmetic, not judgment: derived, committed
+      # straight to main with this job's token. A GITHUB_TOKEN push fires
+      # no workflows (anti-recursion), so the bump triggers neither this
+      # door nor a red run; should branch protection ever refuse the direct
+      # push, the step opens the bump PR itself and says so, loudly,
+      # instead of leaving main armed to impersonate the release.
+      - name: bump main to the next -dev — the release re-arms main itself
+        if: steps.decide.outputs.ceremony == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(cat VERSION)"
+          next="$(printf '%s' "$ver" | awk -F. '{ printf "%s.%s.%s-dev", $1, $2, $3 + 1 }')"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git checkout -B main origin/main
+          printf '%s\n' "$next" > VERSION
+          git add VERSION
+          git commit -m "chore: bump main to $next — a dev install must not impersonate $ver"
+          if ! git push origin main; then
+            echo "direct push refused (branch protection?) — opening the bump PR instead" >&2
+            git checkout -b "chore/bump-$next"
+            git push origin "chore/bump-$next"
+            gh pr create -R "$GITHUB_REPOSITORY" --head "chore/bump-$next" \
+              --title "chore: bump main to $next" \
+              --body "The post-release re-arm, opened by release.yml because the direct push was refused. One file, one line." \
+              --label release
+          fi
 
   # The tag door (#83) — the manual fallback and backfill, unchanged. Gated
   # to the push event so a closed PR (the trigger above) never runs it
