@@ -113,6 +113,45 @@ check "release.yml: the release is bound to the pushed tag (--verify-tag)" 0 "" 
   grep -qF -- '--verify-tag' "$RY"
 
 # ---------------------------------------------------------------------------
+# release.yml, the merge door (#96) — merging the release-labeled PR IS the
+# release. Same daemon-free discipline: the gate, the four asserts, and the
+# same-job tag+publish are grep-pinned, fail-closed.
+# ---------------------------------------------------------------------------
+check "release.yml: the tag-push trigger is still present (manual fallback)" 0 "" \
+  grep -qF 'tags: ["**"]' "$RY"
+check "release.yml: fires on closed pull requests..." 0 "" \
+  grep -qF 'types: [closed]' "$RY"
+check "release.yml: ...into main" 0 "" \
+  grep -qF 'branches: [main]' "$RY"
+check "release.yml: the merge door gates on merged == true (closed-unmerged never fires)" 0 "" \
+  grep -qF 'github.event.pull_request.merged == true' "$RY"
+check "release.yml: ...AND on the release label, read from the event payload" 0 "" \
+  grep -qF "contains(github.event.pull_request.labels.*.name, 'release')" "$RY"
+check "release.yml: the tag door runs only on a push (a closed PR never reaches it)" 0 "" \
+  grep -qF "github.event_name == 'push'" "$RY"
+check "release.yml: assert — VERSION at the merge commit is non--dev" 0 "" \
+  grep -qF '*-dev)' "$RY"
+check "release.yml: assert — VERSION changed IN THIS PR (first parent vs merge)" 0 "" \
+  grep -qF 'git show HEAD^1:VERSION' "$RY"
+check "release.yml: assert — no existing tag for the version" 0 "" \
+  grep -qF 'git/ref/tags/' "$RY"
+check "release.yml: assert — no existing release for the version" 0 "" \
+  grep -qF 'gh release view' "$RY"
+check "release.yml: BOTH doors extract notes via the shared script" 0 "2" \
+  grep -cF 'bash .github/scripts/release-notes.sh' "$RY"
+check "release.yml: every failing assert creates NOTHING (both doors)" 0 "5" \
+  grep -cF 'creating nothing' "$RY"
+check "release.yml: the merge door creates the tag ref via the API..." 0 "" \
+  grep -qF 'ref=refs/tags/' "$RY"
+# shellcheck disable=SC2016  # the $-string is a literal in the target file
+check "release.yml: ...at the MERGE commit" 0 "" \
+  grep -qF 'sha=$MERGE_SHA' "$RY"
+check "release.yml: BOTH doors publish bound to an existing tag (--verify-tag)" 0 "2" \
+  grep -cF -- '--verify-tag' "$RY"
+check "release.yml: tag + publish share one job (the anti-recursion shape)" 0 "" \
+  grep -qF 'anti-recursion' "$RY"
+
+# ---------------------------------------------------------------------------
 # latest_release_tag — extracted from install.sh (the source-the-pure-function
 # trick) and driven against a shim curl. The shim serves the ONE seam the
 # function uses: -w '%{redirect_url}' on the releases/latest probe.

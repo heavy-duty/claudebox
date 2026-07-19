@@ -1,13 +1,32 @@
 name: release
-# The release publisher (#83), on a bare X.Y.Z tag push (the 0.6.0 tag set
-# the precedent — no 'v' prefix). Two facts, then one act: the tag must name
-# the tree's own VERSION (a mismatch fails loudly and creates NOTHING — a
-# wrong release is worse than a missing one), and the release body is that
-# version's CHANGELOG.md section (.github/scripts/release-notes.sh, shared
-# with test/release.sh) — the curated prose, not the generated PR list. No
-# assets are uploaded: for a pure-bash tree, GitHub's source tarball for the
-# tag IS the package, and install.sh downloads exactly that.
+# The release publisher — two doors into the same act (#83, #96):
+#
+#  * The merge door (#96): merging the `release`-labeled PR into main IS the
+#    release. The label is the intent, the version transition is the
+#    interlock — VERSION at the merge commit must be non-`-dev` AND must have
+#    changed in this PR, so a mislabeled ordinary PR fails loudly and creates
+#    NOTHING. The job then tags the merge commit via the API and publishes,
+#    in the SAME job on purpose: a GITHUB_TOKEN-created tag does not trigger
+#    other workflows (GitHub's anti-recursion), so that tag can never re-enter
+#    the tag door below and double-publish — publishing here is the only
+#    chance, and the no-existing-tag/release assert covers a manual tag
+#    racing the merge.
+#
+#  * The tag door (#83) stays as the documented manual fallback and backfill,
+#    on a bare X.Y.Z tag push (the 0.6.0 tag set the precedent — no 'v'
+#    prefix). The tag must name the tree's own VERSION (a mismatch fails
+#    loudly and creates NOTHING — a wrong release is worse than a missing
+#    one).
+#
+# Both doors publish the release body from that version's CHANGELOG.md
+# section (.github/scripts/release-notes.sh, shared with test/release.sh) —
+# the curated prose, not the generated PR list. No assets are uploaded: for a
+# pure-bash tree, GitHub's source tarball for the tag IS the package, and
+# install.sh downloads exactly that.
 on:
+  pull_request:
+    types: [closed]
+    branches: [main]
   push:
     # Every tag, not a shape filter (rig's precedent): a tag that mismatches
     # VERSION — a habitual v0.7.0, a typo — must fail the assert LOUDLY
@@ -15,10 +34,83 @@ on:
     tags: ["**"]
 
 permissions:
-  contents: write # gh release create
+  contents: write # create the tag ref + gh release create
 
 jobs:
+  # The merge door (#96). Closed-unmerged never fires, and a merged PR
+  # without the hand-set `release` label (LABELS.md: automation never guesses
+  # intent) is skipped. The label is read from the event payload, not the
+  # API, so no pull-requests permission is needed.
+  release-on-merge:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge commit plus its first parent (fetch-depth: 2): the
+          # first parent is main the instant before this PR landed, which the
+          # changed-in-this-PR assert compares against. (The payload's
+          # base.sha can be stale; the merge commit's first parent cannot.)
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 2
+      - name: VERSION at the merge commit must be a release, not -dev
+        run: |
+          ver="$(cat VERSION)"
+          case "$ver" in
+            *-dev)
+              echo "VERSION is '$ver' — still -dev, so this merge is not a release ceremony, whatever its label says — creating nothing." >&2
+              exit 1 ;;
+          esac
+      - name: VERSION must have CHANGED in this PR — the -dev interlock
+        # Only the release PR moves VERSION off -dev. A mislabeled ordinary
+        # PR merged while main already carries a release version dies here,
+        # loudly, instead of re-releasing whatever VERSION says.
+        run: |
+          ver="$(cat VERSION)"
+          base="$(git show HEAD^1:VERSION)"
+          if [ "$base" = "$ver" ]; then
+            echo "VERSION '$ver' did not change in this PR (the base commit already carried it) — this is not the release PR — creating nothing." >&2
+            exit 1
+          fi
+      - name: release notes — the version's own CHANGELOG.md section
+        # release-notes.sh fails loudly on a missing/empty section, which
+        # fails the release here — before anything is created.
+        run: |
+          bash .github/scripts/release-notes.sh "$(cat VERSION)" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+      - name: nothing may exist yet — no tag, no release (idempotency)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver="$(cat VERSION)"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$ver" --silent 2>/dev/null; then
+            echo "tag '$ver' already exists — a manual tag beat this run, or this is a re-run of a published release — creating nothing." >&2
+            exit 1
+          fi
+          if gh release view "$ver" --json name >/dev/null 2>&1; then
+            echo "release '$ver' already exists — creating nothing." >&2
+            exit 1
+          fi
+      - name: tag the merge commit, then publish — one job, on purpose
+        # Same job as the asserts: the GITHUB_TOKEN-created tag triggers no
+        # workflows (GitHub's anti-recursion), so the tag door cannot fire
+        # off it — this step is the release's only chance to publish.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          ver="$(cat VERSION)"
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$ver" -f "sha=$MERGE_SHA"
+          gh release create "$ver" --verify-tag --title "$ver" --notes-file "$RUNNER_TEMP/notes.md"
+
+  # The tag door (#83) — the manual fallback and backfill, unchanged. Gated
+  # to the push event so a closed PR (the trigger above) never runs it
+  # against a branch ref.
   release:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

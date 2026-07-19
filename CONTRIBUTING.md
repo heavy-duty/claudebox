@@ -43,7 +43,9 @@ labels tell you where everything is without opening anything.
 
 ## Releases
 
-A release is a PR, then a tag ([#83](https://github.com/heavy-duty/box/issues/83)):
+A release is a PR, and merging it ships it
+([#96](https://github.com/heavy-duty/box/issues/96), building on
+[#83](https://github.com/heavy-duty/box/issues/83)):
 
 1. **The release PR** — `release: X.Y.Z`, labeled `release` — bumps `VERSION`
    from `X.Y.Z-dev` and stamps the `## Unreleased` section with version +
@@ -52,13 +54,22 @@ A release is a PR, then a tag ([#83](https://github.com/heavy-duty/box/issues/83
    the full drill on real hardware, recorded in
    [drill/RUNS.md](drill/RUNS.md) — CI proves the tier's semantics on every
    PR, a release still proves the boundary.
-2. **Merge, then tag the merge commit** bare `X.Y.Z` — no `v` prefix, the
-   `0.6.0` tag set the precedent — and push the tag.
-   [release.yml](.github/workflows/release.yml) takes it from there: it
-   asserts the tag names the tree's own `VERSION` (a mismatch fails loudly
-   and creates nothing) and publishes the GitHub release with that version's
-   `CHANGELOG.md` section as the body. No assets — the source tarball for
-   the tag is the package, and `install.sh` downloads exactly that.
+2. **The maintainer's merge IS the release.**
+   [release.yml](.github/workflows/release.yml) fires on the merged,
+   `release`-labeled PR and asserts before creating anything: `VERSION` at
+   the merge commit is non-`-dev` **and changed in this PR** (the `-dev`
+   interlock — a mislabeled ordinary PR fails loudly and creates nothing),
+   the version's `CHANGELOG.md` section extracts non-empty, and no tag or
+   release exists for it yet. Then, in the same job, it tags the merge
+   commit bare `X.Y.Z` (no `v` prefix, the `0.6.0` precedent) and publishes
+   the GitHub release with that section as the body. No assets — the source
+   tarball for the tag is the package, and `install.sh` downloads exactly
+   that.
+
+   *Manual fallback/backfill*: the tag-push path stays. Tagging the merge
+   commit bare `X.Y.Z` by hand and pushing the tag still publishes the same
+   way (release.yml asserts the tag names the tree's own `VERSION`) — for
+   backfills, or the day the merge path is red.
 3. **Immediately after: bump `main`'s `VERSION` to `X.Y.(Z+1)-dev`.** Not
    cosmetic — the versioned layout names install trees after `VERSION`, so a
    `main` install without the bump would land in `versions/X.Y.Z` and

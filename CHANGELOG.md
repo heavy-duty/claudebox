@@ -3,6 +3,28 @@
 History before 0.5.0 lives in git and in [drill/RUNS.md](drill/RUNS.md),
 which records not just what changed but what each drill run proved.
 
+## Unreleased
+
+### Added
+
+- **Merging the release PR IS the release** (#96) — the 0.7.0 ceremony ended
+  in an absence: the release PR merged with four approvals and nothing
+  happened, correctly, because publishing hung off a separate, manual,
+  silent-when-forgotten tag push — a failure shape with no error and no red
+  X. The ship decision already lives in the release PR (the one PR whose
+  whole diff is "the version leaves `-dev`"), so `release.yml` now fires on
+  a merged, `release`-labeled PR into main: the label is the intent, the
+  version transition is the interlock — `VERSION` at the merge commit must
+  be non-`-dev` AND must have changed in this PR, so a mislabeled ordinary
+  PR fails loudly and creates nothing — the notes must extract from the
+  changelog, and no tag or release may exist yet. Then, in the same job, it
+  tags the merge commit via the API and publishes; same-job on purpose,
+  because a `GITHUB_TOKEN`-created tag triggers no workflows, which is also
+  what makes double-publish impossible. The tag-push path stays unchanged as
+  the documented manual fallback and backfill (it shipped 0.7.0 itself).
+  `test/release.sh` grep-pins the merged+labeled gate, all four asserts, and
+  the same-job tag+publish in the same daemon-free, fail-closed style.
+
 ## 0.7.0 — 2026-07-19
 
 ### Added
