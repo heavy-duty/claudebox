@@ -267,6 +267,9 @@ template's box.env, then defaults. Flags shape a fresh mint only — a --from
 clone carries its source's resources. Resources are all a flag can touch:
 there is no flag for a network or a security key, on purpose.
 
+BOX_LAUNCH_TIMEOUT=<seconds> (default 600) bounds the 'incus launch' call —
+a launch that overruns it fails loudly instead of hanging forever (#93).
+
   box new --name scratch                     # blank, the default
   box new --name work --template claude
   box new --name lean --template claude --cpu 2 --memory 3GiB
@@ -1040,16 +1043,35 @@ cmd_new() {
       --config limits.memory="$T_MEMORY" \
       --config cloud-init.user-data="$(render_userdata "$root/templates/$t/user-data.yaml")" \
       "${extra[@]}" </dev/null || rc=$?
-    # 124 = the budget fired (TERM landed); 137 = the -k KILL was needed.
+    # 124 = the budget fired (TERM landed); 137 = the -k KILL was needed —
+    # or, on 137, something external (an OOM kill) beat the budget to it.
     if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
       echo >&2
-      echo "box: 'incus launch' WEDGED — killed after ${budget}s, and the instance was never created." >&2
-      echo "box: this is the #93 failure: the incus client hangs with NO server-side operation" >&2
-      echo "box: ('incus operation list' is empty, the daemon journal is quiet). An immediate" >&2
-      echo "box: retry of the exact same 'box new' has been observed to succeed, both times it" >&2
-      echo "box: was measured. If it persists, diagnose the host:  box doctor" >&2
+      # timeout only proves the CLIENT overran the budget. 'incus launch' is
+      # create-then-start, so a slow-but-progressing launch (first mint
+      # pulling an uncached image, say) may already have REGISTERED the
+      # instance — in which case "never created, retry" would be exactly
+      # wrong: the retry collides with 'Instance already exists'. Probe, say
+      # which case this is, and best-effort delete either way (a no-op on
+      # the true #93 wedge, the cleanup on an overrun; also covers a create
+      # that lands in the race between the probe and the delete) so the
+      # retry advice below is safe in BOTH worlds. Review consensus on the
+      # first round of #94: all three reviewers converged on this hole.
+      if timeout -k 5 15 incus info "$instance" </dev/null >/dev/null 2>&1; then
+        echo "box: 'incus launch' OVERRAN its ${budget}s budget (killed) — but the instance WAS" >&2
+        echo "box: registered: this looks like a slow launch, not the #93 client wedge. Removing" >&2
+        echo "box: the partial instance so a retry starts clean..." >&2
+      else
+        echo "box: 'incus launch' WEDGED — killed after ${budget}s (or killed from outside), and" >&2
+        echo "box: the instance was never created. This is the #93 failure: the incus client" >&2
+        echo "box: hangs with NO server-side operation ('incus operation list' is empty, the" >&2
+        echo "box: daemon journal is quiet). An immediate retry of the exact same 'box new' has" >&2
+        echo "box: been observed to succeed, both times it was measured." >&2
+      fi
+      timeout -k 5 30 incus delete --force "$instance" </dev/null >/dev/null 2>&1 || true
+      echo "box: if it persists, diagnose the host:  box doctor" >&2
       echo "box: (a genuinely slower mint can raise the budget: BOX_LAUNCH_TIMEOUT=<seconds>)" >&2
-      die "incus launch wedged with no server-side operation — retry the same command (#93)"
+      die "incus launch did not finish inside ${budget}s — retry the same command (#93)"
     elif [ "$rc" -ne 0 ]; then
       # Not a wedge: incus refused and said why on stderr, right above.
       die "incus launch failed (exit $rc)"

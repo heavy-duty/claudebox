@@ -403,8 +403,25 @@ check "new: the launch pins stdin (RUNS.md trap 13)" 0 "" bash -c '
 check "new: the wedge failure is loud — retry hint, the doctor, and #93" 0 "" bash -c '
   fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
   printf "%s\n" "$fn" | grep -A6 "WEDGED" | grep -q "observed to succeed" &&
-  printf "%s\n" "$fn" | grep -A6 "WEDGED" | grep -q "box doctor" &&
-  printf "%s\n" "$fn" | grep "incus launch wedged" | grep -q "#93"'
+  printf "%s\n" "$fn" | grep -q "box doctor" &&
+  printf "%s\n" "$fn" | grep "did not finish inside" | grep -q "#93"'
+# timeout proves only that the CLIENT overran the budget: launch is
+# create-then-start, so a slow launch may have REGISTERED the instance and a
+# blind "never created, retry" would send the operator into 'Instance already
+# exists' (#94 round-1, all three reviewers). The timeout path must probe the
+# instance, tell the two stories apart, and best-effort delete either way so
+# the retry advice is safe in both worlds.
+check "new: the timeout path probes before claiming never-created (#94 r1)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "incus info" | grep -q "\$instance"'
+check "new: the timeout path best-effort deletes, so retry is always clean" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "incus delete --force" | grep -q "|| true"'
+check "new: the overran-but-registered branch says so (not the wedge story)" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep "OVERRAN" | grep -q "budget"'
+check "new: BOX_LAUNCH_TIMEOUT is documented in box help new" 0 "" bash -c '
+  "'"$ROOT"'/bin/box" help new | grep "BOX_LAUNCH_TIMEOUT" | grep -q 600'
 # staging's creds-holding join stays OPERATOR-run: cmd_new may print it as a
 # next step, but no template and no code path auto-runs "rig bootstrap
 # workload" — the one absence that keeps box creds-free end to end.
