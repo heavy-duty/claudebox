@@ -19,7 +19,9 @@ set -euo pipefail
 #   VERSION ends in -dev  ->  the top section MUST be '## Unreleased'
 #   VERSION is bare       ->  the top section may be '## Unreleased' (armed,
 #                             the ceremony's own re-arm) or the stamped
-#                             section for exactly that VERSION
+#                             section for exactly that VERSION — AND the
+#                             section for that VERSION must exist and carry
+#                             prose, because it is the one about to ship
 #
 # Keying on VERSION is the whole design, and the reason this is not simply
 # "require '## Unreleased'". That unconditional form is what rig#44 and
@@ -40,6 +42,11 @@ set -euo pipefail
 
 changelog="${1:-CHANGELOG.md}"
 version_file="${2:-VERSION}"
+
+# release-notes.sh lives beside this script; the bare-VERSION branch runs it
+# rather than re-implementing the extraction, so the guard and the publisher
+# cannot disagree about what a section is or when one counts as empty.
+here="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 [ -f "$changelog" ]    || { echo "changelog-armed: no such file: $changelog" >&2; exit 1; }
 [ -f "$version_file" ] || { echo "changelog-armed: no such file: $version_file" >&2; exit 1; }
@@ -99,6 +106,36 @@ changelog-armed: VERSION is '$ver' but the top section of $changelog is:
   itself. A stamped section naming a different version means the ceremony
   stamped the wrong number, and the published release body would come from
   the wrong section.
+EOF
+      exit 1
+    fi
+    # The top heading is deliberately left UNCONSTRAINED above — both ceremony
+    # shapes must stay legal, which is the #44 / cast#108 lesson and is not
+    # negotiable. That asymmetry leaves a gap of its own, the HALF-ceremony
+    # tree: VERSION bumped to the release, a populated '## Unreleased' still on
+    # top, and no stamped section for the version anywhere. The test above is
+    # false on its first clause, short-circuits, and passes. Nothing else
+    # refuses until release.yml extracts the notes — which happens AFTER the
+    # merge, on main, and publishes a release with an empty body, the worst
+    # place for this to land. So make the same assert one step earlier by
+    # running the very script release.yml runs (heavy-duty/rig#67).
+    if ! bash "$here/release-notes.sh" "$ver" "$changelog" >/dev/null 2>&1; then
+      cat >&2 <<EOF
+changelog-armed: VERSION is '$ver' but $changelog has no non-empty section for
+  '$ver'. The top section is:
+
+    $top
+
+  This is a HALF-DONE ceremony: the version was bumped but its section was
+  never stamped — the stamp is MISSING, not misnumbered. A bare VERSION means
+  this tree is a release, and the section it is about to publish has to exist
+  and have prose in it. Left alone, this passes CI, merges, and only then does
+  release.yml refuse to extract the notes — on main, after the fact, with the
+  release already half-shipped.
+
+  The fix is the ceremony's first edit (CONTRIBUTING.md, "Releases"): stamp
+  '## Unreleased' into '## $ver — DATE', then put an empty '## Unreleased'
+  back above it.
 EOF
       exit 1
     fi

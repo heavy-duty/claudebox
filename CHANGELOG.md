@@ -63,7 +63,22 @@ which records not just what changed but what each drill run proved.
   false by construction on the ceremony PR's own tree, which is why rig#44
   and heavy-duty/cast#108 both had to revert it. So a forgotten re-arm
   does not block the release; it turns `main` red on the very next push,
-  the automatic `-dev` bump the release itself makes.
+  the automatic `-dev` bump the release itself makes. Leaving the bare
+  branch's top heading unconstrained is what keeps both ceremony shapes
+  legal, and a review round on the sibling fix (heavy-duty/cast#114) found
+  the gap that asymmetry leaves: a **half-ceremony** tree — `VERSION`
+  bumped, `## Unreleased` still populated on top, and the section for that
+  version never stamped — makes the wrong-number test false on its first
+  clause, short-circuits, and passes. Nothing then refuses until
+  `release.yml` extracts the notes, which is *after* the merge, on `main`,
+  with the release already half-shipped. So the bare branch now also
+  requires that the section it is about to publish exists and is non-empty,
+  and it asserts that by running `release-notes.sh` — the very script
+  `release.yml` runs — so the guard and the publisher cannot drift apart
+  over what a section is. The message is its own: a missing stamp is not a
+  misnumbered one, and an operator sent to correct a version number that is
+  already right will not find the real problem. Matches
+  heavy-duty/rig#67, so the three repos agree.
 - **`box restore` asks before it destroys — and the confirmation prompt is
   now the row's, not rm's** (#105) — `restore` and `rm` both irreversibly
   discard user state, and only one of them asked. The table gave `restore`

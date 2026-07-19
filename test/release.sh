@@ -229,6 +229,30 @@ check "armed: ...and so does the RE-ARMED ceremony tree (the shape #108 asks for
 T="$(tree rel-wrong 0.7.1 '## 0.7.0 — 2026-07-19' '' '- **Some other release**')"
 check "armed: a bare VERSION under someone ELSE's stamped section fails" 1 "wrong number" armed "$T"
 
+# --- the HALF-ceremony: the gap the two bare-VERSION clauses leave ---------
+# VERSION bumped to the release, '## Unreleased' still populated on top, and
+# the section for that version never stamped at all. The wrong-number test
+# above is false on its FIRST clause here and short-circuits, so before
+# heavy-duty/rig#67's rule this tree passed the guard and was refused instead
+# by release.yml — at publish time, after the merge, on main, with the release
+# already half-shipped. Caught here one step earlier, by running the same
+# extraction release.yml runs.
+T="$(tree rel-half 0.8.0 '## Unreleased' '' '- **A pending entry**' '' '## 0.7.0 — 2026-07-19' '' '- **Shipped**')"
+check "armed: a bare VERSION whose section was never stamped fails (half-ceremony)" \
+  1 "no non-empty section" armed "$T"
+check "armed: ...and names the stamp as MISSING, not misnumbered" \
+  1 "MISSING, not misnumbered" armed "$T"
+# The wording is the whole point of the separate branch: an operator sent to
+# fix a version number that is already correct will not find the real problem.
+not_wrong_number() { ! armed "$1" 2>&1 | grep -qF 'wrong number'; }
+check "armed: ...and not as the wrong-number case, which has a different fix" \
+  0 "" not_wrong_number "$T"
+# A section that exists but carries no prose is the same failure: release.yml
+# would publish an empty body, which is what release-notes.sh already refuses.
+T="$(tree rel-empty 0.7.1 '## 0.7.1 — 2026-07-19' '' '## 0.7.0 — 2026-07-19' '' '- **Shipped**')"
+check "armed: a bare VERSION whose section is stamped but EMPTY fails" \
+  1 "no non-empty section" armed "$T"
+
 # --- degenerate trees refuse rather than pass by accident ------------------
 T="$(tree no-sections 0.7.1-dev 'Prose and no headings at all.')"
 check "armed: a changelog with no '## ' section at all fails" 1 "no '## ' section at all" armed "$T"
