@@ -180,6 +180,105 @@ check "release.yml: ...with a PR fallback when the direct push is refused" 0 "" 
   grep -qF "opening the bump PR instead" "$RY"
 
 # ---------------------------------------------------------------------------
+# changelog-armed.sh (#108) — the changelog has a heading for the NEXT entry.
+#
+# The drift this catches produces no conflict and no error: the ceremony
+# stamps '## Unreleased' away, and a PR authored before the release merges its
+# entry cleanly into the section that just shipped. box has no top-section
+# guard at all today — the two checks above pin only that the 0.6.0 and 0.5.0
+# sections still extract, which a disarmed main passes happily.
+#
+# BOTH states are constructed as real trees and the real script is run against
+# them, because the failure mode of the naive fix is precisely a state
+# mismatch: an unconditional '## Unreleased' requirement is green on main and
+# false on the ceremony PR's own tree, which is why rig#44 and
+# heavy-duty/cast#108 both had to revert one. A test that only drives the
+# -dev state would have shipped that bug again.
+# ---------------------------------------------------------------------------
+ARMED="$ROOT/.github/scripts/changelog-armed.sh"
+check "changelog-armed: runnable bash" 0 "" bash -n "$ARMED"
+
+# tree <dir> <version> <changelog-body...> — a two-file tree to run against
+tree() {
+  local d="$WORK/$1" v="$2"; shift 2
+  mkdir -p "$d"
+  printf '%s\n' "$v" > "$d/VERSION"
+  { echo "# Changelog"; echo; printf '%s\n' "$@"; } > "$d/CHANGELOG.md"
+  echo "$d"
+}
+armed() { bash "$ARMED" "$1/CHANGELOG.md" "$1/VERSION"; }
+
+# --- the -dev steady state: armed is the only legal shape ------------------
+T="$(tree dev-armed 0.7.1-dev '## Unreleased' '' '- **A pending entry**' '' '## 0.7.0 — 2026-07-19' '' '- **Shipped**')"
+check "armed: a -dev tree with '## Unreleased' on top passes" 0 "agrees" armed "$T"
+T="$(tree dev-disarmed 0.7.1-dev '## 0.7.0 — 2026-07-19' '' '- **Shipped**')"
+check "armed: a -dev tree WITHOUT it fails — the #108 drift, caught" 1 "MUST carry" armed "$T"
+check "armed: ...and the failure says how to fix it (re-arm)" 1 "re-arm" armed "$T"
+check "armed: ...naming the issue and its origin" 1 "heavy-duty/rig#66" armed "$T"
+
+# --- the ceremony PR: bare VERSION, BOTH arrangements legal ----------------
+# This is the pair that the reverted guards got wrong. Neither may fail, or
+# the release PR cannot go green and the ceremony is unshippable.
+T="$(tree rel-stamped 0.7.1 '## 0.7.1 — 2026-07-19' '' '- **This release**')"
+check "armed: a bare VERSION with its OWN stamped section on top passes" 0 "agrees" armed "$T"
+T="$(tree rel-rearmed 0.7.1 '## Unreleased' '' '## 0.7.1 — 2026-07-19' '' '- **This release**')"
+check "armed: ...and so does the RE-ARMED ceremony tree (the shape #108 asks for)" \
+  0 "agrees" armed "$T"
+# The one bare-VERSION arrangement that is wrong: a stamp naming another
+# version. release.yml would publish a body that is not this release's.
+T="$(tree rel-wrong 0.7.1 '## 0.7.0 — 2026-07-19' '' '- **Some other release**')"
+check "armed: a bare VERSION under someone ELSE's stamped section fails" 1 "wrong number" armed "$T"
+
+# --- the HALF-ceremony: the gap the two bare-VERSION clauses leave ---------
+# VERSION bumped to the release, '## Unreleased' still populated on top, and
+# the section for that version never stamped at all. The wrong-number test
+# above is false on its FIRST clause here and short-circuits, so before
+# heavy-duty/rig#67's rule this tree passed the guard and was refused instead
+# by release.yml — at publish time, after the merge, on main, with the release
+# already half-shipped. Caught here one step earlier, by running the same
+# extraction release.yml runs.
+T="$(tree rel-half 0.8.0 '## Unreleased' '' '- **A pending entry**' '' '## 0.7.0 — 2026-07-19' '' '- **Shipped**')"
+check "armed: a bare VERSION whose section was never stamped fails (half-ceremony)" \
+  1 "no non-empty section" armed "$T"
+check "armed: ...and names the stamp as MISSING, not misnumbered" \
+  1 "MISSING, not misnumbered" armed "$T"
+# The wording is the whole point of the separate branch: an operator sent to
+# fix a version number that is already correct will not find the real problem.
+not_wrong_number() { ! armed "$1" 2>&1 | grep -qF 'wrong number'; }
+check "armed: ...and not as the wrong-number case, which has a different fix" \
+  0 "" not_wrong_number "$T"
+# A section that exists but carries no prose is the same failure: release.yml
+# would publish an empty body, which is what release-notes.sh already refuses.
+T="$(tree rel-empty 0.7.1 '## 0.7.1 — 2026-07-19' '' '## 0.7.0 — 2026-07-19' '' '- **Shipped**')"
+check "armed: a bare VERSION whose section is stamped but EMPTY fails" \
+  1 "no non-empty section" armed "$T"
+
+# --- degenerate trees refuse rather than pass by accident ------------------
+T="$(tree no-sections 0.7.1-dev 'Prose and no headings at all.')"
+check "armed: a changelog with no '## ' section at all fails" 1 "no '## ' section at all" armed "$T"
+check "armed: a missing changelog refuses by path" 1 "no such file" \
+  bash "$ARMED" "$WORK/nope.md" "$ROOT/VERSION"
+check "armed: a missing VERSION refuses by path" 1 "no such file" \
+  bash "$ARMED" "$ROOT/CHANGELOG.md" "$WORK/nope-version"
+mkdir -p "$WORK/empty-ver"; : > "$WORK/empty-ver/VERSION"
+check "armed: an empty VERSION refuses" 1 "is empty" \
+  bash "$ARMED" "$ROOT/CHANGELOG.md" "$WORK/empty-ver/VERSION"
+
+# --- and the tree under test, which is the assertion that actually fires ---
+check "armed: THIS tree's VERSION and CHANGELOG.md agree" 0 "agrees" \
+  bash "$ARMED" "$ROOT/CHANGELOG.md" "$ROOT/VERSION"
+
+# The guard is only a guard if CI runs it, and the ceremony is only re-armed
+# if the ceremony step says so. Fail-closed pins on both, since a guard nobody
+# invokes and a step nobody wrote are the two ways this reverts silently.
+check "ci.yml: runs the changelog-armed guard" 0 "" \
+  grep -qF 'changelog-armed.sh' "$ROOT/.github/workflows/ci.yml"
+check "CONTRIBUTING: the ceremony re-arms '## Unreleased' after stamping" 0 "" \
+  grep -qF 'Stamping is two edits, not one' "$ROOT/CONTRIBUTING.md"
+check "CONTRIBUTING: ...and names the guard that enforces it" 0 "" \
+  grep -qF 'changelog-armed.sh' "$ROOT/CONTRIBUTING.md"
+
+# ---------------------------------------------------------------------------
 # latest_release_tag — extracted from install.sh (the source-the-pure-function
 # trick) and driven against a shim curl. The shim serves the ONE seam the
 # function uses: -w '%{redirect_url}' on the releases/latest probe.
