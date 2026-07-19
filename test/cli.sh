@@ -1255,10 +1255,57 @@ SHIM
 chmod +x "$UFWSHIM/ufw" "$FWSHIM/nft" "$FWSHIM/sysctl" "$FWSHIM/iptables"
 
 runfw() { # runfw <ufw|noufw> [VAR=val ...] — the real box-firewall, under shims
-  local mode="$1" p; shift
+  local mode="$1" p rc=0; shift
   p="$FWSHIM:$SHIMDIR:$PATH"
   [ "$mode" = ufw ] && p="$UFWSHIM:$p"
-  env PATH="$p" "$@" bash "$ROOT/host/box-firewall.sh"
+  # Stderr is captured to a file AND re-emitted, rather than only passed
+  # through. The driving `check` swallows the output of a run that passes, so
+  # when a later grep over the log fails there is nothing left to read — which
+  # is precisely the hole #102 fell into. Keeping a copy on disk lets
+  # fwlog_ready below show what the run actually said. Overwritten per call by
+  # design: every fwlog_ready sits immediately after its own runfw, so "the
+  # last run" is always the run being diagnosed.
+  env PATH="$p" "$@" bash "$ROOT/host/box-firewall.sh" 2>"$WFW/last-run.err" || rc=$?
+  cat "$WFW/last-run.err" >&2
+  return "$rc"
+}
+
+# fwlog_ready <log> — the shimmed ufw actually logged mutations to <log>.
+#
+# Why this exists (#102): every grep in the blocks below reads a log written by
+# the shimmed ufw during the driving `runfw` check. When something stops the
+# UFW branch of box-firewall.sh from running at all, that log is missing — or,
+# as it turned out, present but holding nothing except the `ufw status` probe.
+# The greps then fail four-at-a-time with empty output: a signature that looks
+# alarmingly specific and carries no information whatsoever. #102 was filed
+# reading it as "the log is not written", which was a reasonable inference from
+# four blank failures and was also wrong; the file was there, the mutations
+# were not, and that distinction is the entire diagnosis. So assert the
+# precondition explicitly, before the content greps, and on failure print what
+# IS in $WFW, what the log itself holds, and what the run wrote to stderr. The
+# fix below should mean this never fires — it is here for the next cause, not
+# this one, and its whole job is to hand over the evidence instead of making
+# the next person re-derive it from a re-run loop.
+fwlog_ready() {
+  local log="$1" muts
+  if [ -f "$log" ]; then
+    muts="$(grep -vc "^ufw status" "$log")"
+    [ "$muts" -gt 0 ] && return 0
+    echo "DIAGNOSIS: $log exists but logs no ufw MUTATION (only 'ufw status')."
+    echo "  => box-firewall.sh took its no-UFW branch; the UFW carve-out never ran."
+  else
+    echo "DIAGNOSIS: $log does not exist — the shimmed ufw was never invoked."
+  fi
+  echo "  \$WFW ($WFW) holds:"
+  # shellcheck disable=SC2012  # a human-read diagnostic dump, not parsed: `ls -la`
+  # shows sizes and mtimes, which is the whole point here (a zero-byte log and a
+  # log that was never created are different failures). $WFW is our own mktemp -d.
+  ls -la "$WFW" 2>&1 | sed 's/^/    /'
+  echo "  contents of $(basename "$log"):"
+  { [ -f "$log" ] && cat "$log" || echo "(absent)"; } 2>&1 | sed 's/^/    /'
+  echo "  stderr of the run that should have written it:"
+  { [ -s "$WFW/last-run.err" ] && cat "$WFW/last-run.err" || echo "(empty)"; } 2>&1 | sed 's/^/    /'
+  return 1
 }
 
 # Canned `ufw status` tables, modeled on the real output shape.
@@ -1287,6 +1334,7 @@ BX89='5: boxnet    inet 10.89.0.1/24 scope global boxnet'
 # 10.88's carve-out — the stale allows go, the live gateway's land.
 check "box-firewall: a remapped bridge CONVERGES the UFW carve-out" 0 "" \
   runfw ufw FAKE_IP4_BOXNET="$BX89" FAKE_UFW_STATUS="$U_OLDGW" FAKE_UFW_LOG="$WFW/remap.log"
+check "box-firewall: ...the run logged ufw mutations at all" 0 "" fwlog_ready "$WFW/remap.log"
 check "box-firewall: ...the stale tcp allow is deleted" 0 "" \
   grep -qF 'ufw delete allow in on boxnet to 10.88.0.1 port 53 proto tcp' "$WFW/remap.log"
 check "box-firewall: ...and the stale udp allow" 0 "" \
@@ -1302,12 +1350,17 @@ check "box-firewall: ...the live gateway's rules are never deleted" 1 "" \
 # (ufw itself skips the re-adds as existing rules).
 check "box-firewall: an agreeing UFW host deletes nothing" 0 "" \
   runfw ufw FAKE_IP4_BOXNET="$BX89" FAKE_UFW_STATUS="$U_LIVEGW" FAKE_UFW_LOG="$WFW/agree.log"
+# This one matters more than it looks: "no delete was issued" is an ASSERT-ABSENT
+# check, so a run that issued nothing at all passes it for the wrong reason.
+# fwlog_ready is what keeps the absence meaningful.
+check "box-firewall: ...the run logged ufw mutations at all" 0 "" fwlog_ready "$WFW/agree.log"
 check "box-firewall: ...no delete was issued" 1 "" grep -qF ' delete ' "$WFW/agree.log"
 
 # The fresh host: no boxnet rules yet — exactly the five historical commands,
 # aimed at the live gateway, and nothing else (unchanged behavior).
 check "box-firewall: a fresh UFW host runs clean" 0 "" \
   runfw ufw FAKE_IP4_BOXNET="$BX88" FAKE_UFW_STATUS="$U_FRESH" FAKE_UFW_LOG="$WFW/fresh.log"
+check "box-firewall: ...the run logged ufw mutations at all" 0 "" fwlog_ready "$WFW/fresh.log"
 check "box-firewall: ...the deny lands" 0 "" \
   grep -qF 'ufw insert 1 deny in on boxnet' "$WFW/fresh.log"
 check "box-firewall: ...the DNS allows aim at the live gateway" 0 "" \
@@ -1642,6 +1695,27 @@ check "teardown-host: honors --yes/BOX_YES (CI runs it unattended)" 0 "" \
   grep -qF 'BOX_YES' "$ROOT/host/teardown-host.sh"
 check "teardown-host: points at box uninstall when done" 0 "" \
   grep -qF "box uninstall" "$ROOT/host/teardown-host.sh"
+
+# #102's race, in the one other file that sets pipefail. A daemon-free run
+# cannot exercise a UFW teardown, so the shape is pinned instead: no `ufw
+# status` may be piped into an early-exit reader here, because under this
+# file's pipefail the reader's match closes the pipe, ufw takes SIGPIPE, and
+# the branch silently reads false — skipping crumb removal on a host the
+# operator was told is clean. Both directions: the racing shape absent, the
+# capture present.
+# Comment lines are stripped before matching: the fix's own commentary quotes
+# the racing shape to explain it, and a pin that cannot tell prose from code
+# would fail on the very comment documenting why it exists.
+# shellcheck disable=SC2016  # "$1" is the subshell's positional, passed below
+check "teardown-host: no 'ufw status' piped into an early-exit reader" 0 "" \
+  bash -c 'grep -vE "^[[:space:]]*#" "$1" | grep -qE "ufw status[^|]*\| *grep" && exit 1; exit 0' \
+    _ "$ROOT/host/teardown-host.sh"
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "teardown-host: the UFW branch reads a captured snapshot" 0 "" \
+  grep -qF 'if [[ "$ufw_status" == *"Status: active"* ]]; then' "$ROOT/host/teardown-host.sh"
+# shellcheck disable=SC2016  # ditto
+check "teardown-host: the numbered-delete loop breaks on absence, not on a pipe" 0 "" \
+  grep -qF '[ -n "$line" ] || break' "$ROOT/host/teardown-host.sh"
 check "drill: reads the installed tree through current/" 0 "" \
   grep -qF '.local/share/box/current/VERSION' "$ROOT/drill/drill.sh"
 
