@@ -40,7 +40,7 @@ jobs:
             <(git ls-files '*.sh' | sort -u))"
           if [ -n "$missing" ]; then
             echo "tracked scripts the shellcheck sweep does not cover (#116):"
-            printf '  %s\n' $missing
+            printf '%s\n' "$missing" | sed 's/^/  /'
             exit 1
           fi
           shellcheck -x "${files[@]}"

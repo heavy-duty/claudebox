@@ -59,8 +59,6 @@ which records not just what changed but what each drill run proved.
   operator copy-pastes is as wrong as a role box executes, and it fails
   later and further from the cause.
 
-## 0.8.0 — 2026-07-19
-
 ### Fixed
 
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
@@ -82,6 +80,9 @@ which records not just what changed but what each drill run proved.
   cover, so the gap cannot reopen silently the next time a dot-directory or
   a shopt subtlety hides one. `eof_guard_sweep` itself carried the identical
   blind spot — it rebuilds the same glob — and is widened the same way.
+
+
+## 0.8.0 — 2026-07-19
 
 ### Added
 
