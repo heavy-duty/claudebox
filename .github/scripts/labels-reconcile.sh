@@ -78,12 +78,31 @@ checks_state() { # rollup JSON on stdin → SUCCESS | FAILURE | PENDING | NONE
     # Once CANCELLED blocks, judging every entry would strand this very PR in
     # needs-rebase forever, so collapse each context to its newest entry first.
     # Key on workflow + name because a bare job name is only unique within its
-    # workflow; ordering falls back through the timestamps a pending run has.
+    # workflow.
+    #
+    # Dating a run is the subtle part, and getting it wrong restores the bug.
+    # A run still in flight has no completion, but `gh` does not omit the
+    # field: its Go struct marshals the zero time as "0001-01-01T00:00:00Z",
+    # which is a string, so `//` will not fall through it. Ordering on
+    # completion therefore sorted the LIVE re-run to the bottom and let `last`
+    # pick the very run it superseded — reporting the old SUCCESS while a
+    # replacement was still running, which is #136 again.
+    #
+    # So: take the newest timestamp a run actually carries, discarding both
+    # spellings of absent (null, and the zero sentinel). An entry that carries
+    # no usable timestamp at all sorts LAST rather than first — something we
+    # cannot date is most likely the thing just created, and treating it as
+    # newest keeps an undateable in-flight run from being discarded in favour
+    # of a stale success. Every ambiguity here resolves toward "not settled".
     | [ (.statusCheckRollup // [])[]
         | { ctx: [.workflowName // "", .name // .context // ""],
-            at:  (.completedAt // .startedAt // .createdAt // ""),
+            at:  ([.startedAt, .createdAt, .completedAt]
+                  | map(select(type == "string" and . != ""
+                               and (startswith("0001-01-01") | not)))
+                  | max // ""),
             outcome: ((.conclusion // .state // "") | ascii_upcase) } ]
-    | group_by(.ctx) | map(sort_by(.at) | last | .outcome) as $latest
+    | group_by(.ctx)
+    | map(sort_by([(.at == ""), .at]) | last | .outcome) as $latest
 
     | if   ($latest | length) == 0                            then "NONE"
       elif (($latest - $passing - $waiting) | length) > 0     then "FAILURE"

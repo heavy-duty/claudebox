@@ -103,7 +103,16 @@ which records not just what changed but what each drill run proved.
   context collapsing to its newest entry: a re-run does not evict the run it
   replaced, so this PR's own tip carried a `CANCELLED` `scope` beside the
   `SUCCESS` `scope` that superseded it, and judging every entry would have
-  stranded every re-run PR in `needs-rebase`.
+  stranded every re-run PR in `needs-rebase`. Which entry is newest is decided
+  on the newest timestamp a run actually carries, because a run still in flight
+  does not omit its completion — `gh` marshals the Go zero time as the *string*
+  `"0001-01-01T00:00:00Z"`, which `//` will not fall through. Dating on
+  completion therefore sorted the live re-run to the bottom and picked the run
+  it superseded, reporting the old `SUCCESS` while a replacement was still
+  running: #136 restored, by the very rule meant to close it. An entry carrying
+  no usable timestamp sorts last rather than first, so an undateable in-flight
+  run is never discarded in favour of a stale success — every ambiguity here
+  resolves toward "not settled".
 
   `UNKNOWN` mergeability is deliberately not treated as unmergeable: GitHub
   reports it for about a minute after every merge while it recomputes, and
@@ -116,8 +125,9 @@ which records not just what changed but what each drill run proved.
   `CHANGELOG.md`. Queue order is intent, so the reconciler never sets it — it
   only **clears** it the moment the PR stops being mergeable-by-a-human, which
   is precisely the staleness that made `needs-human` untrustworthy. Both live
-  shapes, the mixed round, and the whole check-outcome enum are pinned in
-  `test/labels-reconcile.sh` (19 fixtures → 44).
+  shapes, the mixed round, the whole check-outcome enum, and the in-flight
+  re-run superseding both a green and a cancelled predecessor are pinned in
+  `test/labels-reconcile.sh` (19 fixtures → 48).
 
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
   `globstar` makes `**` descend into subdirectories, but a glob still does

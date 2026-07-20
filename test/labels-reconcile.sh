@@ -258,6 +258,31 @@ expect "same name in another workflow does not supersede" FAILURE \
   "$(rollup "[$(jq -n '{__typename:"CheckRun",workflowName:"labels",name:"scope",conclusion:"FAILURE",completedAt:"2026-07-20T15:00:00Z"}'),\
               $(run_ scope SUCCESS 2026-07-20T15:19:45Z)]" | checks_state)"
 
+# -- a run still IN FLIGHT. `run_()` cannot express this: it always carries a
+#    real completedAt, which is exactly why the supersede rule shipped dating
+#    runs by completion and nothing caught it. Both spellings of "no
+#    completion" are pinned, because `gh` emits the zero sentinel (a string,
+#    which `//` does not fall through) while the API emits null.
+inflight_() { jq -n --arg n "$1" --arg t "$2" --arg c "${3:-0001-01-01T00:00:00Z}" \
+  '{__typename:"CheckRun", workflowName:"ci", name:$n, status:"IN_PROGRESS",
+    conclusion:"", startedAt:$t, completedAt:(if $c == "null" then null else $c end)}'; }
+
+expect "a re-run in flight beats the success it superseded (zero sentinel)" PENDING \
+  "$(rollup "[$(run_ build SUCCESS 2026-07-20T15:00:00Z),\
+              $(inflight_ build 2026-07-20T15:10:00Z)]" | checks_state)"
+expect "...and the same when the absent completion is null" PENDING \
+  "$(rollup "[$(run_ build SUCCESS 2026-07-20T15:00:00Z),\
+              $(inflight_ build 2026-07-20T15:10:00Z null)]" | checks_state)"
+expect "a replacement in flight for a CANCELLED run is pending, not failed" PENDING \
+  "$(rollup "[$(run_ build CANCELLED 2026-07-20T15:00:00Z),\
+              $(inflight_ build 2026-07-20T15:10:00Z)]" | checks_state)"
+# an entry carrying no usable timestamp is treated as newest, not oldest —
+# ambiguity resolves toward "not settled" rather than toward a stale success
+expect "an undateable in-flight run is not discarded for a stale success" PENDING \
+  "$(rollup "[$(run_ build SUCCESS 2026-07-20T15:00:00Z),\
+              $(jq -n '{__typename:"CheckRun",workflowName:"ci",name:"build",conclusion:"",startedAt:null,completedAt:null}')]" \
+     | checks_state)"
+
 # -- the classifier feeds the state machine: a cancelled required check must
 #    take the PR off the human's plate, which is the whole point of #136.
 DRAFT=false HEAD_SHA=head1 REQUESTED="$HUMAN" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE
