@@ -438,6 +438,17 @@ snapshots). What box then re-stamps is THIS host's truth:
     differs, the same move migrate-host makes re-homing a legacy box
   · a fresh machine identity (reset_identity, exactly like a clone), so its
     DHCP lease can never collide with the box it was exported from
+  · the import EVENT — when the box landed here, and by which box version
+
+The mint stamp is NOT rewritten. The artifact's mint time, box version, image,
+template and origin (mint or clone) are the originating host's truth and
+survive the trip intact — 'box info' shows them unchanged, with an IMPORTED
+line under them saying the mint predates the arrival. In particular the import
+does not overwrite 'origin': a clone that was exported and imported still
+reads as a clone, and still names the box it was cloned from.
+
+A box that makes the trip more than once keeps both ends: the first import is
+pinned forever, the latest is refreshed each time, and a count says how many.
 
 Auth state rides along by design — the artifact carries the box's whole disk,
 logins included. That is the point (log in once, keep the file), and the same
@@ -1420,6 +1431,7 @@ box_cfg() { incus config get "$1" "$2" 2>/dev/null || true; }
 # legacy 'user.claudebox' tag already says out loud at resolve_box.
 box_provenance() {
   local i="$1" schema created ver img fp m asked tpl u role rrepo rref origin from
+  local imp impby impl implby impn
   schema="$(box_cfg "$i" user.box.schema)"
   created="$(box_cfg "$i" user.box.created)"; ver="$(box_cfg "$i" user.box.version)"
   img="$(box_cfg "$i" user.box.image)";       fp="$(box_cfg "$i" user.box.image.fingerprint)"
@@ -1428,6 +1440,12 @@ box_provenance() {
   role="$(box_cfg "$i" user.box.role)"
   rrepo="$(box_cfg "$i" user.box.rig.repo)";  rref="$(box_cfg "$i" user.box.rig.ref)"
   origin="$(box_cfg "$i" user.box.origin)";   from="$(box_cfg "$i" user.box.origin.from)"
+  # The import event (#131) — a THIRD fact, read from its own keys. 'origin'
+  # above still says mint or clone, which is what it has always meant.
+  imp="$(box_cfg "$i" user.box.imported)";    impby="$(box_cfg "$i" user.box.imported.by)"
+  impl="$(box_cfg "$i" user.box.imported.last)"
+  implby="$(box_cfg "$i" user.box.imported.last.by)"
+  impn="$(box_cfg "$i" user.box.imported.count)"
   # A pre-rename box has no metadata at all but is always a Claude box — the
   # same mapping box_user() makes, for the same reason.
   [ -n "$tpl" ] || [ "$(box_cfg "$i" user.claudebox)" != 1 ] || { tpl=claude; u="${u:-claude}"; }
@@ -1437,6 +1455,25 @@ box_provenance() {
     printf '%-11s%s\n' MINTED "${created:-(time not recorded)} by box ${ver:-unknown}"
   else
     printf '%-11s%s\n' MINTED "(not recorded — this box predates the mint stamp)"
+  fi
+  # Directly under MINTED, because adjacency is what defeats the misreading:
+  # the mint time above is the ARTIFACT's, carried across the trip on purpose,
+  # and a reader who meets it alone will take it for this host's.
+  #
+  # The qualifier states the one thing box actually knows — the ORDERING. It
+  # does not say "on another host": a box can be exported and re-imported onto
+  # the SAME host (that is the installer's own upgrade advice, #66), and
+  # nothing on the box records which host minted it. Inventing a location here
+  # would be precisely the fabricated fact the stamp exists to avoid.
+  if [ -n "$impl" ] || [ -n "$imp" ]; then
+    printf '%-11s%s\n' IMPORTED \
+      "${impl:-$imp} by box ${implby:-${impby:-unknown}} (the mint above predates it)"
+    # The birth of the import history, shown only when it is a DIFFERENT trip
+    # from the latest — on a single import both pairs hold the same values and
+    # a second line would be noise. Continuation indent, no second label.
+    if [ -n "$imp" ] && [ "$imp" != "${impl:-$imp}" ]; then
+      printf '%-11s%s\n' '' "import ${impn:-?} — the first was $imp by box ${impby:-unknown}"
+    fi
   fi
   if [ -n "$tpl" ]; then
     local paren=""
@@ -1636,6 +1673,63 @@ cmd_import() {
   tag="$(incus config get "$target" user.box 2>/dev/null || true)"
   [ "$tag" = 1 ] || tag="$(incus config get "$target" user.claudebox 2>/dev/null || true)"
   [ "$tag" = 1 ] || incus config set "$target" user.box=1
+  # The import EVENT (#131). Everything above either restores the ARTIFACT's
+  # truth or re-establishes THIS host's boundary; none of it records that the
+  # trip happened. The mint stamp (#103) rides inside the artifact verbatim —
+  # which is correct, mint facts belong to the originating host — and that is
+  # exactly what creates the gap: an imported box is otherwise indistinguishable
+  # from one minted here at the artifact's mint time.
+  #
+  # Deliberately NOT 'origin=import'. 'origin' answers how this instance came
+  # into BEING — mint or clone — and overwriting it destroys that answer: a
+  # clone that was exported and imported would come back claiming to be an
+  # import, with nothing left saying it was ever a clone and an 'origin.from'
+  # naming a lineage no key explains any more. The import is a THIRD fact,
+  # orthogonal to the first two, so it takes its OWN keys, and every key the
+  # artifact carried — origin, origin.from, created, version, template, user,
+  # image, role, rig.* — is left exactly as it arrived.
+  #
+  # Birth pair + latest pair, the shape heavy-duty/rig#61 settled on for the
+  # same repeated-event question. It transfers: a box can make the trip more
+  # than once, and these keys ride inside the artifact on every subsequent one.
+  #   · imported / imported.by        FIRST-wins. Pinned once, never rewritten.
+  #   · imported.last / .last.by      LAST-wins. When it landed HERE.
+  #   · imported.count                how many trips — first and last alone
+  #                                   cannot tell 2 apart from 5, and nothing
+  #                                   else on the box can reconstruct it.
+  # Last-wins alone would repeat, one level down, the very mistake this key
+  # exists to avoid: the second import would erase the evidence of the first.
+  # First-wins alone cannot answer "when did this land on THIS host", which is
+  # the question an operator actually asks.
+  local first_at prev_n n now
+  first_at="$(incus config get "$target" user.box.imported 2>/dev/null || true)"
+  prev_n="$(incus config get "$target" user.box.imported.count 2>/dev/null || true)"
+  # A count that is absent (the first trip) or not an integer (a hand-edited
+  # config, a foreign user.box.imported.count) must never fail an import that
+  # has already happened — arithmetic on it under 'set -e' would. Same side the
+  # schema check in box_provenance() falls on: degrade, never die.
+  [ -n "$prev_n" ] && [ "$prev_n" -eq "$prev_n" ] 2>/dev/null || prev_n=0
+  n=$((prev_n + 1)); now="$(mint_time)"
+  local istamp=(
+    user.box.imported.last="$now"
+    user.box.imported.last.by="$(box_version)"
+    user.box.imported.count="$n"
+  )
+  # The birth of this box's import history: pinned on the first trip and
+  # carried by the artifact forever after, so a box on its third host still
+  # names the trip that started it.
+  [ -n "$first_at" ] || istamp+=(user.box.imported="$now" user.box.imported.by="$(box_version)")
+  # No 'user.box.schema' is written here, on either path. "Absent schema means
+  # pre-stamp" is load-bearing for the MINTED line, and stamping schema=1 onto
+  # a legacy artifact that carries no mint stamp would claim a shape it does
+  # not have. These keys need no schema to be read — every reader tolerates
+  # absence by construction. Nor does the schema BUMP: #103's contract is that
+  # it moves on removal or repurposing, never on addition, and this only adds.
+  #
+  # Before the start, like the clone re-stamp and for the same reason: an
+  # imported box is never observable — not for a second, not by a concurrent
+  # 'box info' — without the record of how it got here.
+  incus config set "$target" "${istamp[@]}"
   # Placement: the artifact carries its profile list, but the isolation
   # contract is THIS host's box-net profile. A box export already says
   # box-net; anything else (a pre-0.4.0 artifact, a hand-rolled export) gets
