@@ -31,7 +31,7 @@ set -euo pipefail
 
 HUMAN="${HUMAN_REVIEWER:-danmt}"
 BOTS=(claude-bot-andresmgsl codex-bot-andresmgsl grok-bot-andresmgsl)
-STATES=(state:building state:bots-reviewing state:addressing state:needs-human)
+STATES=(state:building state:needs-rebase state:bots-reviewing state:addressing state:needs-human)
 STALE_AFTER=$((48 * 3600))
 
 log() { printf 'labels: %s\n' "$*"; }
@@ -46,6 +46,8 @@ run() { # every mutation goes through here — DRY_RUN=1 logs instead of doing
 #   HEAD_SHA     the PR's current head commit
 #   REQUESTED    newline-separated logins with a review currently requested
 #   REVIEWS_JSON JSON array of submitted (non-PENDING) reviews
+#   MERGEABLE    MERGEABLE | CONFLICTING | UNKNOWN  (GitHub's own verdict)
+#   CHECKS       SUCCESS | FAILURE | PENDING | NONE (the check rollup)
 # ---------------------------------------------------------------------------
 
 requested() { grep -qxF "$1" <<<"$REQUESTED"; }
@@ -85,22 +87,52 @@ human_request_needed() { # 0 when needs-human requires a FRESH human request
 
 decide_state() { # → the one state:* label this PR should carry
   if [ "$DRAFT" = true ]; then echo state:building; return; fi
-  # an explicit human request outranks the bot rounds — it is the final
-  # gate, and a maintainer pulling a PR to themselves early counts too
-  if requested "$HUMAN"; then echo state:needs-human; return; fi
+
+  # state:needs-human means ONE thing: a human could merge this right now.
+  # Anything that makes that false outranks the request that put it there —
+  # otherwise the board invites a merge that cannot or must not happen, and
+  # nothing else on the page contradicts it (#136).
+  #
+  # A conflicted or red branch is the agent's to fix, not the human's to
+  # merge. UNKNOWN is deliberately NOT treated as unmergeable: GitHub reports
+  # it for a minute after every merge while it recomputes, and flapping every
+  # open PR through needs-rebase on each merge would be worse than the bug.
+  # An unknown mergeability simply does not trigger this arm; the next sweep
+  # sees the settled value.
+  # Both default to the "do not know" value: an unset global (older fixture,
+  # a failed fetch) must never invent a verdict it did not read.
+  case "${MERGEABLE:-UNKNOWN}" in CONFLICTING) echo state:needs-rebase; return ;; esac
+  case "${CHECKS:-NONE}" in FAILURE) echo state:needs-rebase; return ;; esac
+
   local b v verdicts=""
   for b in "${BOTS[@]}"; do
     if requested "$b"; then echo state:bots-reviewing; return; fi
   done
   for b in "${BOTS[@]}"; do
     v="$(bot_verdict "$b")"
-    if [ "$v" = MISSING ]; then echo state:bots-reviewing; return; fi
+    if [ "$v" = MISSING ]; then
+      # No verdict at all from this bot. An explicit human request still
+      # outranks an unfinished bot round — a maintainer pulling a PR to
+      # themselves early is a deliberate act, and the original precedence.
+      if requested "$HUMAN"; then echo state:needs-human; return; fi
+      echo state:bots-reviewing; return
+    fi
     verdicts="$verdicts $v"
   done
   case "$verdicts" in
+    # STALE = a verdict for an older head. Unlike MISSING, this outranks the
+    # human request: every approval was invalidated by a push, so NOBODY has
+    # reviewed this tree. Handing that to the human is the #136 case where
+    # everything reads green — mergeable, CI passing, "waiting on the human" —
+    # over code no reviewer has seen. The agent owes a re-request.
+    *STALE*) echo state:addressing; return ;;
+  esac
+  # an explicit human request outranks the remaining bot outcomes — it is the
+  # final gate, and a maintainer pulling a PR to themselves early counts too
+  if requested "$HUMAN"; then echo state:needs-human; return; fi
+  case "$verdicts" in
     # FEEDBACK = a comment with no verdict → the agent owes the round-reply.
-    # STALE = a verdict for an older head → the agent owes a re-request.
-    *BLOCK* | *FEEDBACK* | *STALE*) echo state:addressing; return ;;
+    *BLOCK* | *FEEDBACK*) echo state:addressing; return ;;
   esac
   # the bots all approve — but if the human's standing word is
   # changes-requested (and nobody re-requested them yet), the agent owes
@@ -125,7 +157,9 @@ bootstrap_labels() { # dispatch-only: ~20 upserts is too chatty for every cron t
 state:building|FBCA04|PR is a draft — the coding agent is still building
 state:bots-reviewing|1D76DB|Waiting on the bot reviewers to finish the round
 state:addressing|D93F0B|All bots reviewed — coding agent owes the single reply + fixes
+state:needs-rebase|B60205|Does not merge — conflicts or failing checks; the agent owes a fix
 state:needs-human|8250DF|All bots approve — waiting on the human reviewer
+merge-next|0E8A16|Head of the merge queue — merge this one next (set by hand/agent, cleared here)
 stale|B60205|No activity for 48h — needs a poke (sweep-managed)
 blocked|6A737D|Waiting on another PR or issue to land first
 release|0E8A16|Release flow and version/packaging work
@@ -174,6 +208,18 @@ reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
     fi
   fi
 
+  # ---- merge-next: cleared, never set ----------------------------------
+  # Queue order is INTENT — which PR should land first is a judgement about
+  # conflicts and dependencies that GitHub knows nothing about, so the
+  # reconciler must not guess it (LABELS.md's rule for `blocked`/`release`).
+  # What it CAN do is stop the label going stale the way needs-human did:
+  # the moment the PR is no longer the thing a human should merge next, the
+  # claim is removed. Setting it stays with whoever owns the queue.
+  if has_label merge-next && [ "$desired" != state:needs-human ]; then
+    run gh issue edit "$n" -R "$REPO" --remove-label merge-next >/dev/null
+    log "#$n: cleared merge-next (state is $desired, not mergeable-by-a-human)"
+  fi
+
   # ---- stale: real activity only, and blocked is legitimately quiet ----
   last_activity="$(
     {
@@ -216,6 +262,21 @@ main() {
       # PENDING reviews are unsubmitted drafts in someone's browser — not a verdict
       REVIEWS_JSON="$(gh api --paginate "repos/$REPO/pulls/$n/reviews" --jq '.[]' \
         | jq -s '[.[] | select(.state != "PENDING")]')"
+      # mergeability + the check rollup, the two facts the state machine was
+      # blind to (#136). `gh pr view` rather than the REST PR object: the API's
+      # `mergeable` is a tri-state boolean that GitHub computes lazily, while
+      # this returns the same MERGEABLE/CONFLICTING/UNKNOWN string the UI shows.
+      # Failure to read them is NOT fatal and NOT treated as broken — an API
+      # hiccup must never flap every PR into needs-rebase, so both degrade to
+      # the "do not know" value that triggers nothing.
+      GH_VIEW="$(gh pr view "$n" -R "$REPO" --json mergeable,statusCheckRollup 2>/dev/null || echo '{}')"
+      MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<<"$GH_VIEW")"
+      CHECKS="$(jq -r '
+        (.statusCheckRollup // []) as $c
+        | if ($c | length) == 0 then "NONE"
+          elif ($c | map(.conclusion // .state // "") | any(. == "FAILURE" or . == "TIMED_OUT" or . == "STARTUP_FAILURE" or . == "ACTION_REQUIRED")) then "FAILURE"
+          elif ($c | map(.conclusion // .state // "") | any(. == "" or . == "PENDING" or . == "IN_PROGRESS" or . == "QUEUED")) then "PENDING"
+          else "SUCCESS" end' <<<"$GH_VIEW")"
       reconcile_pr "$n"
     ) || log "#$n: reconcile failed — continuing with the remaining PRs"
   done

@@ -17,11 +17,37 @@ single reply, and a human takes the final review.
 | `state:building` | `#FBCA04` | the coding agent, still building | PR opened as draft | marked ready + bot reviews requested |
 | `state:bots-reviewing` | `#1D76DB` | the reviewer bots to finish the round | ready with reviews requested, or fixes pushed and reviews re-requested | all three bots have reviewed the round |
 | `state:addressing` | `#D93F0B` | the coding agent to reply and push fixes | all bots reviewed the round, not all approved | the single round-reply is posted and fixes pushed |
-| `state:needs-human` | `#8250DF` | the human reviewer | the human review is requested — by the author when the round passes, or automatically on three formal head-current approvals | merged — or changes requested, which cycles back to `state:addressing` |
+| `state:needs-rebase` | `#B60205` | the coding agent to rebase or fix | the branch does not merge — GitHub says `CONFLICTING`, or a check has failed | it merges cleanly and checks are green again |
+| `state:needs-human` | `#8250DF` | the human reviewer | the PR **could be merged right now**: mergeable, checks not failing, three formal head-current approvals — and the human review is requested | merged — or changes requested, which cycles back to `state:addressing` |
 
 `bots-reviewing` and `addressing` are deliberately distinct: staleness in the
 first means *poke the bots*, staleness in the second means *the agent dropped
 the ball*. Collapsing them loses exactly the information a sweep needs.
+
+**`state:needs-human` means one thing: a human could merge this right now.**
+Anything that makes that false outranks the review request that put it there,
+because the label is the only signal a maintainer scanning the board (or a
+phone) actually reads — and a label that says "your turn" on an unmergeable PR
+is worse than no label at all. Two things therefore take precedence over an
+explicit human request:
+
+- **it does not merge** — `CONFLICTING`, or a failing check → `state:needs-rebase`
+- **nobody reviewed *this* head** — every approval staled by a push → `state:addressing`,
+  because the agent owes a re-request
+
+The second is the more dangerous of the two: with a conflict, GitHub at least
+disables the merge button, while a staled-approval PR reads green, mergeable
+and "waiting on the human" over code no reviewer has seen.
+
+`UNKNOWN` mergeability is deliberately **not** treated as unmergeable. GitHub
+reports it for about a minute after every merge while it recomputes, and
+flapping every open PR through `needs-rebase` on each merge would be worse than
+the bug this precedence fixes.
+
+An *unfinished* round still yields to an explicit human request — a maintainer
+pulling a PR to themselves early is a deliberate act. `MISSING` (nobody has
+reviewed yet) and `STALE` (everyone reviewed something else) are different
+facts and are treated differently.
 
 ## Cross-cutting (PRs and issues)
 
@@ -30,6 +56,7 @@ the ball*. Collapsing them loses exactly the information a sweep needs.
 | `stale` | `#B60205` | No activity for 48h. Sweep-managed, never hand-applied. `state:building` + `stale` is precisely a forgotten draft. |
 | `blocked` | `#6A737D` | Waiting on another PR or issue to land first. Quiet *legitimately* — the staleness sweep skips it. |
 | `release` | `#0E8A16` | Release flow, versioning, and packaging work. |
+| `merge-next` | `#0E8A16` | Head of the merge queue — **merge this one next**. Queue order is *intent* (which PR lands first, given how they conflict), so the reconciler never sets it: you or the agent maintaining the queue do. The reconciler only **clears** it, the moment the PR stops being something a human could merge — so it cannot go stale the way `state:needs-human` did. |
 
 ## Scope — which surface? (PRs and issues, any number)
 
@@ -69,7 +96,9 @@ missing label idempotently. To create them by hand (needs push access):
 gh label create "state:building"       --color FBCA04 --description "PR is a draft — the coding agent is still building" --force
 gh label create "state:bots-reviewing" --color 1D76DB --description "Waiting on the bot reviewers to finish the round" --force
 gh label create "state:addressing"     --color D93F0B --description "All bots reviewed — coding agent owes the single reply + fixes" --force
+gh label create "state:needs-rebase"   --color B60205 --description "Does not merge — conflicts or failing checks; the agent owes a fix" --force
 gh label create "state:needs-human"    --color 8250DF --description "All bots approve — waiting on the human reviewer" --force
+gh label create "merge-next"           --color 0E8A16 --description "Head of the merge queue — merge this one next (set by hand/agent, cleared here)" --force
 gh label create "stale"                --color B60205 --description "No activity for 48h — needs a poke (sweep-managed)" --force
 gh label create "blocked"              --color 6A737D --description "Waiting on another PR or issue to land first" --force
 gh label create "release"              --color 0E8A16 --description "Release flow and version/packaging work" --force

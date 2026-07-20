@@ -61,6 +61,45 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **`state:needs-human` no longer appears on PRs a human cannot merge** (#136)
+  — `decide_state()` derived state from three inputs (draft flag, requested
+  reviewers, submitted reviews) and read *nothing* about mergeability or
+  checks. Combined with the `if requested "$HUMAN"` short-circuit at the top of
+  its precedence, the label was **sticky**: once the maintainer was requested,
+  the PR read `state:needs-human` through conflicts, through red CI, through a
+  force-push that staled every approval. Nothing demoted it.
+
+  Observed twice in one afternoon on this repo, in two different shapes. Three
+  PRs sat at `state:needs-human` while `CONFLICTING` for hours — the board
+  inviting a merge GitHub had already disabled. And #119, after a rebase, read
+  `MERGEABLE`, four green checks, `state:needs-human` — with **zero** reviews
+  bound to its head. Every visible signal said *merge me* over a tree no
+  reviewer had seen, and unlike the conflict case, nothing on the page
+  contradicted it.
+
+  The rule the label now keeps is that **`state:needs-human` means a human
+  could merge this right now**, so anything making that false outranks the
+  request that put it there. A `CONFLICTING` branch or a failing check is the
+  agent's to fix: new `state:needs-rebase`. Approvals staled by a push mean
+  nobody reviewed this tree: `state:addressing`, because the agent owes a
+  re-request. An *unfinished* round still yields to an explicit human request —
+  a maintainer pulling a PR to themselves early is deliberate, and `MISSING`
+  (nobody has reviewed yet) is a different fact from `STALE` (everyone reviewed
+  something else).
+
+  `UNKNOWN` mergeability is deliberately not treated as unmergeable: GitHub
+  reports it for about a minute after every merge while it recomputes, and
+  flapping every open PR through `needs-rebase` on each merge would be worse
+  than the bug. A failed read of either fact degrades to the same "do not know"
+  value for the same reason — an API hiccup must not relabel the board.
+
+  Also adds `merge-next`, because a correct `needs-human` still does not say
+  *which* PR to merge first, and order matters when they conflict through
+  `CHANGELOG.md`. Queue order is intent, so the reconciler never sets it — it
+  only **clears** it the moment the PR stops being mergeable-by-a-human, which
+  is precisely the staleness that made `needs-human` untrustworthy. Both live
+  shapes are pinned in `test/labels-reconcile.sh` (19 fixtures → 29).
+
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
   `globstar` makes `**` descend into subdirectories, but a glob still does
   not *match* a dot-prefixed name, so `**/` never entered `.github/`. The

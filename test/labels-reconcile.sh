@@ -146,5 +146,61 @@ REQUESTED="$HUMAN"
 expect "live human request suppresses re-request" not-needed "$(human_request_needed && echo needed || echo not-needed)"
 REQUESTED=""
 
+# ---------------------------------------------------------------------------
+# #136: state:needs-human must mean "a human could merge this RIGHT NOW".
+# Both cases below were observed live in this repo on 2026-07-20, and both
+# showed state:needs-human while being unmergeable in different ways.
+# ---------------------------------------------------------------------------
+ALL_APPROVE="$(reviews \
+  "$(rev "$BOT1" APPROVED head1 "" t1)" \
+  "$(rev "$BOT2" APPROVED head1 "" t2)" \
+  "$(rev "$BOT3" APPROVED head1 "" t3)")"
+
+# -- flavour 1: not mergeable. The merge button is disabled, yet the board
+#    said "your turn" on #119/#120/#127 for hours.
+DRAFT=false HEAD_SHA=head1 REQUESTED="" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=CONFLICTING CHECKS=SUCCESS
+expect "a CONFLICTING PR is needs-rebase, not needs-human" state:needs-rebase "$(decide_state)"
+REQUESTED="$HUMAN"
+expect "...even with the human explicitly requested" state:needs-rebase "$(decide_state)"
+
+# -- red CI is the same claim: not something a human should merge.
+REQUESTED="" MERGEABLE=MERGEABLE CHECKS=FAILURE
+expect "a red PR is needs-rebase" state:needs-rebase "$(decide_state)"
+REQUESTED="$HUMAN"
+expect "...and a human request does not override red CI" state:needs-rebase "$(decide_state)"
+
+# -- UNKNOWN is NOT unmergeable. GitHub reports it for ~a minute after every
+#    merge while it recomputes; treating it as broken would flap every open PR
+#    into needs-rebase on each merge — worse than the bug being fixed.
+REQUESTED="" MERGEABLE=UNKNOWN CHECKS=PENDING
+expect "UNKNOWN mergeability does not trigger needs-rebase" state:needs-human "$(decide_state)"
+
+# -- flavour 2 (the dangerous one): mergeable, green, human requested, and
+#    NOBODY has reviewed this head. Observed on #119 after a rebase: every
+#    signal read "merge me" and nothing on the page contradicted it.
+MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED="$HUMAN"
+REVIEWS_JSON="$(reviews \
+  "$(rev "$BOT1" APPROVED oldhead "" t1)" \
+  "$(rev "$BOT2" APPROVED oldhead "" t2)" \
+  "$(rev "$BOT3" APPROVED oldhead "" t3)")"
+expect "stale approvals outrank the human request (nobody reviewed this tree)" state:addressing "$(decide_state)"
+
+# -- but an UNFINISHED round still yields to an explicit human request: a
+#    maintainer pulling a PR to themselves early is deliberate, and was the
+#    original precedence. MISSING differs from STALE — nobody has reviewed
+#    YET, versus everyone reviewed something else.
+REVIEWS_JSON="$(reviews "$(rev "$BOT1" APPROVED head1 "" t1)")"
+expect "an unfinished round still yields to an explicit human request" state:needs-human "$(decide_state)"
+REQUESTED=""
+expect "...and without that request it is still bots-reviewing" state:bots-reviewing "$(decide_state)"
+
+# -- the happy path survives all of the above.
+REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED=""
+expect "mergeable + green + three head-current approvals is needs-human" state:needs-human "$(decide_state)"
+# -- and a draft outranks everything, including a conflict.
+DRAFT=true MERGEABLE=CONFLICTING
+expect "a draft is building even when conflicted" state:building "$(decide_state)"
+DRAFT=false MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED="" REVIEWS_JSON='[]'
+
 printf 'labels-reconcile tests: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
