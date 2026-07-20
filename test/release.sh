@@ -394,7 +394,8 @@ check "monotonic: a base with no release headings passes (nothing to delete)" 0 
 # silently (which is the failure shape this repo keeps refusing). CI closes
 # the hole from the other side with STRICT.
 G="$(grepo mono-nobase '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
-check "monotonic: an unresolvable base ref SKIPS, saying nothing was checked" 0 "SKIPPED" mono "$G" no-such-ref
+check "monotonic: an unresolvable base ref SKIPS containment" 0 "containment SKIPPED" mono "$G" no-such-ref
+check "monotonic: ...and says uniqueness already ran, not that nothing did" 0 "already ran" mono "$G" no-such-ref
 check "monotonic: ...naming the base ref it could not resolve" 0 "no-such-ref" mono "$G" no-such-ref
 check "monotonic: ...and warning that CI treats it as a failure" 0 "hard failure" mono "$G" no-such-ref
 check "monotonic: STRICT turns that skip into a red run" 1 "is a FAILURE, not a skip" mono_strict "$G" no-such-ref
@@ -402,17 +403,86 @@ check "monotonic: ...and points at the checkout, not the script" 1 "fetch-depth:
 # Outside a work tree at all (a tarball, an unpacked release).
 mkdir -p "$WORK/mono-nogit"
 printf '%s\n' '# Changelog' '' '## 0.8.0 — 2026-07-19' > "$WORK/mono-nogit/CHANGELOG.md"
-check "monotonic: outside a git work tree it skips rather than erroring" 0 "SKIPPED" \
+check "monotonic: outside a git work tree it skips containment, not everything" 0 "containment SKIPPED" \
   mono "$WORK/mono-nogit" main
 check "monotonic: a missing changelog refuses by path (never a skip)" 1 "no such file" \
   bash "$MONO" main "$WORK/nope.md"
+
+# --- #143: uniqueness is a property of HEAD, so nothing base-side may gate it -
+# Containment needs the merge base. Uniqueness needs only the file in front of
+# it. Before #143 the duplicate check sat downstream of the base-ref, merge-base
+# and base-blob conditions, so each of the three degradation paths below exited
+# 0 on a tree with a duplicate in plain sight — the base-blob one not even via
+# skip(), but a bare `exit 0` that STRICT could not reach. These cases pin the
+# ORDER, which is the actual invariant; asserting the exit code alone is what
+# let the original ship (the base-absent case below was green before and after).
+grepo_nocl() { # a repo whose main has NO changelog at all
+  local d="$WORK/$1"
+  mkdir -p "$d"
+  git -C "$d" init -q -b main
+  git -C "$d" config user.email test@example.invalid
+  git -C "$d" config user.name test
+  echo seed > "$d/README.md"
+  git -C "$d" add README.md
+  git -C "$d" commit -qm base
+  git -C "$d" checkout -q -b pr
+  echo "$d"
+}
+add_changelog() { # <dir> <lines...> — the PR introduces the file
+  local d="$1"; shift
+  { echo "# Changelog"; echo; printf '%s\n' "$@"; } > "$d/CHANGELOG.md"
+  git -C "$d" add CHANGELOG.md
+  git -C "$d" commit -qm head
+}
+
+# The changelog is absent at the merge base AND the PR introduces a duplicate.
+G="$(grepo_nocl mono-143-newdup)"
+add_changelog "$G" '## Unreleased' '' '## 0.8.0 — 2026-07-19' '' '- **a**' '' '## 0.8.0 — 2026-07-19' '' '- **stranded**'
+check "monotonic: a duplicate introduced where the base had no changelog is CAUGHT (#143)" 1 "DUPLICATE release heading" mono "$G" main
+check "monotonic: ...and STRICT does not change that (it was never a skip)" 1 "DUPLICATE release heading" mono_strict "$G" main
+# ...and the clean counterpart still exits 0, now saying uniqueness did run.
+G="$(grepo_nocl mono-143-newok)"
+add_changelog "$G" '## Unreleased' '' '## 0.8.0 — 2026-07-19' '' '- **a**'
+check "monotonic: ...while a CLEAN introduced changelog still passes" 0 "nothing could have been deleted" mono "$G" main
+check "monotonic: ...saying uniqueness was checked, not that nothing was" 0 "uniqueness on HEAD already passed" mono "$G" main
+
+# No git at all: uniqueness still has everything it needs.
+mkdir -p "$WORK/mono-143-nogit"
+printf '%s\n' '# Changelog' '' '## 0.8.0 — 2026-07-19' '' '## 0.8.0 — 2026-07-19' > "$WORK/mono-143-nogit/CHANGELOG.md"
+check "monotonic: a duplicate OUTSIDE a git work tree is caught (#143)" 1 "DUPLICATE release heading" \
+  mono "$WORK/mono-143-nogit" main
+
+# Unresolvable base ref: same — the skip is containment's, not the script's.
+G="$(grepo mono-143-nobase '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+head_changelog "$G" '## 0.8.0 — 2026-07-19' '' '- **a**' '' '## 0.8.0 — 2026-07-19' '' '- **b**'
+check "monotonic: a duplicate is caught even when the base ref will not resolve (#143)" 1 "DUPLICATE release heading" mono "$G" no-such-ref
+
+# --- the push-to-main shape: containment vacuous, uniqueness real ----------
+# With the pull_request gate gone (#143), merge_base == HEAD is a ROUTINE path,
+# not a degradation. Containment compares the file against itself and asserts
+# nothing, so a line reading "all N still present" would claim a check that did
+# no work — the same dishonesty the skip messages were fixed for. The success
+# line therefore has two forms, and this pins which one each event gets.
+G="$(grepo mono-vacuous '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+check "monotonic: HEAD as its own base reports containment VACUOUS, not verified" 0 "containment vacuous" mono "$G" HEAD
+check "monotonic: ...and names uniqueness as the half that actually ran" 0 "uniqueness on HEAD checked" mono "$G" HEAD
+# shellcheck disable=SC2016  # $1/$2 expand in the child shell, by design
+check "monotonic: ...and does NOT claim headings were still present" 1 "" \
+  bash -c 'cd "$1" && bash "$2" HEAD | grep -q "are still present"' _ "$G" "$MONO"
+# The PR shape keeps the containment wording — the two must not collapse.
+head_changelog "$G" '## 0.8.0 — 2026-07-19' '' '- **Shipped**' '' '## 0.9.0 — 2026-07-20' '' '- **New**'
+check "monotonic: a real base still reports containment, naming the count" 0 "still present" mono "$G" main
 
 # --- and the real tree, through the real script ----------------------------
 # HEAD as its own base: the merge base is HEAD, so the sets are identical by
 # construction. Proves the script runs against the actual CHANGELOG.md and
 # parses its real headings, without depending on an `origin/main` that a
 # fresh clone or a detached CI checkout may not have.
-check "monotonic: THIS tree passes against itself (the parser meets reality)" 0 "still present" \
+# HEAD as its own base is now the VACUOUS-containment path (#143), so the
+# assertion moved to uniqueness's count — which is the stronger proof of the
+# original intent anyway: it says the parser read the REAL CHANGELOG.md and
+# found real headings in it, rather than that a self-comparison came out equal.
+check "monotonic: THIS tree passes against itself (the parser meets reality)" 0 "uniqueness on HEAD checked" \
   mono "$ROOT" HEAD
 
 # The guard is only a guard if CI runs it — and only if CI runs it with the
@@ -424,6 +494,30 @@ check "ci.yml: ...with full history, or the merge base is unreachable" 0 "" \
   grep -qF 'fetch-depth: 0' "$ROOT/.github/workflows/ci.yml"
 check "ci.yml: ...and STRICT, so a skip is a red run and not a green one" 0 "" \
   grep -qF 'CHANGELOG_MONOTONIC_STRICT' "$ROOT/.github/workflows/ci.yml"
+# #143: the step must NOT be pull-request-only — duplication is vacuous on no
+# tree — and dropping that gate is only safe with the base-ref fallback, since
+# `github.base_ref` is empty on a push and a bare `origin/` under STRICT is a
+# hard failure on every push to main.
+# Scoped to the step's OWN block, deliberately. A file-wide negative would
+# forbid any FUTURE step in ci.yml from being pull_request-gated and would fail
+# citing #143 when one legitimately is — #143 constrains this step, not the file.
+# Terminates on a new STEP or a new JOB. The job boundary is not optional: the
+# monotonic step is the LAST step of `check`, so stopping only at the next
+# `- name:` runs the block into the `rehearsal` job below and swallows its
+# job-level `if:`. That reintroduces the very bug the scoping fixed — an
+# unrelated edit failing while citing #143 — just moved from "any step in the
+# file" to "this step plus the head of the next job".
+mono_step_block() {
+  awk '/^      - name: no shipped changelog heading/ {f=1; print; next}
+       f && (/^      - / || /^  [^ ]/) {exit}
+       f {print}' "$ROOT/.github/workflows/ci.yml"
+}
+# Anchored: an `if:` appearing inside a `run:` line is not a step condition.
+mono_step_gated() { mono_step_block | grep -q '^        if:'; }
+check "ci.yml: the monotonic step itself is not pull_request-gated (#143)" 1 "" mono_step_gated
+check "ci.yml: ...and the block was actually found (guards the awk above)" 0 "changelog-monotonic" mono_step_block
+check "ci.yml: ...and falls back to ref_name, so a push has a base to resolve" 0 "" \
+  grep -qF 'github.base_ref || github.ref_name' "$ROOT/.github/workflows/ci.yml"
 check "CONTRIBUTING: names the append-only rule for release headings" 0 "" \
   grep -qF 'changelog-monotonic.sh' "$ROOT/CONTRIBUTING.md"
 

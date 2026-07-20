@@ -59,25 +59,17 @@ skip() {
   if [ "$strict" = "1" ]; then
     echo "changelog-monotonic: $* — and CHANGELOG_MONOTONIC_STRICT=1, so this is a FAILURE, not a skip." >&2
     echo "  CI sets STRICT because a guard that quietly stops guarding is worse than no guard." >&2
+    echo "  (Uniqueness on HEAD already passed; it is containment that cannot run.)" >&2
     echo "  Fix the checkout, not this script: the base ref must be fetched (fetch-depth: 0)." >&2
     exit 1
   fi
-  echo "changelog-monotonic: SKIPPED — $*"
-  echo "  (Nothing was checked. In CI this same condition is a hard failure.)"
+  echo "changelog-monotonic: containment SKIPPED — $*"
+  echo "  (Uniqueness on HEAD already ran and passed — only the deleted-heading"
+  echo "   half needs the history. In CI this same condition is a hard failure.)"
   exit 0
 }
 
 [ -f "$changelog" ] || { echo "changelog-monotonic: no such file: $changelog" >&2; exit 1; }
-
-git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
-  || skip "not inside a git work tree, so there is no history to compare against"
-
-git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null \
-  || skip "base ref '$base_ref' does not resolve here (a shallow clone, or a fork checkout without the upstream remote)"
-
-merge_base="$(git merge-base "$base_ref" HEAD 2>/dev/null || true)"
-[ -n "$merge_base" ] \
-  || skip "no merge base between '$base_ref' and HEAD (unrelated histories, or a clone too shallow to reach one)"
 
 # The set of RELEASE headings: '## <token> ...' where <token> looks like a
 # version. Field $2, the same split changelog-armed.sh and release-notes.sh
@@ -89,14 +81,6 @@ headings_raw() {
   '
 }
 headings() { headings_raw | sort -u; }
-
-# The changelog may not exist at the merge base at all (the commit that adds
-# it). Nothing to have deleted, so nothing to assert.
-base_file="$(git show "$merge_base:$changelog" 2>/dev/null || true)"
-[ -n "$base_file" ] || {
-  echo "changelog-monotonic: $changelog does not exist at the merge base ($(git rev-parse --short "$merge_base")) — nothing could have been deleted."
-  exit 0
-}
 
 # --- uniqueness on HEAD (the #118 class) -------------------------------------
 # Containment catches a DELETED heading. It cannot catch a DUPLICATED one: the
@@ -149,6 +133,34 @@ EOF
   exit 1
 fi
 
+# --- everything below needs the HISTORY ------------------------------------
+# Uniqueness is settled. What follows is containment, which compares HEAD
+# against the merge base and therefore genuinely depends on the base ref, the
+# merge base, and the base blob. Each of those can be unavailable for reasons
+# that are not the author's fault (a shallow clone, a fork checkout without
+# the upstream remote, the commit that first adds the changelog), so each
+# degrades rather than failing — which is exactly why the uniqueness half must
+# NOT live down here (#143). It asks nothing of the history, and gating it
+# behind these conditions let a duplicate exit 0 on a message about deletion.
+
+git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || skip "not inside a git work tree, so there is no history to compare against"
+
+git rev-parse --verify --quiet "$base_ref^{commit}" >/dev/null \
+  || skip "base ref '$base_ref' does not resolve here (a shallow clone, or a fork checkout without the upstream remote)"
+
+merge_base="$(git merge-base "$base_ref" HEAD 2>/dev/null || true)"
+[ -n "$merge_base" ] \
+  || skip "no merge base between '$base_ref' and HEAD (unrelated histories, or a clone too shallow to reach one)"
+
+# The changelog may not exist at the merge base at all (the commit that adds
+# it). Nothing to have deleted, so nothing to assert.
+base_file="$(git show "$merge_base:$changelog" 2>/dev/null || true)"
+[ -n "$base_file" ] || {
+  echo "changelog-monotonic: $changelog does not exist at the merge base ($(git rev-parse --short "$merge_base")) — nothing could have been deleted (uniqueness on HEAD already passed)."
+  exit 0
+}
+
 base_headings="$(printf '%s\n' "$base_file" | headings)"
 head_headings="$(headings < "$changelog")"
 
@@ -197,4 +209,17 @@ EOF
 fi
 
 count="$(printf '%s\n' "$base_headings" | grep -c . || true)"
-echo "changelog-monotonic: all $count release heading(s) at the merge base ($(git rev-parse --short "$merge_base")) are still present in $changelog"
+head_count="$(printf '%s\n' "$head_headings" | grep -c . || true)"
+
+# The success line has two honest forms, because this step now runs on two
+# shapes of event. On a push to main the merge base IS HEAD: containment
+# compared the file against itself and asserted nothing, and deletion is
+# undetectable on that event by construction. Reporting "all N still present"
+# there would be the same dishonesty the skip messages were fixed for — a log
+# claiming a check that did no work. Uniqueness is the half that actually ran,
+# so that is the half the line names.
+if [ "$merge_base" = "$(git rev-parse HEAD)" ]; then
+  echo "changelog-monotonic: containment vacuous (the merge base IS HEAD, so nothing could have been deleted between them) — uniqueness on HEAD checked $head_count release heading(s)."
+else
+  echo "changelog-monotonic: all $count release heading(s) at the merge base ($(git rev-parse --short "$merge_base")) are still present in $changelog"
+fi
