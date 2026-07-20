@@ -52,6 +52,45 @@ run() { # every mutation goes through here — DRY_RUN=1 logs instead of doing
 
 requested() { grep -qxF "$1" <<<"$REQUESTED"; }
 
+checks_state() { # rollup JSON on stdin → SUCCESS | FAILURE | PENDING | NONE
+  # The rollup mixes two node types with two different closed enums: CheckRun
+  # carries `conclusion` (CheckConclusionState), StatusContext carries `state`
+  # (StatusState). Rather than list the outcomes that block — the version that
+  # shipped in this PR's first round listed four, and ERROR, CANCELLED and
+  # STALE fell through its `else` into SUCCESS — this lists the outcomes that
+  # DON'T, and treats everything else as blocking.
+  #
+  # That direction is the point. An outcome we do not recognise is one we
+  # cannot certify as mergeable, and certifying the unrecognised as green is
+  # the exact shape of #136. The cost of being wrong is symmetric in form and
+  # not in consequence: a false FAILURE parks the PR on the agent, who looks;
+  # a false SUCCESS invites a human to merge a tree that will not merge.
+  jq -r '
+    # NEUTRAL and SKIPPED satisfy branch protection — a skipped required check
+    # is not a failed one, and path-filtered jobs skip constantly here.
+    ["SUCCESS", "NEUTRAL", "SKIPPED"] as $passing
+    # "" covers a StatusContext still reported with no state at all.
+    | ["", "PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "REQUESTED", "EXPECTED"] as $waiting
+
+    # A re-run does not evict the run it superseded — the rollup keeps both.
+    # This PR proved it: its own tip carried a CANCELLED `scope` (15:19:39)
+    # beside the SUCCESS `scope` (15:19:45) that replaced it, same workflow.
+    # Once CANCELLED blocks, judging every entry would strand this very PR in
+    # needs-rebase forever, so collapse each context to its newest entry first.
+    # Key on workflow + name because a bare job name is only unique within its
+    # workflow; ordering falls back through the timestamps a pending run has.
+    | [ (.statusCheckRollup // [])[]
+        | { ctx: [.workflowName // "", .name // .context // ""],
+            at:  (.completedAt // .startedAt // .createdAt // ""),
+            outcome: ((.conclusion // .state // "") | ascii_upcase) } ]
+    | group_by(.ctx) | map(sort_by(.at) | last | .outcome) as $latest
+
+    | if   ($latest | length) == 0                            then "NONE"
+      elif (($latest - $passing - $waiting) | length) > 0     then "FAILURE"
+      elif (($latest - $passing) | length) > 0                then "PENDING"
+      else "SUCCESS" end'
+}
+
 bot_verdict() { # $1 = login → MISSING | BLOCK | APPROVE | STALE | FEEDBACK
   local review state commit
   review="$(jq -c --arg u "$1" \
@@ -104,28 +143,36 @@ decide_state() { # → the one state:* label this PR should carry
   case "${MERGEABLE:-UNKNOWN}" in CONFLICTING) echo state:needs-rebase; return ;; esac
   case "${CHECKS:-NONE}" in FAILURE) echo state:needs-rebase; return ;; esac
 
-  local b v verdicts=""
+  local b verdicts=""
   for b in "${BOTS[@]}"; do
     if requested "$b"; then echo state:bots-reviewing; return; fi
   done
+  # Collect the WHOLE round before applying any precedence. Deciding inside
+  # the loop let BOTS order pick the winner: a MISSING returned immediately,
+  # so a STALE belonging to a later bot was never even read, and the mixed
+  # round (one approval staled by a push, another bot yet to review) came out
+  # needs-human — the #136 headline shape, with zero reviews bound to the head.
   for b in "${BOTS[@]}"; do
-    v="$(bot_verdict "$b")"
-    if [ "$v" = MISSING ]; then
-      # No verdict at all from this bot. An explicit human request still
-      # outranks an unfinished bot round — a maintainer pulling a PR to
-      # themselves early is a deliberate act, and the original precedence.
-      if requested "$HUMAN"; then echo state:needs-human; return; fi
-      echo state:bots-reviewing; return
-    fi
-    verdicts="$verdicts $v"
+    verdicts="$verdicts $(bot_verdict "$b")"
   done
   case "$verdicts" in
     # STALE = a verdict for an older head. Unlike MISSING, this outranks the
-    # human request: every approval was invalidated by a push, so NOBODY has
-    # reviewed this tree. Handing that to the human is the #136 case where
-    # everything reads green — mergeable, CI passing, "waiting on the human" —
-    # over code no reviewer has seen. The agent owes a re-request.
+    # human request: every approval it covers was invalidated by a push, so
+    # NOBODY has reviewed this tree. Handing that to the human is the #136 case
+    # where everything reads green — mergeable, CI passing, "waiting on the
+    # human" — over code no reviewer has seen. The agent owes a re-request.
+    # Checked before MISSING because "unfinished" must not swallow "and also
+    # stale": a round that is both is a push that outran the re-requests, not
+    # a maintainer deliberately claiming the PR early.
     *STALE*) echo state:addressing; return ;;
+  esac
+  case "$verdicts" in
+    # No verdict at all from some bot, and nothing staled. An explicit human
+    # request still outranks an unfinished round — a maintainer pulling a PR
+    # to themselves early is a deliberate act, and the original precedence.
+    *MISSING*)
+      if requested "$HUMAN"; then echo state:needs-human; return; fi
+      echo state:bots-reviewing; return ;;
   esac
   # an explicit human request outranks the remaining bot outcomes — it is the
   # final gate, and a maintainer pulling a PR to themselves early counts too
@@ -158,7 +205,7 @@ state:building|FBCA04|PR is a draft — the coding agent is still building
 state:bots-reviewing|1D76DB|Waiting on the bot reviewers to finish the round
 state:addressing|D93F0B|All bots reviewed — coding agent owes the single reply + fixes
 state:needs-rebase|B60205|Does not merge — conflicts or failing checks; the agent owes a fix
-state:needs-human|8250DF|All bots approve — waiting on the human reviewer
+state:needs-human|8250DF|Mergeable, green, all bots approve — waiting on the human reviewer
 merge-next|0E8A16|Head of the merge queue — merge this one next (set by hand/agent, cleared here)
 stale|B60205|No activity for 48h — needs a poke (sweep-managed)
 blocked|6A737D|Waiting on another PR or issue to land first
@@ -271,12 +318,7 @@ main() {
       # the "do not know" value that triggers nothing.
       GH_VIEW="$(gh pr view "$n" -R "$REPO" --json mergeable,statusCheckRollup 2>/dev/null || echo '{}')"
       MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<<"$GH_VIEW")"
-      CHECKS="$(jq -r '
-        (.statusCheckRollup // []) as $c
-        | if ($c | length) == 0 then "NONE"
-          elif ($c | map(.conclusion // .state // "") | any(. == "FAILURE" or . == "TIMED_OUT" or . == "STARTUP_FAILURE" or . == "ACTION_REQUIRED")) then "FAILURE"
-          elif ($c | map(.conclusion // .state // "") | any(. == "" or . == "PENDING" or . == "IN_PROGRESS" or . == "QUEUED")) then "PENDING"
-          else "SUCCESS" end' <<<"$GH_VIEW")"
+      CHECKS="$(checks_state <<<"$GH_VIEW")"
       reconcile_pr "$n"
     ) || log "#$n: reconcile failed — continuing with the remaining PRs"
   done

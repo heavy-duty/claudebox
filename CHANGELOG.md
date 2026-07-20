@@ -85,7 +85,25 @@ which records not just what changed but what each drill run proved.
   re-request. An *unfinished* round still yields to an explicit human request —
   a maintainer pulling a PR to themselves early is deliberate, and `MISSING`
   (nobody has reviewed yet) is a different fact from `STALE` (everyone reviewed
-  something else).
+  something else). Precedence is applied to the round as a whole, after every
+  verdict is collected: deciding inside the loop let the order of `BOTS` pick
+  the answer, so a round that was *both* unfinished and staled returned on the
+  `MISSING` before any later bot's `STALE` was read — and came out
+  `needs-human` over a head nobody had reviewed, the original bug wearing a
+  different hat.
+
+  Whether a check blocks is judged by listing the outcomes that *don't* —
+  `SUCCESS`, `NEUTRAL`, `SKIPPED`, and the pending set — rather than the
+  outcomes that do. The rollup mixes two closed enums (`CheckRun.conclusion`
+  and `StatusContext.state`), and an outcome the list forgets is one the label
+  cannot certify as mergeable: `ERROR`, `CANCELLED` and `STALE` all read as
+  green under an allow-list of failures. The costs are not symmetric — a false
+  failure parks the PR on the agent, who looks; a false success invites a human
+  to merge a tree that will not merge. Superseded runs are dropped first, each
+  context collapsing to its newest entry: a re-run does not evict the run it
+  replaced, so this PR's own tip carried a `CANCELLED` `scope` beside the
+  `SUCCESS` `scope` that superseded it, and judging every entry would have
+  stranded every re-run PR in `needs-rebase`.
 
   `UNKNOWN` mergeability is deliberately not treated as unmergeable: GitHub
   reports it for about a minute after every merge while it recomputes, and
@@ -98,7 +116,8 @@ which records not just what changed but what each drill run proved.
   `CHANGELOG.md`. Queue order is intent, so the reconciler never sets it — it
   only **clears** it the moment the PR stops being mergeable-by-a-human, which
   is precisely the staleness that made `needs-human` untrustworthy. Both live
-  shapes are pinned in `test/labels-reconcile.sh` (19 fixtures → 29).
+  shapes, the mixed round, and the whole check-outcome enum are pinned in
+  `test/labels-reconcile.sh` (19 fixtures → 44).
 
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
   `globstar` makes `**` descend into subdirectories, but a glob still does

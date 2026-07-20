@@ -185,6 +185,21 @@ REVIEWS_JSON="$(reviews \
   "$(rev "$BOT3" APPROVED oldhead "" t3)")"
 expect "stale approvals outrank the human request (nobody reviewed this tree)" state:addressing "$(decide_state)"
 
+# -- ...and a round that is BOTH unfinished and staled is still the agent's.
+#    Deciding inside the bot loop made this depend on BOTS order: the MISSING
+#    returned before any later bot's STALE was read, so the mixed round came
+#    out needs-human with nothing bound to the head. Pinned at both ends of
+#    the array, because the whole failure was one of ordering.
+MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED="$HUMAN"
+REVIEWS_JSON="$(reviews \
+  "$(rev "$BOT1" APPROVED oldhead "" t1)" \
+  "$(rev "$BOT2" APPROVED oldhead "" t2)")"
+expect "stale approvals + a bot yet to review is addressing, not needs-human" \
+  state:addressing "$(decide_state)"
+REVIEWS_JSON="$(reviews "$(rev "$BOT3" APPROVED oldhead "" t3)")"
+expect "...and the same when the stale verdict is the LAST bot in BOTS" \
+  state:addressing "$(decide_state)"
+
 # -- but an UNFINISHED round still yields to an explicit human request: a
 #    maintainer pulling a PR to themselves early is deliberate, and was the
 #    original precedence. MISSING differs from STALE — nobody has reviewed
@@ -193,6 +208,61 @@ REVIEWS_JSON="$(reviews "$(rev "$BOT1" APPROVED head1 "" t1)")"
 expect "an unfinished round still yields to an explicit human request" state:needs-human "$(decide_state)"
 REQUESTED=""
 expect "...and without that request it is still bots-reviewing" state:bots-reviewing "$(decide_state)"
+
+# ---------------------------------------------------------------------------
+# checks_state: the rollup classifier. It lived inline in main() for the first
+# round of this PR, which is why nothing here caught it calling ERROR,
+# CANCELLED and STALE green. Extracted so the enum can be pinned down.
+# ---------------------------------------------------------------------------
+rollup() { jq -n --argjson c "$1" '{statusCheckRollup: $c}'; }
+run_() { jq -n --arg n "$1" --arg o "$2" --arg t "${3:-2026-07-20T15:00:00Z}" \
+  '{__typename:"CheckRun", workflowName:"ci", name:$n, conclusion:$o, completedAt:$t}'; }
+ctx_() { jq -n --arg n "$1" --arg s "$2" --arg t "${3:-2026-07-20T15:00:00Z}" \
+  '{__typename:"StatusContext", context:$n, state:$s, createdAt:$t}'; }
+
+expect "no checks at all is NONE" NONE "$(rollup '[]' | checks_state)"
+expect "all green is SUCCESS" SUCCESS \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b SUCCESS)]" | checks_state)"
+expect "a queued run is PENDING" PENDING \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b QUEUED)]" | checks_state)"
+expect "a plain failure is FAILURE" FAILURE \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b FAILURE)]" | checks_state)"
+
+# -- the round-1 gap: outcomes that are neither success nor pending, and that
+#    leave a required check unsatisfied. All three reached the old `else`.
+expect "a commit status ERROR blocks" FAILURE \
+  "$(rollup "[$(run_ a SUCCESS),$(ctx_ lint ERROR)]" | checks_state)"
+expect "a CANCELLED run blocks" FAILURE \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b CANCELLED)]" | checks_state)"
+expect "a STALE run blocks" FAILURE \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b STALE)]" | checks_state)"
+expect "an outcome the enum does not know blocks, it does not pass" FAILURE \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b SOME_FUTURE_STATE)]" | checks_state)"
+
+# -- NEUTRAL and SKIPPED satisfy branch protection; path-filtered jobs skip
+#    constantly, and calling that red would park every PR on the agent.
+expect "NEUTRAL and SKIPPED are not failures" SUCCESS \
+  "$(rollup "[$(run_ a SUCCESS),$(run_ b NEUTRAL),$(run_ c SKIPPED)]" | checks_state)"
+
+# -- latest-wins. The rollup keeps superseded runs, so this PR's own tip
+#    carried a CANCELLED `scope` beside the SUCCESS `scope` that replaced it.
+#    Without collapsing, making CANCELLED block would strand it forever.
+expect "a re-run supersedes the cancelled original" SUCCESS \
+  "$(rollup "[$(run_ scope CANCELLED 2026-07-20T15:19:39Z),\
+              $(run_ scope SUCCESS   2026-07-20T15:19:45Z)]" | checks_state)"
+expect "...and the reverse order is not a re-run passing, it is one failing" FAILURE \
+  "$(rollup "[$(run_ scope SUCCESS   2026-07-20T15:19:39Z),\
+              $(run_ scope CANCELLED 2026-07-20T15:19:45Z)]" | checks_state)"
+# same job name in a different workflow is a different context, not a re-run
+expect "same name in another workflow does not supersede" FAILURE \
+  "$(rollup "[$(jq -n '{__typename:"CheckRun",workflowName:"labels",name:"scope",conclusion:"FAILURE",completedAt:"2026-07-20T15:00:00Z"}'),\
+              $(run_ scope SUCCESS 2026-07-20T15:19:45Z)]" | checks_state)"
+
+# -- the classifier feeds the state machine: a cancelled required check must
+#    take the PR off the human's plate, which is the whole point of #136.
+DRAFT=false HEAD_SHA=head1 REQUESTED="$HUMAN" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE
+CHECKS="$(rollup "[$(run_ a SUCCESS),$(run_ b CANCELLED)]" | checks_state)"
+expect "a cancelled check reaches decide_state as needs-rebase" state:needs-rebase "$(decide_state)"
 
 # -- the happy path survives all of the above.
 REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED=""

@@ -97,7 +97,7 @@ gh label create "state:building"       --color FBCA04 --description "PR is a dra
 gh label create "state:bots-reviewing" --color 1D76DB --description "Waiting on the bot reviewers to finish the round" --force
 gh label create "state:addressing"     --color D93F0B --description "All bots reviewed — coding agent owes the single reply + fixes" --force
 gh label create "state:needs-rebase"   --color B60205 --description "Does not merge — conflicts or failing checks; the agent owes a fix" --force
-gh label create "state:needs-human"    --color 8250DF --description "All bots approve — waiting on the human reviewer" --force
+gh label create "state:needs-human"    --color 8250DF --description "Mergeable, green, all bots approve — waiting on the human reviewer" --force
 gh label create "merge-next"           --color 0E8A16 --description "Head of the merge queue — merge this one next (set by hand/agent, cleared here)" --force
 gh label create "stale"                --color B60205 --description "No activity for 48h — needs a poke (sweep-managed)" --force
 gh label create "blocked"              --color 6A737D --description "Waiting on another PR or issue to land first" --force
