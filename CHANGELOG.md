@@ -89,6 +89,21 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **A failed rollup read no longer reads as "nothing is failing"** — when
+  `gh pr view` returned nothing, the fallback left the `statusCheckRollup`
+  *key* absent, and `checks_state` collapsed that into the same `NONE` as a PR
+  that genuinely has no checks. `NONE` blocks nothing, so a transient API
+  failure presented as mergeable-by-a-human: the same
+  unknown-certified-as-green shape as #136, surviving in the one place that
+  fix never looked.
+
+  `checks_state` now distinguishes the two — `UNREADABLE` for an absent key,
+  `NONE` for a present-but-empty array — and the sweep leaves an `UNREADABLE`
+  PR exactly as it is rather than relabelling on facts it did not read. It is
+  deliberately **not** a blocker: blocking on it would flap the entire board
+  on one bad API call, and the next tick is fifteen minutes away. Fixtures
+  64 → 66.
+
 - **`state:needs-human` no longer appears on PRs a human cannot merge** (#136)
   — `decide_state()` derived state from three inputs (draft flag, requested
   reviewers, submitted reviews) and read *nothing* about mergeability or
