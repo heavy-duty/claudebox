@@ -68,19 +68,30 @@ jobs:
       # says which check found the drift without anyone reading a suite.
       - name: changelog is armed for the next entry
         run: bash .github/scripts/changelog-armed.sh
-      # ...and no SHIPPED release heading was deleted (#122). Its own step for
-      # the same reason as the one above — when it goes red the log names the
-      # invariant that broke — but a DIFFERENT invariant: armed is a fact
-      # about this tree, monotonicity is a fact about this tree versus its
-      # merge base. Pull requests only: on a push to main the merge base IS
-      # HEAD, so the assert is vacuous and would only add a green step that
-      # proves nothing. STRICT=1 so a checkout that cannot reach the base ref
+      # ...and no SHIPPED release heading was deleted or DUPLICATED (#122, #143).
+      # Its own step for the same reason as the one above — when it goes red the
+      # log names the invariant that broke — but a DIFFERENT invariant: armed is
+      # a fact about this tree, monotonicity is a fact about this tree versus
+      # its merge base. STRICT=1 so a checkout that cannot reach the base ref
       # fails here instead of skipping quietly forever.
-      - name: no shipped changelog heading was deleted
-        if: github.event_name == 'pull_request'
+      #
+      # NOT pull-request-only, and that is the #143 fix at the workflow level.
+      # The two halves have different vacuity: DELETION is vacuous on a push to
+      # main (the merge base IS HEAD), but DUPLICATION is vacuous on no tree at
+      # all, so gating the whole script on `pull_request` left a duplicate that
+      # reached main by any other route unasserted forever.
+      #
+      # The `|| github.ref_name` fallback is load-bearing, not defensive. On a
+      # push event `github.base_ref` is EMPTY, so the argument would collapse to
+      # a bare `origin/`, which does not resolve — and STRICT=1 correctly
+      # promotes that to a hard failure, turning every push to main red. With
+      # the fallback it resolves to the pushed branch, whose merge base with
+      # HEAD is HEAD or its parent: containment passes vacuously, exactly as the
+      # old `if` intended, while uniqueness now runs on every push.
+      - name: no shipped changelog heading was deleted or duplicated
         env:
           CHANGELOG_MONOTONIC_STRICT: '1'
-        run: bash .github/scripts/changelog-monotonic.sh "origin/${{ github.base_ref }}"
+        run: bash .github/scripts/changelog-monotonic.sh "origin/${{ github.base_ref || github.ref_name }}"
 
   # The multi-user rehearsal, on a REAL incus — a GitHub runner is root on a
   # disposable VM, which is exactly the substrate the rehearsal needs. It runs

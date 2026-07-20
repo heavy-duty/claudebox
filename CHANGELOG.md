@@ -97,6 +97,39 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **`changelog-monotonic.sh` no longer lets a duplicate heading through on the
+  paths where it cannot see the base** (#143) — the uniqueness half is a
+  property of HEAD alone, but it sat downstream of the base-ref, merge-base and
+  base-blob conditions, so each of those degradations returned success on a tree
+  with a duplicate in plain sight.
+
+  The base-blob case was the worst of the three because it was not a skip at
+  all: a branch that *introduces* `CHANGELOG.md` exited 0 through a bare
+  `exit 0`, on a message that was true about deletion and silent about the
+  duplicate in front of it. `STRICT=1` could not reach it — STRICT guards the
+  two `skip()` calls, and that path is not one of them. Off CI the two skips had
+  the same shape, so a shallow clone or an unpacked tarball would not look at a
+  duplicate the author was about to push.
+
+  This inverted the value of the two halves. Deletion is the failure that needs
+  a diff to see; duplication is the one `release-notes.sh` actually mis-renders,
+  re-arming its grab on the second heading and absorbing whatever sits between
+  the copies (#118). The half with the live extraction bug behind it was the
+  half with the most ways to silently not run.
+
+  Fixed by moving, not rewriting: uniqueness now runs directly after the file
+  exists, before any git access. The skip messages say *containment* skipped and
+  that uniqueness already passed, so a skip no longer claims nothing was
+  checked. The guard is also no longer gated to `pull_request` — deletion is
+  vacuous on a push to main, but duplication is vacuous on no tree, so a
+  duplicate reaching main by any other route went unasserted. That gate could
+  not simply be dropped: `github.base_ref` is empty on a push, and a bare
+  `origin/` under `STRICT=1` is a hard failure on every push to main, so the
+  base ref falls back to `github.ref_name`.
+
+  Found by `claude-bot-andresmgsl` reviewing the ports in heavy-duty/rig#99 and
+  heavy-duty/cast#134, which inherited the ordering from here.
+
 - **A failed rollup read no longer reads as "nothing is failing"** — when
   `gh pr view` returned nothing, the fallback left the `statusCheckRollup`
   *key* absent, and `checks_state` collapsed that into the same `NONE` as a PR
