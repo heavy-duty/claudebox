@@ -34,10 +34,13 @@ labels tell you where everything is without opening anything.
    maintainer's review (step 6), and the reconciler flips the label on that
    request, because an explicit request is a fact it can trust.
 6. **When the round passes, the author hands the PR to the maintainer** by
-   requesting their review — that request is what flips `state:needs-human`.
-   With three formal head-current approvals the labels workflow requests it
-   automatically; when part of the panel is comment-only, reading their
-   agreement is the author's judgment, so the author makes the request.
+   requesting their review — that request is what flips `state:needs-human`,
+   provided the PR carries **no `blocker:*` label**. A blocker means the work
+   is still yours whatever the round said, so a request on a conflicted or red
+   PR will not flip it. With three formal head-current approvals the labels
+   workflow requests the maintainer automatically; when part of the panel is
+   comment-only, reading their agreement is the author's judgment, so the
+   author makes the request.
 7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
    mirror what CI runs; the multi-user rehearsal runs in CI on a real Incus.
 
@@ -144,11 +147,13 @@ machine-owned label just gets corrected on the next pass:
 
 | Labels | Set by |
 |---|---|
-| `state:*` | the labels workflow ([.github/workflows/labels.yml](.github/workflows/labels.yml)) — recomputed from GitHub's own facts every 15 minutes and on PR events. Never by hand. |
+| `state:*` | the labels workflow ([.github/workflows/labels.yml](.github/workflows/labels.yml)) — recomputed from GitHub's own facts every 15 minutes and on PR events. Never by hand. Exactly one per PR: *whose ball is it.* |
+| `blocker:*` | the same workflow, from the same facts — *what is in the way.* Any number per PR, or none. Never by hand: applying one does not stop a merge, and removing one does not unblock anything. Fix the thing and the next sweep drops the label. |
 | `stale` | the same workflow — 48h without commits, comments, or reviews. `blocked` PRs are exempt: they are quiet legitimately. |
 | `scope:*` on PRs | actions/labeler, from the changed paths ([.github/labeler.yml](.github/labeler.yml)). Additive — you may add more, the machine won't remove them. |
 | `scope:*` on issues | you, when opening or triaging — issues have no paths to derive from. |
 | `blocked`, `release` | you — automation never guesses intent. |
+| `merge-next` | you or the agent owning the queue. Which PR lands first is a judgement about how they conflict, so the workflow never sets it — it only **clears** it, the moment the PR stops being something a human could merge. |
 | `bug` / `enhancement` / `documentation` | you, on issues only — a PR's type already lives in its title. |
 
 ## Issues
