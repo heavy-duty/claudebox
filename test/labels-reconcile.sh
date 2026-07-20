@@ -44,10 +44,15 @@ $BOT3" REVIEWS_JSON='[]'
 expect "requested bots mean bots-reviewing" state:bots-reviewing "$(decide_state)"
 
 # -- a bot that never reviewed keeps the round open ---------------------------
-REQUESTED="" REVIEWS_JSON="$(reviews \
+#    With a live request that is the bots' ball; with NO request outstanding it
+#    is the agent's, because nothing is coming until somebody asks.
+REQUESTED="$BOT3" REVIEWS_JSON="$(reviews \
   "$(rev "$BOT1" APPROVED head1 "" t1)" \
   "$(rev "$BOT2" APPROVED head1 "" t2)")"
-expect "missing bot review means bots-reviewing" state:bots-reviewing "$(decide_state)"
+expect "a missing bot WITH a live request is bots-reviewing" state:bots-reviewing "$(decide_state)"
+REQUESTED=""
+expect "...but with nobody asked it is the agent's ball" state:addressing "$(decide_state)"
+expect "...and the blocker names the stall" blocker:unrequested "$(blockers)"
 
 # -- a comment is a non-verdict, agreement body or not: the author escalates --
 REVIEWS_JSON="$(reviews \
@@ -157,23 +162,55 @@ ALL_APPROVE="$(reviews \
   "$(rev "$BOT3" APPROVED head1 "" t3)")"
 
 # -- flavour 1: not mergeable. The merge button is disabled, yet the board
-#    said "your turn" on #119/#120/#127 for hours.
+#    said "your turn" on #119/#120/#127 for hours. The branch fact now rides
+#    the blocker axis; the state says whose ball it is, which is the agent's.
 DRAFT=false HEAD_SHA=head1 REQUESTED="" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=CONFLICTING CHECKS=SUCCESS
-expect "a CONFLICTING PR is needs-rebase, not needs-human" state:needs-rebase "$(decide_state)"
+expect "a CONFLICTING PR is the agent's, not the human's" state:addressing "$(decide_state)"
+expect "...and says WHY on the blocker axis" blocker:conflict "$(blockers)"
 REQUESTED="$HUMAN"
-expect "...even with the human explicitly requested" state:needs-rebase "$(decide_state)"
+expect "...even with the human explicitly requested" state:addressing "$(decide_state)"
 
-# -- red CI is the same claim: not something a human should merge.
+# -- red CI is the same claim, but NOT the same work: a rebase does not fix a
+#    failing test. Collapsing both into one needs-rebase label told the agent
+#    to do the wrong thing, which is why the axis split exists.
 REQUESTED="" MERGEABLE=MERGEABLE CHECKS=FAILURE
-expect "a red PR is needs-rebase" state:needs-rebase "$(decide_state)"
+expect "a red PR is the agent's" state:addressing "$(decide_state)"
+expect "...and is distinguishable from a conflict" blocker:ci-red "$(blockers)"
 REQUESTED="$HUMAN"
-expect "...and a human request does not override red CI" state:needs-rebase "$(decide_state)"
+expect "...and a human request does not override red CI" state:addressing "$(decide_state)"
+
+# -- both at once. The single-axis design could not say this at all: one label
+#    had to win, and the loser silently vanished off the board.
+REQUESTED="" MERGEABLE=CONFLICTING CHECKS=FAILURE
+expect "a conflicted AND red PR reports both blockers" "blocker:conflict
+blocker:ci-red" "$(blockers)"
+expect "...and is still just the agent's ball" state:addressing "$(decide_state)"
 
 # -- UNKNOWN is NOT unmergeable. GitHub reports it for ~a minute after every
 #    merge while it recomputes; treating it as broken would flap every open PR
-#    into needs-rebase on each merge — worse than the bug being fixed.
+#    on each merge — worse than the bug being fixed.
 REQUESTED="" MERGEABLE=UNKNOWN CHECKS=PENDING
-expect "UNKNOWN mergeability does not trigger needs-rebase" state:needs-human "$(decide_state)"
+expect "UNKNOWN mergeability blocks nothing" state:needs-human "$(decide_state)"
+expect "...and raises no blocker" "" "$(blockers)"
+
+# -- blocker:unrequested — the stalled round. Nobody owes an answer because
+#    nobody was ever asked, yet the board read "waiting on the bots" until
+#    `stale` noticed 48h later.
+MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED="" REVIEWS_JSON='[]'
+expect "ready, nobody asked, nothing reviewed raises unrequested" blocker:unrequested "$(blockers)"
+# ...the partial case is equally stalled: one verdict in, nobody asked for the rest
+REVIEWS_JSON="$(reviews "$(rev "$BOT1" APPROVED head1 "" t1)")"
+expect "one bot in, none requested is still unrequested" blocker:unrequested "$(blockers)"
+# ...but a live request means an answer IS coming
+REQUESTED="$BOT2"
+expect "a live bot request is not a stalled round" "" "$(blockers)"
+# ...and a draft is exempt: the bots ignore drafts by design
+DRAFT=true REQUESTED="" REVIEWS_JSON='[]'
+expect "a draft with nobody asked is not stalled" "" "$(blockers)"
+# ...as is an explicit human request — claiming a PR early is deliberate
+DRAFT=false REQUESTED="$HUMAN"
+expect "an early human claim is not a stalled round" "" "$(blockers)"
+REQUESTED="" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE CHECKS=SUCCESS
 
 # -- flavour 2 (the dangerous one): mergeable, green, human requested, and
 #    NOBODY has reviewed this head. Observed on #119 after a rebase: every
@@ -207,7 +244,7 @@ expect "...and the same when the stale verdict is the LAST bot in BOTS" \
 REVIEWS_JSON="$(reviews "$(rev "$BOT1" APPROVED head1 "" t1)")"
 expect "an unfinished round still yields to an explicit human request" state:needs-human "$(decide_state)"
 REQUESTED=""
-expect "...and without that request it is still bots-reviewing" state:bots-reviewing "$(decide_state)"
+expect "...and without that request the agent owes the ask" state:addressing "$(decide_state)"
 
 # ---------------------------------------------------------------------------
 # checks_state: the rollup classifier. It lived inline in main() for the first
@@ -314,7 +351,8 @@ expect "...and the same when it finished green — mid-flight is not mergeable" 
 #    take the PR off the human's plate, which is the whole point of #136.
 DRAFT=false HEAD_SHA=head1 REQUESTED="$HUMAN" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE
 CHECKS="$(rollup "[$(run_ a SUCCESS),$(run_ b CANCELLED)]" | checks_state)"
-expect "a cancelled check reaches decide_state as needs-rebase" state:needs-rebase "$(decide_state)"
+expect "a cancelled check reaches decide_state as the agent's ball" state:addressing "$(decide_state)"
+expect "...via blocker:ci-red, not a conflict" blocker:ci-red "$(blockers)"
 
 # -- the happy path survives all of the above.
 REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED=""

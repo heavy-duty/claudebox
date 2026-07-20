@@ -7,6 +7,34 @@ which records not just what changed but what each drill run proved.
 
 ### Changed
 
+- **PR labels split into two axes: `state:*` (whose ball) and `blocker:*`
+  (what is in the way)** — `state:needs-rebase` is retired, replaced by
+  `blocker:conflict`, `blocker:ci-red` and `blocker:unrequested`. One rule
+  joins them: `state:needs-human` requires zero blockers.
+
+  The single-label design forced independent facts through one totally-ordered
+  value, and the ordering was where every bug lived. Mergeability, check
+  status and the review round move independently — a PR can be conflicted
+  *and* red *and* stalled at once — so a total order has to pick a winner and
+  silently drop the rest. `state:needs-rebase` was the clearest casualty: it
+  fired on both a conflict and a failing check, which need opposite work, and
+  told an agent to rebase when what it owed was a bug fix. On this repo's own
+  board, #120 was conflicted **and** red and could only say one of them.
+
+  Blockers are a set, so there is no precedence between them to get wrong.
+  What is left on the ordered axis is purely about reviews, which is the one
+  place an ordering is genuinely meaningful.
+
+  `state:bots-reviewing` also tightens to mean strictly *a request is live and
+  an answer is coming*. A ready PR nobody was asked to review read "waiting on
+  the reviewers" for the 48 hours it took the stale sweep to notice; it is now
+  `state:addressing` + `blocker:unrequested`, because the agent owes the ask.
+  Drafts are exempt (the bots ignore drafts by design), as is an explicit
+  human request — a maintainer claiming a PR early is deliberate.
+
+  The reconciler strips `state:needs-rebase` on sight, so the retirement heals
+  the board rather than stranding a label nothing recomputes. Fixtures 51 → 64.
+
 - **The tenant templates carry rig's family suffix: `claude` → `claude-box`,
   `codex` → `codex-box`, `grok` → `grok-box`, `staging` → `staging-box`**
   (#123, following heavy-duty/rig#76) — rig is growing a second family of

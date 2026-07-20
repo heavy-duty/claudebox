@@ -16,33 +16,61 @@ single reply, and a human takes the final review.
 |---|---|---|---|---|
 | `state:building` | `#FBCA04` | the coding agent, still building | PR opened as draft | marked ready + bot reviews requested |
 | `state:bots-reviewing` | `#1D76DB` | the reviewer bots to finish the round | ready with reviews requested, or fixes pushed and reviews re-requested | all three bots have reviewed the round |
-| `state:addressing` | `#D93F0B` | the coding agent to reply and push fixes | all bots reviewed the round, not all approved | the single round-reply is posted and fixes pushed |
-| `state:needs-rebase` | `#B60205` | the coding agent to rebase or fix | the branch does not merge — GitHub says `CONFLICTING`, or a check has failed | it merges cleanly and checks are green again |
-| `state:needs-human` | `#8250DF` | the human reviewer | the PR **could be merged right now**: mergeable, checks not failing, three formal head-current approvals — and the human review is requested | merged — or changes requested, which cycles back to `state:addressing` |
+| `state:addressing` | `#D93F0B` | the coding agent to reply, fix, or ask | all bots reviewed and not all approved; or nobody was asked; or a blocker is up | the thing the blocker names is done |
+| `state:needs-human` | `#8250DF` | the human reviewer | the PR **could be merged right now**: no blockers, three formal head-current approvals — and the human review is requested | merged — or changes requested, which cycles back to `state:addressing` |
 
 `bots-reviewing` and `addressing` are deliberately distinct: staleness in the
 first means *poke the bots*, staleness in the second means *the agent dropped
 the ball*. Collapsing them loses exactly the information a sweep needs.
+`bots-reviewing` therefore means strictly *a request is live and an answer is
+coming* — a PR nobody was asked to review is the agent's ball, not the bots'.
+
+## The second axis: `blocker:*`
+
+State answers *whose ball is it*. Blockers answer *what is in the way*, and
+unlike states they are *facts about the branch* — mutually independent, so a
+PR carries as many as apply.
+
+| Label | Color | Means | Clears when |
+|---|---|---|---|
+| `blocker:conflict` | `#B60205` | GitHub says `CONFLICTING` — the agent owes a **rebase** | it merges cleanly |
+| `blocker:ci-red` | `#B60205` | a check failed — the agent owes a **fix**, which a rebase will not provide | checks are green |
+| `blocker:unrequested` | `#E99695` | somebody still owes a verdict and **nobody was asked** for one | reviews are requested |
+
+One rule joins the axes: **`state:needs-human` requires zero blockers.** Any
+blocker means the work is the agent's, whatever the review round says.
+
+This split exists because the single-label version kept lying. Independent
+facts were projected onto one totally-ordered label, so one always had to win
+and the losers vanished off the board: a PR that was *both* conflicted and red
+could only say one of them, and `needs-rebase` told an agent to rebase when
+what it actually owed was a bug fix. Precedence between two blockers is not a
+question a set has to answer, which is why every ordering bug this machine has
+had — `needs-human` surviving a conflict, `MISSING` swallowing `STALE` — lived
+on the axis that had to be totally ordered.
+
+`state:needs-rebase` was the first attempt at this and is **retired**; the
+reconciler strips it on sight so no PR is left carrying a label nothing
+recomputes.
 
 **`state:needs-human` means one thing: a human could merge this right now.**
-Anything that makes that false outranks the review request that put it there,
-because the label is the only signal a maintainer scanning the board (or a
-phone) actually reads — and a label that says "your turn" on an unmergeable PR
-is worse than no label at all. Two things therefore take precedence over an
+The label is the only signal a maintainer scanning the board (or a phone)
+actually reads, and one that says "your turn" on an unmergeable PR is worse
+than no label at all. So beyond the blockers, one review fact also outranks an
 explicit human request:
 
-- **it does not merge** — `CONFLICTING`, or a failing check → `state:needs-rebase`
 - **nobody reviewed *this* head** — every approval staled by a push → `state:addressing`,
   because the agent owes a re-request
 
-The second is the more dangerous of the two: with a conflict, GitHub at least
-disables the merge button, while a staled-approval PR reads green, mergeable
+That case is more dangerous than any blocker: a blocked PR at least shows an X
+or a disabled merge button, while a staled-approval PR reads green, mergeable
 and "waiting on the human" over code no reviewer has seen.
 
-`UNKNOWN` mergeability is deliberately **not** treated as unmergeable. GitHub
+`UNKNOWN` mergeability is deliberately **not** treated as a conflict. GitHub
 reports it for about a minute after every merge while it recomputes, and
-flapping every open PR through `needs-rebase` on each merge would be worse than
-the bug this precedence fixes.
+flapping every open PR through `blocker:conflict` on each merge would be worse
+than the bug this fixes. A failed read of either branch fact degrades to the
+same "do not know" value, for the same reason.
 
 An *unfinished* round still yields to an explicit human request — a maintainer
 pulling a PR to themselves early is a deliberate act. `MISSING` (nobody has
@@ -96,8 +124,12 @@ missing label idempotently. To create them by hand (needs push access):
 gh label create "state:building"       --color FBCA04 --description "PR is a draft — the coding agent is still building" --force
 gh label create "state:bots-reviewing" --color 1D76DB --description "Waiting on the bot reviewers to finish the round" --force
 gh label create "state:addressing"     --color D93F0B --description "All bots reviewed — coding agent owes the single reply + fixes" --force
-gh label create "state:needs-rebase"   --color B60205 --description "Does not merge — conflicts or failing checks; the agent owes a fix" --force
-gh label create "state:needs-human"    --color 8250DF --description "Mergeable, green, all bots approve — waiting on the human reviewer" --force
+gh label create "blocker:conflict"     --color B60205 --description "Does not merge — the branch conflicts and the agent owes a rebase" --force
+gh label create "blocker:ci-red"       --color B60205 --description "A check is failing — the agent owes a fix (not a rebase)" --force
+gh label create "blocker:unrequested"  --color E99695 --description "Somebody still owes a verdict and nobody was asked for one" --force
+# retired — the reconciler strips it; delete it once no PR carries it
+# gh label delete "state:needs-rebase"
+gh label create "state:needs-human"    --color 8250DF --description "No blockers, all bots approve — waiting on the human reviewer" --force
 gh label create "merge-next"           --color 0E8A16 --description "Head of the merge queue — merge this one next (set by hand/agent, cleared here)" --force
 gh label create "stale"                --color B60205 --description "No activity for 48h — needs a poke (sweep-managed)" --force
 gh label create "blocked"              --color 6A737D --description "Waiting on another PR or issue to land first" --force

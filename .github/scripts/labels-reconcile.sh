@@ -31,7 +31,11 @@ set -euo pipefail
 
 HUMAN="${HUMAN_REVIEWER:-danmt}"
 BOTS=(claude-bot-andresmgsl codex-bot-andresmgsl grok-bot-andresmgsl)
-STATES=(state:building state:needs-rebase state:bots-reviewing state:addressing state:needs-human)
+STATES=(state:building state:bots-reviewing state:addressing state:needs-human)
+BLOCKERS=(blocker:conflict blocker:ci-red blocker:unrequested)
+# Labels this machine used to own and no longer does. Cleared on sight so a
+# retirement heals the board instead of stranding a label nothing recomputes.
+RETIRED=(state:needs-rebase)
 STALE_AFTER=$((48 * 3600))
 
 log() { printf 'labels: %s\n' "$*"; }
@@ -153,25 +157,61 @@ human_request_needed() { # 0 when needs-human requires a FRESH human request
   return 0
 }
 
+blockers() { # → the blocker:* labels this PR should carry, one per line
+  # The second axis. These are FACTS ABOUT THE BRANCH, and they are mutually
+  # independent — a PR can be conflicted and red and unasked at once — so they
+  # are a set, not an ordering. That is the whole point of splitting them out
+  # of state:*: every precedence bug this machine has had (needs-human
+  # surviving a conflict, MISSING swallowing STALE) came from projecting
+  # independent facts onto one totally-ordered label. A set has no precedence
+  # to get wrong.
+  #
+  # UNKNOWN mergeability is deliberately NOT a conflict: GitHub reports it for
+  # about a minute after every merge while it recomputes, and flapping every
+  # open PR on each merge would be worse than the bug. Same for a failed read
+  # of either fact — both default to the "do not know" value, which blocks
+  # nothing. An unset global (an older fixture, a failed fetch) must never
+  # invent a verdict it did not read.
+  case "${MERGEABLE:-UNKNOWN}" in CONFLICTING) echo blocker:conflict ;; esac
+  case "${CHECKS:-NONE}" in FAILURE) echo blocker:ci-red ;; esac
+
+  # Nobody is on the hook for a verdict somebody still owes. Distinct from
+  # bots-reviewing, which says a request is live and an answer is coming:
+  # here the round is stalled because no one was ever asked, and the board
+  # said "waiting on the bots" for the 48h it took `stale` to notice.
+  # A draft is exempt (the bots ignore drafts by design), and so is an
+  # explicit human request — a maintainer claiming a PR early is deliberate,
+  # not a dropped ball.
+  if [ "$DRAFT" != true ] && ! requested "$HUMAN"; then
+    local b any_missing=false any_requested=false
+    for b in "${BOTS[@]}"; do
+      requested "$b" && any_requested=true
+      [ "$(bot_verdict "$b")" = MISSING ] && any_missing=true
+    done
+    if [ "$any_missing" = true ] && [ "$any_requested" = false ]; then
+      echo blocker:unrequested
+    fi
+  fi
+}
+
 decide_state() { # → the one state:* label this PR should carry
   if [ "$DRAFT" = true ]; then echo state:building; return; fi
 
-  # state:needs-human means ONE thing: a human could merge this right now.
-  # Anything that makes that false outranks the request that put it there —
-  # otherwise the board invites a merge that cannot or must not happen, and
-  # nothing else on the page contradicts it (#136).
-  #
-  # A conflicted or red branch is the agent's to fix, not the human's to
-  # merge. UNKNOWN is deliberately NOT treated as unmergeable: GitHub reports
-  # it for a minute after every merge while it recomputes, and flapping every
-  # open PR through needs-rebase on each merge would be worse than the bug.
-  # An unknown mergeability simply does not trigger this arm; the next sweep
-  # sees the settled value.
-  # Both default to the "do not know" value: an unset global (older fixture,
-  # a failed fetch) must never invent a verdict it did not read.
-  case "${MERGEABLE:-UNKNOWN}" in CONFLICTING) echo state:needs-rebase; return ;; esac
-  case "${CHECKS:-NONE}" in FAILURE) echo state:needs-rebase; return ;; esac
+  local s
+  s="$(round_state)"
 
+  # The one rule joining the two axes: state:needs-human means a human could
+  # merge this RIGHT NOW, so it requires a clear branch. Any blocker at all
+  # means the work is the agent's — whatever the review round says — and the
+  # blocker label says which work it is. Nothing else in this function reads
+  # the branch, which is what keeps the ordering below purely about reviews.
+  if [ "$s" = state:needs-human ] && [ -n "$(blockers)" ]; then
+    echo state:addressing; return
+  fi
+  echo "$s"
+}
+
+round_state() { # → the state the REVIEW ROUND alone implies; knows no branch facts
   local b verdicts=""
   for b in "${BOTS[@]}"; do
     if requested "$b"; then echo state:bots-reviewing; return; fi
@@ -199,9 +239,16 @@ decide_state() { # → the one state:* label this PR should carry
     # No verdict at all from some bot, and nothing staled. An explicit human
     # request still outranks an unfinished round — a maintainer pulling a PR
     # to themselves early is a deliberate act, and the original precedence.
+    #
+    # Otherwise it is the AGENT's ball, not the bots'. The loop above already
+    # returned for every live bot request, so reaching here with a MISSING
+    # means somebody owes a verdict and nobody was asked for one — the round
+    # is not running. Calling that bots-reviewing was the lie that let a
+    # forgotten PR read "waiting on the reviewers" for the 48h it took the
+    # stale sweep to notice. blocker:unrequested says why.
     *MISSING*)
       if requested "$HUMAN"; then echo state:needs-human; return; fi
-      echo state:bots-reviewing; return ;;
+      echo state:addressing; return ;;
   esac
   # an explicit human request outranks the remaining bot outcomes — it is the
   # final gate, and a maintainer pulling a PR to themselves early counts too
@@ -233,8 +280,10 @@ bootstrap_labels() { # dispatch-only: ~20 upserts is too chatty for every cron t
 state:building|FBCA04|PR is a draft — the coding agent is still building
 state:bots-reviewing|1D76DB|Waiting on the bot reviewers to finish the round
 state:addressing|D93F0B|All bots reviewed — coding agent owes the single reply + fixes
-state:needs-rebase|B60205|Does not merge — conflicts or failing checks; the agent owes a fix
-state:needs-human|8250DF|Mergeable, green, all bots approve — waiting on the human reviewer
+state:needs-human|8250DF|No blockers, all bots approve — waiting on the human reviewer
+blocker:conflict|B60205|Does not merge — the branch conflicts and the agent owes a rebase
+blocker:ci-red|B60205|A check is failing — the agent owes a fix (not a rebase)
+blocker:unrequested|E99695|Somebody still owes a verdict and nobody was asked for one
 merge-next|0E8A16|Head of the merge queue — merge this one next (set by hand/agent, cleared here)
 stale|B60205|No activity for 48h — needs a poke (sweep-managed)
 blocked|6A737D|Waiting on another PR or issue to land first
@@ -267,17 +316,34 @@ reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
     log "#$n: requested $HUMAN (round passed)"
   fi
 
-  # ---- converge the state:* labels ----
+  # ---- converge both axes ----
+  # state:* is exclusive (everything but $desired comes off); blocker:* is a
+  # set (each one on or off on its own); RETIRED always comes off. One edit
+  # call for all of it, so a PR never flickers through a half-applied board.
+  local want_blockers add=""
+  want_blockers="$(blockers)"
+
   remove=""
   for s in "${STATES[@]}"; do
     if [ "$s" != "$desired" ] && has_label "$s"; then remove="$remove,$s"; fi
   done
+  for s in "${RETIRED[@]}"; do
+    if has_label "$s"; then remove="$remove,$s"; fi
+  done
+  for s in "${BLOCKERS[@]}"; do
+    if grep -qxF "$s" <<<"$want_blockers"; then
+      has_label "$s" || add="$add,$s"
+    else
+      has_label "$s" && remove="$remove,$s"
+    fi
+  done
+  add="${add#,}"
   remove="${remove#,}"
-  if ! has_label "$desired" || [ -n "$remove" ]; then
-    args=(--add-label "$desired")
+  if ! has_label "$desired" || [ -n "$remove" ] || [ -n "$add" ]; then
+    args=(--add-label "$desired${add:+,$add}")
     [ -n "$remove" ] && args+=(--remove-label "$remove")
     if run gh issue edit "$n" -R "$REPO" "${args[@]}" >/dev/null; then
-      log "#$n: state -> $desired${remove:+ (cleared $remove)}"
+      log "#$n: state -> $desired${add:+ +$add}${remove:+ (cleared $remove)}"
     else
       # a deleted label must not wedge the sweep — dispatch heals the taxonomy
       log "#$n: WARNING: label edit failed (missing label? run the workflow manually to bootstrap)"
