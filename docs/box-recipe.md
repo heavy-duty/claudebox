@@ -2,9 +2,9 @@
 
 `box` mints trust-less, creds-free, isolated VMs with a coding agent already
 installed (`box new/shell/snapshot/restore/exec/down/start/rm/status`) — the
-`claude`, `codex`, and `grok` templates each ship a CLI agent. The tool knows
-**nothing** about your project. There is no `install` step and no host-run
-setup script.
+`claude-box`, `codex-box`, and `grok-box` templates each ship a CLI agent. The
+tool knows **nothing** about your project. There is no `install` step and no
+host-run setup script.
 
 A project makes itself easy to stand up inside a box by shipping an optional
 `.box/` folder. This folder is **agent-facing documentation** — read and

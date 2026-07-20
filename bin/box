@@ -185,7 +185,7 @@ OPTIONS
 
 EXAMPLES
   # mint a claude box and log in inside it — the tool never handles your token
-  box new --name work --template claude
+  box new --name work --template claude-box
   box shell work                    # then: run 'claude', then /login
 
   # log in once, reuse forever: checkpoint the authed box, clone from it
@@ -242,13 +242,13 @@ help_cmd() {
   case "$1" in
     new) cat <<'EOF'
 Mint a box. Without --from, launches a fresh box from a template (default:
-blank — bare Debian 13, nobody home; --template claude gets Claude Code
+blank — bare Debian 13, nobody home; --template claude-box gets Claude Code
 installed, creds-free, ~10 min cold). With --from, clones an existing box or
 one of its snapshots — login state, git creds and clones carry over,
 isolation is preserved, and the clone knows its template's user without
 being told.
 
-A tenant template (claude, codex, grok, staging) is a THIN seed — the user,
+A tenant template (claude-box, codex-box, grok-box, staging-box) is a THIN seed — the user,
 tmux, rig (#81) — and after cloud-init box auto-runs the creds-free tenant
 role inside it ('rig bootstrap <role>', rig#31): that role installs the
 agent CLI / server posture and the agent-context file. rig is preinstalled
@@ -286,8 +286,8 @@ BOX_LAUNCH_TIMEOUT=<seconds> (default 600) bounds the 'incus launch' call —
 a launch that overruns it fails loudly instead of hanging forever (#93).
 
   box new --name scratch                     # blank, the default
-  box new --name work --template claude
-  box new --name lean --template claude --cpu 2 --memory 3GiB
+  box new --name work --template claude-box
+  box new --name lean --template claude-box --cpu 2 --memory 3GiB
   box new --name feature --from work/authed
 EOF
 ;;
@@ -473,7 +473,7 @@ The in-box server must listen on 0.0.0.0:<port>, not only its own loopback —
 a VM's forwarder connects to the box over the network. Inside an isolated box
 that is safe: nothing but this proxy can reach the port.
 
-  box new --name web --template claude
+  box new --name web --template claude-box
   box shell web        # inside: run a dev server on 0.0.0.0:3000
   box expose web 3000  # then open http://127.0.0.1:3000 in your browser
 EOF
@@ -1183,14 +1183,23 @@ cmd_new() {
       fi
     fi
   fi
-  # The login hint belongs to the claude template — read the EFFECTIVE
-  # template off the instance, so a clone of a claude box gets it too and a
-  # blank box is not told to run a binary it doesn't have.
+  # The login hint belongs to the claude-box template — read the EFFECTIVE
+  # template off the instance, so a clone of a claude-box box gets it too and
+  # a blank box is not told to run a binary it doesn't have.
+  #
+  # Both spellings match, and that is not an alias for the ROLE. The role
+  # names are a hard cut (rig#76) — 'rig bootstrap claude' is gone, so the
+  # seeds ask for 'claude-box' and nothing here softens that. What these arms
+  # read is user.box.template, a stamp left on an INSTANCE at its own mint
+  # time: every box minted before the rename carries the bare name forever,
+  # and a clone carries it forward. Refusing the old spelling here would not
+  # cut anything over, it would only drop the hint on boxes that predate the
+  # rename — the same reason user.claudebox is honored everywhere else.
   local eff; eff="$(incus config get "$instance" user.box.template 2>/dev/null || true)"
-  [ -z "$eff" ] && [ "$(incus config get "$instance" user.claudebox 2>/dev/null || true)" = 1 ] && eff=claude
-  if [ "$eff" = claude ]; then
+  [ -z "$eff" ] && [ "$(incus config get "$instance" user.claudebox 2>/dev/null || true)" = 1 ] && eff=claude-box
+  if [ "$eff" = claude-box ] || [ "$eff" = claude ]; then
     echo "box: ready — 'box shell $name'. Log into Claude inside: run 'claude' then /login."
-  elif [ "$eff" = staging ]; then
+  elif [ "$eff" = staging-box ] || [ "$eff" = staging ]; then
     echo "box: ready — 'box shell $name'. The tailnet join stays operator-run (it holds a key box must never see):"
     echo "  box shell $name    # then: sudo rig bootstrap workload --hostname $name"
   else

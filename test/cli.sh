@@ -310,16 +310,22 @@ done
 # is its trust boundary (its guest runs docker, via rig) and a server returns
 # from a host reboot without an operator. Pinned to the FILE so neither can
 # quietly vanish in a rewrite.
-check "staging: demands VM mode (BOX_REQUIRE_VM=1)" 0 "" \
-  grep -qx 'BOX_REQUIRE_VM="1"' "$ROOT/templates/staging/box.env"
-check "staging: demands autostart (BOX_AUTOSTART=1)" 0 "" \
-  grep -qx 'BOX_AUTOSTART="1"' "$ROOT/templates/staging/box.env"
-check "staging: the tenant role is 'staging'" 0 "ROLE=staging" tpl "$ROOT" staging
-check "staging: the seed user is rig's default for the role ('ops')" 0 "USER=ops" tpl "$ROOT" staging
-# The agent tenants: role = user = template name, rig's default mapping.
-for t in claude codex grok; do
-  check "$t: role and user are '$t' (rig's default tenant mapping)" 0 "USER=$t REQUIRE_VM= AUTOSTART= ROLE=$t" \
-    tpl "$ROOT" "$t"
+check "staging-box: demands VM mode (BOX_REQUIRE_VM=1)" 0 "" \
+  grep -qx 'BOX_REQUIRE_VM="1"' "$ROOT/templates/staging-box/box.env"
+check "staging-box: demands autostart (BOX_AUTOSTART=1)" 0 "" \
+  grep -qx 'BOX_AUTOSTART="1"' "$ROOT/templates/staging-box/box.env"
+check "staging-box: the tenant role is 'staging-box'" 0 "ROLE=staging-box" tpl "$ROOT" staging-box
+check "staging-box: the seed user is rig's default for the role ('ops')" 0 "USER=ops" tpl "$ROOT" staging-box
+# The agent tenants. Two names, not one: the TEMPLATE is named for the rig role
+# it converges — suffix and all, since rig's roles carry a family suffix
+# ('-box' for box tenants, '-server' for fleet machines, rig#76) — while the
+# seed USER stays the bare agent name, because that is the user rig's role
+# converges and the one 'box shell' lands in. The pairing is the whole point of
+# pinning it here: a rename that moves one and forgets the other mints a box
+# whose role dies looking for a user that was never created.
+for u in claude codex grok; do
+  check "$u-box: role is '$u-box', seed user is '$u' (rig's tenant mapping)" \
+    0 "USER=$u REQUIRE_VM= AUTOSTART= ROLE=$u-box" tpl "$ROOT" "$u-box"
 done
 # blank stays a box with NOBODY home: no rig, no role — same isolation, no
 # tooling, and nothing auto-runs in it.

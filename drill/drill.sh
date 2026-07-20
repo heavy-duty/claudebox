@@ -378,7 +378,7 @@ if ! timeout -k 10 300 ~/.local/share/box/current/host/setup-host.sh; then
 fi
 inf "host setup complete"
 
-# A real server has room for the claude template's resources (8GiB/4cpu), and
+# A real server has room for the claude-box template's resources (8GiB/4cpu), and
 # drilling the real numbers is worth more than drilling shrunken ones. Only
 # shrink if we must. Since 0.4.0 resources are per-box, stamped from the
 # template at mint — a profile edit no longer reaches them; the supported
@@ -386,9 +386,9 @@ inf "host setup complete"
 ram="$(awk '/MemTotal/{print int($2/1024/1024)}' /proc/meminfo)"
 if [ "$ram" -lt 20 ]; then
   export BOX_MEMORY=3GiB BOX_CPU=2
-  note "host has ${ram}GiB RAM — minting at 3GiB/2cpu via BOX_MEMORY/BOX_CPU (the claude template's 8GiB/4cpu is what was NOT drilled)"
+  note "host has ${ram}GiB RAM — minting at 3GiB/2cpu via BOX_MEMORY/BOX_CPU (the claude-box template's 8GiB/4cpu is what was NOT drilled)"
 else
-  inf "host has ${ram}GiB RAM — drilling the claude template's resources (8GiB/4cpu) unchanged"
+  inf "host has ${ram}GiB RAM — drilling the claude-box template's resources (8GiB/4cpu) unchanged"
 fi
 
 KVM=0; [ -e /dev/kvm ] && KVM=1
@@ -492,10 +492,10 @@ fi
 
 # --- templates: the mint surface is itself a surface to test ----------------
 tpl_missing=""
-for t in blank claude codex grok; do
+for t in blank claude-box codex-box grok-box; do
   box templates 2>/dev/null | grep -q "^  $t" || tpl_missing="$tpl_missing $t"
 done
-[ -z "$tpl_missing" ] && ok "templates: lists blank, claude, codex, grok" \
+[ -z "$tpl_missing" ] && ok "templates: lists blank, claude-box, codex-box, grok-box" \
                       || no "templates listing is missing:$tpl_missing"
 box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
   && ok "unknown template refused, points at 'box templates'" || no "an unknown template was not refused"
@@ -551,19 +551,22 @@ else
 fi
 
 # The generic mechanic (metadata, placement, user, isolation parity) is proven
-# once by blank+claude and needs no per-template repeat. What a NEW template
+# once by blank+claude-box and needs no per-template repeat. What a NEW template
 # still has to prove is its own payload: the CLI installs, lands on the
 # non-interactive exec PATH, and answers --version. One mint each.
+# The box NAME stays the bare agent name — it is what the pre-flight banner
+# announces and what teardown deletes — while the TEMPLATE carries rig#76's
+# family suffix. They are two different namespaces and only one of them moved.
 for t in codex grok; do
   case "$t" in codex) bin=codex; user=codex ;; grok) bin=grok; user=grok ;; esac
   printf '\n  minting a %s box (cold — validates the template install)…\n' "$t"
-  if mint_box "/tmp/mint-$t.log" --name "$t" --template "$t"; then
+  if mint_box "/tmp/mint-$t.log" --name "$t" --template "$t-box"; then
     [ "$(incus config get "$t" user.box.user 2>/dev/null)" = "$user" ] \
       && ok "$t: template user stamped ($user)" || no "$t: user.box.user not $user"
     if timeout -k 5 30 box exec "$t" -- "$bin" --version </dev/null >/dev/null 2>&1; then
       ok "$t: '$bin --version' answers via box exec — installed and on the non-interactive PATH"
     else
-      no "$t: '$bin --version' FAILED via exec — not installed, or not on exec's PATH (the claude template's #15 bug)"
+      no "$t: '$bin --version' FAILED via exec — not installed, or not on exec's PATH (the claude-box template's #15 bug)"
       inf "PATH as exec sees it: $(timeout -k 5 20 box exec "$t" -- printenv PATH </dev/null 2>/dev/null)"
       # Do not throw the evidence away — say WHAT the installer actually left.
       # Do NOT throw the evidence away — say what the installer actually left
@@ -583,10 +586,10 @@ for t in codex grok; do
   fi
 done
 
-printf '\n  minting a claude box (cold, ~10 min)…\n'
+printf '\n  minting a claude-box box (cold, ~10 min)…\n'
 t0=$SECONDS
-if mint_box /tmp/mint-drill.log --name drill --template claude; then
-  ok "box new --name drill --template claude  ($((SECONDS - t0))s)"
+if mint_box /tmp/mint-drill.log --name drill --template claude-box; then
+  ok "box new --name drill --template claude-box  ($((SECONDS - t0))s)"
 else
   no "box new FAILED — tail: $(tail -3 /tmp/mint-drill.log | tr '\n' ' ')"
   timeout -k 5 60 incus delete -f drill >/dev/null 2>&1
@@ -799,7 +802,7 @@ fi
 # ===========================================================================
 phase "E. box expose — a deliberate loopback door (#55)"
 # ===========================================================================
-# archive is a running claude box (node is installed). Start a DETACHED
+# archive is a running claude-box box (node is installed). Start a DETACHED
 # listener on 0.0.0.0 inside it, expose the port, and prove the door works
 # from the HOST's loopback. Then prove removing it closes the door, and that a
 # NON-exposed port still obeys the ingress drop — the feature must not

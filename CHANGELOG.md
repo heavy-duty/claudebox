@@ -5,6 +5,50 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Changed
+
+- **The tenant templates carry rig's family suffix: `claude` → `claude-box`,
+  `codex` → `codex-box`, `grok` → `grok-box`, `staging` → `staging-box`**
+  (#123, following heavy-duty/rig#76) — rig is growing a second family of
+  roles, and once a `staging` role can mean either a fleet machine or a box
+  tenant, the bare name stops naming anything. rig's answer is a suffix on
+  the role itself — `-server` for fleet machines, `-box` for box tenants —
+  and box's answer is that a template keeps being named for the role it
+  converges. Templates are the only surface that spells a rig role out loud
+  (`BOX_BOOTSTRAP_ROLE`, auto-run at mint since #81), so a template whose
+  directory says one thing and whose role key says another is a trap with a
+  15-minute fuse: it mints clean and dies at convergence. `blank` keeps its
+  name — it seeds no tenant role, sets no `BOX_BOOTSTRAP_ROLE`, and
+  therefore has nothing to agree with. Two namespaces move apart here and
+  only one of them moved: the template name and the role are now
+  `claude-box`, while the seed USER stays `claude`, because that is the user
+  the rig role converges and the one `box shell` lands in. `test/cli.sh`
+  pins the pair per tenant rather than each half alone — a future rename
+  that moves one and forgets the other mints a box whose role dies looking
+  for a user nobody created.
+
+  **This lands after rig's rename, not before, and the ordering is not a
+  preference.** The seeds install rig from `RIG_REPO`/`RIG_REF`, which
+  default to `heavy-duty/rig@main` and are unpinned until rig#32's releases
+  — so a box minted from these templates asks whatever `main` happens to be
+  for `rig bootstrap claude-box`. Against a pre-rename rig that role does
+  not exist, `cmd_new` refuses to call the box ready, and the operator is
+  handed a failed mint for a change neither repo has finished making. Merged
+  in the other order the window closes instead of opening: rig's roles are a
+  hard cut with no aliases, so the day rig's rename lands, every unmerged
+  box seed naming a bare role is the broken one.
+
+  One deliberate asymmetry: the mint-time hints in `cmd_new` match both the
+  new and the old spelling of `user.box.template`. That is not an alias for
+  the role — nothing here softens the cut, and `rig bootstrap claude` is
+  gone. It reads a stamp left on an *instance* at its own mint time, which
+  every box minted before today carries forever and every clone carries
+  forward; refusing the old spelling would cut nothing over and only drop
+  the login hint on boxes that predate the rename, the same reason
+  `user.claudebox` is honored everywhere else. `migrate-host.sh` stamps
+  re-homed legacy boxes `claude-box`, the name the template has today, so a
+  re-homed box looks like a fresh mint rather than a fossil.
+
 ## 0.8.0 — 2026-07-19
 
 ### Added

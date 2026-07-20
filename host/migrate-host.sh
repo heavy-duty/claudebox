@@ -64,7 +64,11 @@ legacy_boxes() {
 }
 
 # Re-home one box. Legacy boxes are all claude boxes (the only template the old
-# tool minted), so the new metadata is the claude template's.
+# tool minted), so the new metadata is the claude-box template's. The stamp
+# names the template as it is called TODAY, not as it was called when the box
+# was minted: it is what 'box shell' and the mint hints read, so a re-homed
+# box should look like a fresh claude-box mint, not like a fossil (rig#76's
+# family suffix — the template is named for the role it converges).
 rehome_one() {
   local b="$1" st
   incus config get "$b" user.claudebox >/dev/null 2>&1 || { warn "$b is not a legacy box (no user.claudebox tag) — skipping"; return 1; }
@@ -75,7 +79,7 @@ rehome_one() {
 
   # 1. TAG FIRST — additive and reversible. A box that stops here is still a
   #    valid legacy box (the old tag is untouched) AND now a new one.
-  incus config set "$b" user.box=1 user.box.template=claude user.box.user=claude \
+  incus config set "$b" user.box=1 user.box.template=claude-box user.box.user=claude \
     || { warn "$b: could not set new metadata — left untouched"; return 1; }
 
   # 2. Stop, reassign the profile (this is the network move), restart. Incus
