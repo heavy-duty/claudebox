@@ -4,7 +4,7 @@
 # no sshd config, no keys. The server posture comes from
 # 'rig bootstrap staging-box' (heavy-duty/rig#31), which box auto-runs after
 # mint; the tailnet workload join holds a pre-auth key and stays
-# operator-run ('box shell' → 'sudo rig bootstrap workload'), exactly as
+# operator-run ('box shell' → 'sudo rig bootstrap workload-server'), exactly as
 # #69 designed it — box never sees the key.
 users:
   - name: ops

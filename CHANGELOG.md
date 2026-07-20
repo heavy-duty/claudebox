@@ -49,6 +49,16 @@ which records not just what changed but what each drill run proved.
   re-homed legacy boxes `claude-box`, the name the template has today, so a
   re-homed box looks like a fresh mint rather than a fossil.
 
+  The **machine**-role half of rig's rename reaches box too, in one place:
+  the tailnet workload join box prints as a next step for a `staging-box`
+  guest is now `sudo rig bootstrap workload-server`. box never runs it — it
+  holds a pre-auth key, and that it stays operator-run is the absence
+  keeping box creds-free end to end — but box does *print* it, in three
+  places that all had to move together (`cmd_new`'s hint, the
+  `staging-box` seed's own comment, and the README). A next step an
+  operator copy-pastes is as wrong as a role box executes, and it fails
+  later and further from the cause.
+
 ## 0.8.0 — 2026-07-19
 
 ### Added

@@ -432,11 +432,11 @@ check "new: the overran-but-registered branch says so (not the wedge story)" 0 "
 # shellcheck disable=SC2016  # the $-strings are literals in the target file
 check "new: BOX_LAUNCH_TIMEOUT is documented in box help new" 0 "" bash -c '
   "'"$ROOT"'/bin/box" help new | grep "BOX_LAUNCH_TIMEOUT" | grep -q 600'
-# staging's creds-holding join stays OPERATOR-run: cmd_new may print it as a
-# next step, but no template and no code path auto-runs "rig bootstrap
-# workload" — the one absence that keeps box creds-free end to end.
+# staging-box's creds-holding join stays OPERATOR-run: cmd_new may print it as
+# a next step, but no template and no code path auto-runs "rig bootstrap
+# workload-server" — the one absence that keeps box creds-free end to end.
 check "new: the workload join is printed, never exec'd" 1 "" bash -c '
-  grep "rig bootstrap workload" "'"$ROOT"'/bin/box" | grep -q "incus exec"'
+  grep "rig bootstrap workload-server" "'"$ROOT"'/bin/box" | grep -q "incus exec"'
 check "templates: no template names a creds-holding role" 1 "" bash -c '
   grep -h "^BOX_BOOTSTRAP_ROLE=" "'"$ROOT"'"/templates/*/box.env | grep -qE "workload|host|custom"'
 

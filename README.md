@@ -271,7 +271,7 @@ from rig's roles, instead of copy-pasted per template.
 
 **Anything that joins or admits stays operator-run.** The `staging-box`
 tenant's tailnet workload join holds a pre-auth key, so box only prints it as the
-next step — `box shell <name>`, then `sudo rig bootstrap workload` — and
+next step — `box shell <name>`, then `sudo rig bootstrap workload-server` — and
 never sees the key ([#69](https://github.com/heavy-duty/box/issues/69)'s
 split, kept).
 

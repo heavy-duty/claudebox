@@ -1201,7 +1201,7 @@ cmd_new() {
     echo "box: ready — 'box shell $name'. Log into Claude inside: run 'claude' then /login."
   elif [ "$eff" = staging-box ] || [ "$eff" = staging ]; then
     echo "box: ready — 'box shell $name'. The tailnet join stays operator-run (it holds a key box must never see):"
-    echo "  box shell $name    # then: sudo rig bootstrap workload --hostname $name"
+    echo "  box shell $name    # then: sudo rig bootstrap workload-server --hostname $name"
   else
     echo "box: ready — 'box shell $name'."
   fi
