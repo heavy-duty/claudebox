@@ -81,6 +81,27 @@ which records not just what changed but what each drill run proved.
   a shopt subtlety hides one. `eof_guard_sweep` itself carried the identical
   blind spot — it rebuilds the same glob — and is widened the same way.
 
+- **A PR can no longer delete a shipped changelog section and stay green**
+  (#122) — caught in review of #118, where an entry added under
+  `## Unreleased` *replaced* the line `## 0.8.0 — 2026-07-19` instead of
+  being inserted above it. The whole shipped 0.8.0 record was absorbed into
+  `## Unreleased`, git merged it cleanly — a one-line edit, no conflict, no
+  signal — and `changelog-armed.sh` was green on that exact tree, correctly:
+  it asks only whether the TOP section agrees with `VERSION`, and
+  `## Unreleased` was still on top. The damage would have surfaced at the
+  next release, when `release-notes.sh` could no longer find the section it
+  extracts by heading, or worse, republished the absorbed prose as new.
+  `.github/scripts/changelog-monotonic.sh` asserts the complementary
+  invariant on every PR: release headings are **append-only**, so the set of
+  `## X.Y.Z` headings on a branch must be a **superset** of the set at its
+  merge base. A separate script rather than a clause in `changelog-armed.sh`
+  because "a heading disappeared" is a property of a DIFF, not of a tree —
+  and because `changelog-armed.sh` is driven against constructed non-git
+  fixtures that could not express it. The ceremony's stamp passes by
+  construction (it adds `X.Y.Z`, removes none), and no base ref to compare
+  against is a loud SKIP locally but a hard failure in CI, which sets
+  `CHANGELOG_MONOTONIC_STRICT=1` and checks out with `fetch-depth: 0` so the
+  guard can never quietly stop guarding.
 
 ## 0.8.0 — 2026-07-19
 

@@ -8,6 +8,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # fetch-depth: 0, for the changelog-monotonic step below and only
+          # for it. That check is about a DIFF — which release headings the
+          # merge base had — so it needs the base branch's history present,
+          # and the default depth-1 checkout has none of it. An explicit
+          # `git fetch origin <base>` would be narrower, but it has to be
+          # right on both event types and on fork PRs, and getting it subtly
+          # wrong degrades to a SKIP (a guard that silently stops guarding —
+          # the exact failure this repo keeps refusing). Full history on a
+          # pure-bash tree costs a second; the STRICT flag below turns any
+          # remaining skip red rather than green.
+          fetch-depth: 0
       - name: shellcheck
         # -x follows `source`/`.` directives; box has no lib split today, but the
         # flag costs nothing and keeps the invocation identical to rig's.
@@ -56,6 +68,19 @@ jobs:
       # says which check found the drift without anyone reading a suite.
       - name: changelog is armed for the next entry
         run: bash .github/scripts/changelog-armed.sh
+      # ...and no SHIPPED release heading was deleted (#122). Its own step for
+      # the same reason as the one above — when it goes red the log names the
+      # invariant that broke — but a DIFFERENT invariant: armed is a fact
+      # about this tree, monotonicity is a fact about this tree versus its
+      # merge base. Pull requests only: on a push to main the merge base IS
+      # HEAD, so the assert is vacuous and would only add a green step that
+      # proves nothing. STRICT=1 so a checkout that cannot reach the base ref
+      # fails here instead of skipping quietly forever.
+      - name: no shipped changelog heading was deleted
+        if: github.event_name == 'pull_request'
+        env:
+          CHANGELOG_MONOTONIC_STRICT: '1'
+        run: bash .github/scripts/changelog-monotonic.sh "origin/${{ github.base_ref }}"
 
   # The multi-user rehearsal, on a REAL incus — a GitHub runner is root on a
   # disposable VM, which is exactly the substrate the rehearsal needs. It runs

@@ -91,6 +91,22 @@ A release is a PR, and merging it ships it
    the release itself makes. Do it in the ceremony PR and main is never
    disarmed at all.
 
+   **Release headings are append-only.** When you add your entry under
+   `## Unreleased`, *insert above* the heading below it — never type over
+   that line. Replacing `## 0.8.0 — 2026-07-19` with your own `## Unreleased`
+   block deletes a shipped section: its prose is absorbed into `Unreleased`,
+   `release-notes.sh` can no longer find the version it extracts by heading,
+   and the next release republishes the absorbed prose as if it were new. git
+   merges that edit cleanly and `changelog-armed.sh` stays green on it — the
+   top section is still the right one — so
+   [.github/scripts/changelog-monotonic.sh](.github/scripts/changelog-monotonic.sh)
+   asserts the other half on every PR: the set of `## X.Y.Z` headings on your
+   branch must be a **superset** of the set at the merge base
+   ([#122](https://github.com/heavy-duty/box/issues/122), caught in review of
+   [#118](https://github.com/heavy-duty/box/pull/118)). The ceremony's own
+   stamp passes it by construction — rewriting `## Unreleased` into
+   `## X.Y.Z — DATE` adds a heading and removes none.
+
    This PR is where the release ritual hangs:
    the full drill on real hardware, recorded in
    [drill/RUNS.md](drill/RUNS.md) — CI proves the tier's semantics on every

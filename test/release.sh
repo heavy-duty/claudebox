@@ -279,6 +279,134 @@ check "CONTRIBUTING: ...and names the guard that enforces it" 0 "" \
   grep -qF 'changelog-armed.sh' "$ROOT/CONTRIBUTING.md"
 
 # ---------------------------------------------------------------------------
+# changelog-monotonic.sh (#122) — no SHIPPED release heading may be DELETED.
+#
+# The complement of the guard above, and the reason it is a separate script:
+# changelog-armed.sh asks about ONE tree ("does the top section agree with
+# VERSION?"), which is exactly why it was green on #118's broken branch — the
+# top section was still '## Unreleased'. "A heading disappeared" is not a
+# property of a tree at all; it is a property of a DIFF. So these cases are
+# driven against real, constructed GIT REPOS with a base commit and a branch
+# commit, not the two-file trees above — a fixture without history cannot
+# express the failure being guarded.
+#
+# The #118 shape is reconstructed verbatim as the first case: the line
+# '## 0.8.0 — 2026-07-19' replaced by an entry written under '## Unreleased'.
+# The ceremony's own stamp is driven right beside it, because a rule that
+# fires on the stamp is unshippable for the same reason rig#44 and cast#108
+# were — that pair, not the failing case alone, is what makes this a design.
+# ---------------------------------------------------------------------------
+MONO="$ROOT/.github/scripts/changelog-monotonic.sh"
+check "changelog-monotonic: runnable bash" 0 "" bash -n "$MONO"
+
+# grepo <name> <base-changelog-lines...> — a git repo whose `main` carries the
+# given changelog, left checked out on a branch `pr` off it. Prints the dir.
+grepo() {
+  local d="$WORK/$1"; shift
+  mkdir -p "$d"
+  git -C "$d" init -q -b main
+  git -C "$d" config user.email test@example.invalid
+  git -C "$d" config user.name test
+  { echo "# Changelog"; echo; printf '%s\n' "$@"; } > "$d/CHANGELOG.md"
+  git -C "$d" add CHANGELOG.md
+  git -C "$d" commit -qm base
+  git -C "$d" checkout -q -b pr
+  echo "$d"
+}
+# head_changelog <dir> <lines...> — the PR branch's version of the file
+head_changelog() {
+  local d="$1"; shift
+  { echo "# Changelog"; echo; printf '%s\n' "$@"; } > "$d/CHANGELOG.md"
+  git -C "$d" commit -qam head
+}
+mono()        { local d="$1"; shift; ( cd "$d" && bash "$MONO" "$@" ); }
+mono_strict() { local d="$1"; shift; ( cd "$d" && CHANGELOG_MONOTONIC_STRICT=1 bash "$MONO" "$@" ); }
+
+# --- the #118 incident, reconstructed --------------------------------------
+G="$(grepo mono-118 '## Unreleased' '' '## 0.8.0 — 2026-07-19' '' '### Added' '' '- **Shipped prose**')"
+head_changelog "$G" '## Unreleased' '' '### Fixed' '' '- **An entry**' '' '### Added' '' '- **Shipped prose**'
+check "monotonic: a DELETED release heading fails (the #118 near-miss)" 1 "DELETES release heading" mono "$G" main
+check "monotonic: ...and names the heading that vanished" 1 "## 0.8.0" mono "$G" main
+check "monotonic: ...and the shape of the mistake (replaced, not inserted)" 1 "instead of being" mono "$G" main
+check "monotonic: ...and why nothing else says so (git merges it cleanly)" 1 "git merges that edit cleanly" mono "$G" main
+# The whole point of the issue: the OTHER guard is green on this same tree.
+# Pinned here so a future 'just widen changelog-armed.sh' cannot quietly
+# delete the reason this script exists.
+check "monotonic: ...on a tree changelog-armed.sh calls FINE (the #122 gap)" 0 "agrees" \
+  bash "$ARMED" "$G/CHANGELOG.md" "$ROOT/VERSION"
+
+# --- the release ceremony's stamp: an ADD, never a removal -----------------
+# '## Unreleased' -> '## 0.8.1 — DATE' adds 0.8.1 and removes no X.Y.Z
+# heading, because 'Unreleased' is not one. A false positive here would make
+# every release unshippable — the rig#44 / cast#108 failure, one guard over.
+G="$(grepo mono-stamp '## Unreleased' '' '- **Pending**' '' '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+head_changelog "$G" '## Unreleased' '' '## 0.8.1 — 2026-07-20' '' '- **Pending**' '' '## 0.8.0 — 2026-07-19' '' '- **Shipped**'
+check "monotonic: the ceremony stamp passes (adds a heading, removes none)" 0 "still present" mono "$G" main
+
+# --- the ordinary entry, done right ----------------------------------------
+G="$(grepo mono-ok '## Unreleased' '' '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+head_changelog "$G" '## Unreleased' '' '### Fixed' '' '- **An entry**' '' '## 0.8.0 — 2026-07-19' '' '- **Shipped**'
+check "monotonic: an entry INSERTED above the top section passes" 0 "still present" mono "$G" main
+check "monotonic: ...and counts what it actually checked" 0 "all 1 release heading" mono "$G" main
+
+# --- deletion is caught anywhere in the file, not just at the top ----------
+G="$(grepo mono-mid '## 0.8.0 — 2026-07-19' '' '- **a**' '' '## 0.7.0 — 2026-07-18' '' '- **b**' '' '## 0.6.0 — 2026-07-17' '' '- **c**')"
+head_changelog "$G" '## 0.8.0 — 2026-07-19' '' '- **a**' '' '- **b**' '' '## 0.6.0 — 2026-07-17' '' '- **c**'
+check "monotonic: a heading deleted MID-FILE is caught too" 1 "## 0.7.0" mono "$G" main
+# ...and only the deleted one is named, so the message points at the edit.
+notes_only_070() { ! mono "$1" main 2>&1 | grep -qE '^    ## 0\.(6|8)\.0$'; }
+check "monotonic: ...naming only the heading that went missing" 0 "" notes_only_070 "$G"
+
+# --- a rewritten Unreleased is NOT a violation (changelog-armed owns it) ---
+G="$(grepo mono-unrel '## Unreleased' '' '- **Pending**' '' '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+head_changelog "$G" '## 0.8.0 — 2026-07-19' '' '- **Shipped**'
+check "monotonic: a deleted '## Unreleased' is NOT this guard's business" 0 "still present" mono "$G" main
+
+# --- a changelog that did not exist at the base ----------------------------
+G="$(grepo mono-new 'No sections yet.')"
+head_changelog "$G" '## 0.1.0 — 2026-07-20' '' '- **First**'
+check "monotonic: a base with no release headings passes (nothing to delete)" 0 "all 0 release heading" mono "$G" main
+
+# --- degradation: no base to compare against -------------------------------
+# A local run may genuinely have no base ref. That must SKIP loudly, not fail
+# spuriously (which would make the script un-runnable off CI) and not pass
+# silently (which is the failure shape this repo keeps refusing). CI closes
+# the hole from the other side with STRICT.
+G="$(grepo mono-nobase '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+check "monotonic: an unresolvable base ref SKIPS, saying nothing was checked" 0 "SKIPPED" mono "$G" no-such-ref
+check "monotonic: ...naming the base ref it could not resolve" 0 "no-such-ref" mono "$G" no-such-ref
+check "monotonic: ...and warning that CI treats it as a failure" 0 "hard failure" mono "$G" no-such-ref
+check "monotonic: STRICT turns that skip into a red run" 1 "is a FAILURE, not a skip" mono_strict "$G" no-such-ref
+check "monotonic: ...and points at the checkout, not the script" 1 "fetch-depth: 0" mono_strict "$G" no-such-ref
+# Outside a work tree at all (a tarball, an unpacked release).
+mkdir -p "$WORK/mono-nogit"
+printf '%s\n' '# Changelog' '' '## 0.8.0 — 2026-07-19' > "$WORK/mono-nogit/CHANGELOG.md"
+check "monotonic: outside a git work tree it skips rather than erroring" 0 "SKIPPED" \
+  mono "$WORK/mono-nogit" main
+check "monotonic: a missing changelog refuses by path (never a skip)" 1 "no such file" \
+  bash "$MONO" main "$WORK/nope.md"
+
+# --- and the real tree, through the real script ----------------------------
+# HEAD as its own base: the merge base is HEAD, so the sets are identical by
+# construction. Proves the script runs against the actual CHANGELOG.md and
+# parses its real headings, without depending on an `origin/main` that a
+# fresh clone or a detached CI checkout may not have.
+check "monotonic: THIS tree passes against itself (the parser meets reality)" 0 "still present" \
+  mono "$ROOT" HEAD
+
+# The guard is only a guard if CI runs it — and only if CI runs it with the
+# history it needs. Fail-closed pins on all three, since a depth-1 checkout
+# would silently downgrade every run to the SKIP path.
+check "ci.yml: runs the changelog-monotonic guard" 0 "" \
+  grep -qF 'changelog-monotonic.sh' "$ROOT/.github/workflows/ci.yml"
+check "ci.yml: ...with full history, or the merge base is unreachable" 0 "" \
+  grep -qF 'fetch-depth: 0' "$ROOT/.github/workflows/ci.yml"
+check "ci.yml: ...and STRICT, so a skip is a red run and not a green one" 0 "" \
+  grep -qF 'CHANGELOG_MONOTONIC_STRICT' "$ROOT/.github/workflows/ci.yml"
+check "CONTRIBUTING: names the append-only rule for release headings" 0 "" \
+  grep -qF 'changelog-monotonic.sh' "$ROOT/CONTRIBUTING.md"
+
+# ---------------------------------------------------------------------------
 # latest_release_tag — extracted from install.sh (the source-the-pure-function
 # trick) and driven against a shim curl. The shim serves the ONE seam the
 # function uses: -w '%{redirect_url}' on the releases/latest probe.
