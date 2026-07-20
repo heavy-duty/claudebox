@@ -61,6 +61,86 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- **`state:needs-human` no longer appears on PRs a human cannot merge** (#136)
+  — `decide_state()` derived state from three inputs (draft flag, requested
+  reviewers, submitted reviews) and read *nothing* about mergeability or
+  checks. Combined with the `if requested "$HUMAN"` short-circuit at the top of
+  its precedence, the label was **sticky**: once the maintainer was requested,
+  the PR read `state:needs-human` through conflicts, through red CI, through a
+  force-push that staled every approval. Nothing demoted it.
+
+  Observed twice in one afternoon on this repo, in two different shapes. Three
+  PRs sat at `state:needs-human` while `CONFLICTING` for hours — the board
+  inviting a merge GitHub had already disabled. And #119, after a rebase, read
+  `MERGEABLE`, four green checks, `state:needs-human` — with **zero** reviews
+  bound to its head. Every visible signal said *merge me* over a tree no
+  reviewer had seen, and unlike the conflict case, nothing on the page
+  contradicted it.
+
+  The rule the label now keeps is that **`state:needs-human` means a human
+  could merge this right now**, so anything making that false outranks the
+  request that put it there. A `CONFLICTING` branch or a failing check is the
+  agent's to fix: new `state:needs-rebase`. Approvals staled by a push mean
+  nobody reviewed this tree: `state:addressing`, because the agent owes a
+  re-request. An *unfinished* round still yields to an explicit human request —
+  a maintainer pulling a PR to themselves early is deliberate, and `MISSING`
+  (nobody has reviewed yet) is a different fact from `STALE` (everyone reviewed
+  something else). Precedence is applied to the round as a whole, after every
+  verdict is collected: deciding inside the loop let the order of `BOTS` pick
+  the answer, so a round that was *both* unfinished and staled returned on the
+  `MISSING` before any later bot's `STALE` was read — and came out
+  `needs-human` over a head nobody had reviewed, the original bug wearing a
+  different hat.
+
+  Whether a check blocks is judged by listing the outcomes that *don't* —
+  `SUCCESS`, `NEUTRAL`, `SKIPPED`, and the pending set — rather than the
+  outcomes that do. The rollup mixes two closed enums (`CheckRun.conclusion`
+  and `StatusContext.state`), and an outcome the list forgets is one the label
+  cannot certify as mergeable: `ERROR`, `CANCELLED` and `STALE` all read as
+  green under an allow-list of failures. The costs are not symmetric — a false
+  failure parks the PR on the agent, who looks; a false success invites a human
+  to merge a tree that will not merge. Superseded runs are dropped first, each
+  context collapsing to its newest entry: a re-run does not evict the run it
+  replaced, so this PR's own tip carried a `CANCELLED` `scope` beside the
+  `SUCCESS` `scope` that superseded it, and judging every entry would have
+  stranded every re-run PR in `needs-rebase`.
+
+  A run is dated by **when it began**, which took two corrections to get right
+  and both restored #136 in the meantime. Dating on completion fails because a
+  run still in flight does not omit its completion — `gh` marshals the Go zero
+  time as the *string* `"0001-01-01T00:00:00Z"`, which `//` will not fall
+  through — so the live re-run sorted to the bottom and the run it superseded
+  was judged instead. Taking the *newest* stamp a run carries fails for a
+  subtler reason: it resolves to `completedAt` for a finished run and
+  `startedAt` for a live one, which are different quantities, so it never
+  ordered runs at all. A run cancelled by the concurrency group drains *after*
+  its replacement starts — 13 seconds on this PR's own `aa5a6ba` — so the dead
+  predecessor routinely out-dated the live run replacing it, and a green
+  predecessor in that window read `SUCCESS` with a re-run still in flight.
+  Start time has neither failure: a replacement always begins after the run it
+  replaces, whatever order they finish in. An entry carrying no usable stamp
+  sorts last rather than first, so an undateable in-flight run is never
+  discarded in favour of a stale success — every ambiguity resolves toward
+  "not settled".
+
+  `UNKNOWN` mergeability is deliberately not treated as unmergeable: GitHub
+  reports it for about a minute after every merge while it recomputes, and
+  flapping every open PR through `needs-rebase` on each merge would be worse
+  than the bug. A failed read of either fact degrades to the same "do not know"
+  value for the same reason — an API hiccup must not relabel the board.
+
+  Also adds `merge-next`, because a correct `needs-human` still does not say
+  *which* PR to merge first, and order matters when they conflict through
+  `CHANGELOG.md`. Queue order is intent, so the reconciler never sets it — it
+  only **clears** it the moment the PR stops being mergeable-by-a-human, which
+  is precisely the staleness that made `needs-human` untrustworthy. Both live
+  shapes, the mixed round, the whole check-outcome enum, and the in-flight
+  re-run superseding both a green and a cancelled predecessor — in both
+  directions, since a run that *finished* after an earlier in-flight entry
+  settles the context, and across the drain window where the predecessor
+  completes last — are pinned in `test/labels-reconcile.sh`
+  (19 fixtures → 51).
+
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
   `globstar` makes `**` descend into subdirectories, but a glob still does
   not *match* a dot-prefixed name, so `**/` never entered `.github/`. The
