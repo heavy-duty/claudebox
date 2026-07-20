@@ -38,8 +38,8 @@ which records not just what changed but what each drill run proved.
   optimistic write safe. The `scope` job is skipped on the two new actions,
   where no path can have changed and labeler has nothing to derive.
 
-  Landed in all three repos together (heavy-duty/rig#96, heavy-duty/cast#131) — `labels.yml` and the label
-  taxonomy are shared.
+  Landed in all three repos together (heavy-duty/rig#97,
+  heavy-duty/cast#132) — `labels.yml` and the label taxonomy are shared.
 
 - **PR labels split into two axes: `state:*` (whose ball) and `blocker:*`
   (what is in the way)** — `state:needs-rebase` is retired, replaced by
