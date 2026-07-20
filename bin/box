@@ -1103,9 +1103,18 @@ storage_driver() {
   local pool driver
   pool="$(incus profile device get box-net root pool 2>/dev/null || true)"
   [ -n "$pool" ] || pool=default
-  driver="$(incus storage show "$pool" 2>/dev/null | awk '/^driver:/ {print $2; exit}')"
+  # '|| true' on all three probes, not just the first. A refusal here is an
+  # ANSWER ("this tier cannot read the pool"), never an error — this function
+  # must never be the thing that kills a mint. Today the two pipelines are
+  # safe only by accident: command substitution strips errexit, so a failing
+  # 'incus storage show' under pipefail falls through to the fallback instead
+  # of aborting. Add 'shopt -s inherit_errexit' to this file — exactly the
+  # robustness tweak #107 describes sailing through review — and that accident
+  # reverses into a fatal abort mid-mint, inside the function whose contract
+  # is NEVER fatal. Make the three probes read alike and depend on nothing.
+  driver="$(incus storage show "$pool" 2>/dev/null | awk '/^driver:/ {print $2; exit}' || true)"
   [ -n "$driver" ] || driver="$(incus storage list --format csv 2>/dev/null \
-    | awk -F, -v p="$pool" '$1 == p {print $2; exit}')"
+    | awk -F, -v p="$pool" '$1 == p {print $2; exit}' || true)"
   printf '%s' "$driver"
 }
 
@@ -1222,7 +1231,14 @@ cmd_new() {
     # carries no snapshot list, so that clone starts with none. Both are
     # honest; neither is invented. Say which one this is rather than leaving
     # the operator to run 'box info' to find out.
-    if incus snapshot list "$instance" --format csv 2>/dev/null | grep -q '^pristine,'; then
+    # Capture first, THEN read (#124's class). Piping a multi-line incus
+    # writer straight into an early-exit reader lets grep close the pipe on
+    # the first match, SIGPIPE incus, and hand pipefail a 141 — which here
+    # would read as "no pristine" and narrate the WRONG inheritance shape on a
+    # clone that actually has one. Un-racy today at this writer's size, but
+    # the assignment costs nothing and does not depend on that staying true.
+    local snaps; snaps="$(incus snapshot list "$instance" --format csv 2>/dev/null || true)"
+    if printf '%s\n' "$snaps" | grep -q '^pristine,'; then
       echo "box: it inherited the source's snapshots, 'pristine' among them (box restore $name pristine)."
     else
       echo "box: no 'pristine' mark here — a clone has no pristine moment to capture, and box"

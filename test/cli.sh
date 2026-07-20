@@ -510,6 +510,14 @@ check "pristine: nothing on the clone path creates a snapshot at all" 1 "" \
 # 'box info' to find out which world they are in.
 check "pristine: the clone narrates whether a pristine rode along" 0 "" \
   grep -q "no 'pristine' mark here" "$CLONEBR"
+# ...and it reads the snapshot list CAPTURE-FIRST (#124's class). Piping a
+# multi-line incus writer into an early-exit reader lets the reader close the
+# pipe, SIGPIPE incus, and hand pipefail a 141 — which on THIS line reads as
+# "no pristine" and narrates the wrong inheritance shape on a clone that has
+# one. Pin the shape, not the instance spelling: no 'incus snapshot list'
+# feeding grep/head/sed/awk/read directly.
+check "pristine: the clone's inheritance read is capture-first, not a piped early-exit reader" 1 "" \
+  grep -Eq 'incus snapshot list[^|]*\| *(grep|head|sed|awk|read)' "$CLONEBR"
 rm -f "$CLONEBR"
 
 # The policy half, DRIVEN not grepped: extract storage_driver +
@@ -519,6 +527,34 @@ PRISFN="$(mktemp)"
 awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_pristine\(\) \{/,/^\}/' "$ROOT/bin/box" > "$PRISFN"
 check "pristine: the functions extracted from bin/box (guards the awk)" 0 "BOX_SNAPSHOT_PRISTINE" cat "$PRISFN"
 check "pristine: the extracted functions are valid bash" 0 "" bash -n "$PRISFN"
+
+# storage_driver's probes must survive a REFUSAL, and not by accident. Today
+# command substitution strips errexit, so a failing probe falls through to the
+# fallback; add 'shopt -s inherit_errexit' to bin/box — the robustness tweak
+# #107 describes sailing through review — and under pipefail that same refusal
+# becomes a fatal abort mid-mint, inside the function whose contract is NEVER
+# fatal. Drive it with inherit_errexit ON and a tier that refuses both probes:
+# the function must return empty (the unreadable-pool case) and the caller
+# must still be alive afterwards.
+driver_under_inherit_errexit() {
+  # shellcheck disable=SC2016  # the body is the stub's source, expanded by the
+  # inner bash, never by this shell.
+  env PRISFN="$PRISFN" bash -c '
+    set -euo pipefail
+    shopt -s inherit_errexit
+    incus() {
+      case "$*" in
+        "profile device get box-net root pool") printf "boxpool\n" ;;
+        *) printf "incus: not authorized\n" >&2; return 1 ;;
+      esac
+    }
+    . "$PRISFN"
+    d="$(storage_driver)"
+    printf "SURVIVED driver=[%s]\n" "$d"
+  ' 2>&1
+}
+check "pristine: a refused storage probe is an answer, not a fatal (survives inherit_errexit)" 0 "SURVIVED driver=[]" \
+  driver_under_inherit_errexit
 
 # pris <driver> [env...] — drive snapshot_pristine against a fake pool of
 # <driver>. 'none' makes both probes answer nothing (the unreadable-pool

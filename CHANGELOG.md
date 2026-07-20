@@ -104,6 +104,13 @@ which records not just what changed but what each drill run proved.
   `box export` remains the durable path — and that it cannot reach off-box
   state such as a tailnet join or a runner registration. `BOX_SNAPSHOT_PRISTINE=0`
   opts out, in the `BOX_LAUNCH_TIMEOUT` shape rather than a new flag.
+  The never-fatal contract is now structural rather than incidental: all three
+  storage probes carry `|| true`, so a restricted tier's refusal stays an
+  answer even if `inherit_errexit` is ever switched on in `bin/box` (#107's
+  class), and the clone's inheritance read captures before it greps rather
+  than piping a multi-line `incus` writer into an early-exit reader (#124's
+  class), which under `pipefail` could have narrated the wrong inheritance
+  shape on a clone that does carry a `pristine`.
 
 ### Changed
 
