@@ -7,6 +7,40 @@ which records not just what changed but what each drill run proved.
 
 ### Changed
 
+- **`state:needs-human` no longer waits on the cron to become true** (#141)
+  — the labels workflow now also wakes on `pull_request_target: labeled` and
+  `unlabeled`, and the author sets `state:needs-human` themselves when handing
+  a PR to the maintainer.
+
+  A review landing was never a trigger. There is no
+  `pull_request_review_target`, and on fork PRs — which is all of them here —
+  `pull_request_review` runs with a read-only token and cannot label anything.
+  So the exact moment the label became true, the third bot approving, fired
+  nothing at all: the label waited for the `*/15` cron, or for somebody to
+  touch an unrelated PR. And that cron does not run at its declared rate —
+  GitHub deprioritises short intervals hard enough that, measured across the
+  three repos over a two-hour window on 2026-07-20, each got **one** scheduled
+  run against the eight `*/15` implies. heavy-duty/rig#94 took its third
+  approval and sat on `state:bots-reviewing` for hours; box and cast happened
+  to catch a tick and flipped correctly, on byte-identical workflow files. The
+  lag was worst on the quietest repo, which depends on the cron most and
+  receives it least.
+
+  The two halves fix each other: the author's own label write is what fires
+  the sweep that validates it. That makes it an optimistic write rather than a
+  transfer of ownership — seconds later the reconciler either confirms the
+  label or corrects it, and the cron falls back to being a genuine last
+  resort, for the round an agent forgets to hand off. It cannot loop, because
+  the reconciler's own writes use `GITHUB_TOKEN` and GitHub does not create
+  workflow runs from `GITHUB_TOKEN`-triggered events, while agent writes use a
+  PAT and do. `labels-reconcile.sh` is unchanged: it already recomputes every
+  open PR from scratch on every run, which is exactly what makes the
+  optimistic write safe. The `scope` job is skipped on the two new actions,
+  where no path can have changed and labeler has nothing to derive.
+
+  Landed in all three repos together (heavy-duty/rig#96, heavy-duty/cast#131) — `labels.yml` and the label
+  taxonomy are shared.
+
 - **PR labels split into two axes: `state:*` (whose ball) and `blocker:*`
   (what is in the way)** — `state:needs-rebase` is retired, replaced by
   `blocker:conflict`, `blocker:ci-red` and `blocker:unrequested`. One rule

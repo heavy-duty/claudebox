@@ -107,13 +107,30 @@ would just say the same thing twice, drifting apart eventually.
 
 ## Maintenance
 
-State labels are written by automation, never by hand. Every state above is
-derivable from GitHub's own facts — the draft flag, requested reviewers,
+State labels are machine-owned, with exactly one exception. Every state above
+is derivable from GitHub's own facts — the draft flag, requested reviewers,
 review states, push timestamps — so the labels workflow
 ([.github/workflows/labels.yml](.github/workflows/labels.yml)) recomputes the
-state and reconciles labels statelessly, on a 15-minute cron plus PR events.
-A hand-moved label is a lie waiting to happen; the workflow asserts the
-effective state instead. `scope:` labels on PRs are applied from the changed
+state and reconciles labels statelessly, on PR events (label changes included)
+plus a 15-minute cron. A hand-moved label is a lie waiting to happen; the
+workflow asserts the effective state instead.
+
+The exception is `state:needs-human`, which the author sets at handoff
+([CONTRIBUTING.md](CONTRIBUTING.md), step 6). That is an optimistic write, not
+a transfer of ownership: because `pull_request_target: labeled` wakes the
+workflow, the author's own label write fires the sweep that validates it, and
+a handoff that had not earned the label is corrected within seconds.
+
+It exists because the wake signal was missing. There is no
+`pull_request_review_target` — on fork PRs, which is all of them here,
+`pull_request_review` runs read-only and cannot label anything — so the moment
+the label becomes true, the third approval landing, fired nothing at all. What
+was left was the `*/15` cron, and GitHub deprioritises short intervals hard
+enough that the delivered rate is closer to hourly. The label could therefore
+lag the round it described by hours, worst on the quietest repo: every sweep
+reconciles the whole board, so a busy repo stays fresh by piggybacking on
+unrelated PR events, while a quiet one depends on the cron most and receives
+it least. `scope:` labels on PRs are applied from the changed
 paths by actions/labeler ([.github/labeler.yml](.github/labeler.yml));
 [CONTRIBUTING.md](CONTRIBUTING.md) says who sets what.
 

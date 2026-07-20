@@ -33,14 +33,24 @@ labels tell you where everything is without opening anything.
    judgment belongs to the **author** — escalate by requesting the
    maintainer's review (step 6), and the reconciler flips the label on that
    request, because an explicit request is a fact it can trust.
-6. **When the round passes, the author hands the PR to the maintainer** by
-   requesting their review — that request is what flips `state:needs-human`,
+6. **When the round passes, the author hands the PR to the maintainer** in
+   three acts, in this order: post the tagged round summary, request the
+   maintainer's review, then set `state:needs-human` yourself — removing the
+   state label it replaces. The review request is what *earns* the label,
    provided the PR carries **no `blocker:*` label**. A blocker means the work
-   is still yours whatever the round said, so a request on a conflicted or red
-   PR will not flip it. With three formal head-current approvals the labels
+   is still yours whatever the round said, so on a conflicted or red PR
+   neither the request nor your own label write will stick — the sweep takes
+   it straight back off. With three formal head-current approvals the labels
    workflow requests the maintainer automatically; when part of the panel is
    comment-only, reading their agreement is the author's judgment, so the
    author makes the request.
+
+   Writing the label by hand is an **optimistic write, not a transfer of
+   ownership**. The machine stays the authority — but because the workflow
+   wakes on `labeled`, the author's own write fires the sweep that validates
+   it, and a handoff that had not earned the label is corrected seconds later.
+   Forgetting the write is not a failure either; it only means the label waits
+   for the cron, which is the lag this replaced.
 7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
    mirror what CI runs; the multi-user rehearsal runs in CI on a real Incus.
 
@@ -147,7 +157,7 @@ machine-owned label just gets corrected on the next pass:
 
 | Labels | Set by |
 |---|---|
-| `state:*` | the labels workflow ([.github/workflows/labels.yml](.github/workflows/labels.yml)) — recomputed from GitHub's own facts every 15 minutes and on PR events. Never by hand. Exactly one per PR: *whose ball is it.* |
+| `state:*` | the labels workflow ([.github/workflows/labels.yml](.github/workflows/labels.yml)) — recomputed from GitHub's own facts on PR events (label changes included) and every 15 minutes. Machine-owned, with one exception: the author sets `state:needs-human` at handoff (step 6) and the workflow reconciles it. Otherwise never by hand. Exactly one per PR: *whose ball is it.* |
 | `blocker:*` | the same workflow, from the same facts — *what is in the way.* Any number per PR, or none. Never by hand: applying one does not stop a merge, and removing one does not unblock anything. Fix the thing and the next sweep drops the label. |
 | `stale` | the same workflow — 48h without commits, comments, or reviews. `blocked` PRs are exempt: they are quiet legitimately. |
 | `scope:*` on PRs | actions/labeler, from the changed paths ([.github/labeler.yml](.github/labeler.yml)). Additive — you may add more, the machine won't remove them. |
