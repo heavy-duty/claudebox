@@ -311,6 +311,22 @@ none (copying a snapshot). On a 'dir'-backend host, where a snapshot is a
 full copy rather than a CoW mark, the mint skips it and says so.
 BOX_SNAPSHOT_PRISTINE=0 skips it anywhere.
 
+A mint whose template names a bootstrap role marks a second snapshot,
+'bootstrapped' (#130), once the rig hook has run and box has watched it
+SUCCEED — the box converged and not yet touched. It is the cheaper undo:
+'pristine' throws the tenant role away, 'bootstrapped' keeps it and throws
+away only what you did afterwards. Same rules: never fatal, skipped on a
+'dir' pool, and BOX_SNAPSHOT_BOOTSTRAPPED=0 skips it anywhere.
+
+It is deliberately NOT unconditional the way 'pristine' is. A blank box
+runs no hook, so there is no convergence to mark and it gets none — the
+label marks an event, not a mint. And if the hook FAILS, box tells you to
+re-run it by hand and takes no mark afterwards: a by-hand run happens in a
+shell box does not watch, so box will not label a convergence it never saw.
+It names 'box snapshot <box> bootstrapped' at that moment instead. So read
+the label one way only: its PRESENCE means the hook converged untouched;
+its ABSENCE means nothing at all.
+
   box new --name scratch                     # blank, the default
   box new --name work --template claude-box
   box new --name lean --template claude-box --cpu 2 --memory 3GiB
@@ -393,8 +409,14 @@ have.
 
   box snapshot work authed
 
-One label is taken for you: every fresh mint marks 'pristine' after
-cloud-init and before rig's tenant role runs (#104) — see 'box help restore'.
+Two labels are taken for you (see 'box help restore'): every fresh mint
+marks 'pristine' after cloud-init and before rig's tenant role runs (#104),
+and a mint with a bootstrap role marks 'bootstrapped' after box has watched
+that role converge (#130). 'bootstrapped' is skipped where there was no hook
+to watch — a blank box, or a hook box told you to re-run by hand — so its
+absence proves nothing. Take it yourself in that case:
+
+  box snapshot work bootstrapped
 
 Snapshots do not outlive their box: 'box rm' deletes a box and every
 snapshot it has. They are an undo, not a backup — 'box export' is the
@@ -423,6 +445,25 @@ a backup — it dies with the box on 'box rm'; 'box export' is what survives.
 
 A box minted with --from has no 'pristine' of its own unless it inherited
 one from its source, because a clone has no pristine moment to capture.
+
+'bootstrapped' is the other label box takes for you (#130), and it is the
+one you probably want more often: it is the box AFTER the tenant role
+converged and before you touched it.
+
+  box restore work bootstrapped   # keep the role, undo what you did to it
+  box restore work pristine       # throw the role away too
+
+The same two caveats apply to it exactly as written above — it dies with the
+box on 'box rm' ('box export' is what survives), and it cannot undo anything
+that left the box, a tailnet join or a runner registration among them
+(heavy-duty/rig#62).
+
+Its absence proves NOTHING. box takes it only after a rig hook it ran and
+watched succeed, so a blank box has none, a 'dir'-pool host has none, and a
+box whose hook failed and was re-run by hand through 'box shell' has none
+either — box will not label a convergence it did not watch. 'box info <box>'
+tells you which labels a box actually has; take the mark yourself any time
+with 'box snapshot <box> bootstrapped'.
 
 Destructive, so it asks first — naming the snapshot it is rolling back to,
 because the whole risk is picking the wrong label. --force (-f) skips the
@@ -1118,14 +1159,29 @@ storage_driver() {
   printf '%s' "$driver"
 }
 
-# Take the 'pristine' snapshot, or say loudly why not. Default ON: the value
-# of this mark only exists if it is already there on the bad day, and nobody
-# takes it by hand at the one moment it is true. The escape hatch is the
-# BOX_LAUNCH_TIMEOUT shape — an environment knob, not another flag on 'new'.
-snapshot_pristine() {
-  local instance="$1" name="$2" driver
-  if [ "${BOX_SNAPSHOT_PRISTINE:-1}" = 0 ]; then
-    echo "box: skipping the 'pristine' snapshot (BOX_SNAPSHOT_PRISTINE=0)."
+# The shared policy behind every mark box takes for you (#104, #130):
+# read the opt-out, read the storage driver, refuse to double the disk cost on
+# a pool with no copy-on-write, and NEVER fail a mint over a checkpoint.
+#
+# It lives once on purpose. What generalises here is the MECHANISM, and the
+# never-fatal contract inside it is exactly the property that must not be got
+# subtly different in two places — one function, one place to review it, one
+# place a future third mark inherits it from. What does NOT generalise is the
+# PROSE: 'pristine' and 'bootstrapped' name different moments and are worth
+# different sentences, so each wrapper below owns its own narration and passes
+# it in. Two thin wrappers over one policy is the honest split; a single
+# stringly-parameterised function taking five sentences would not be.
+#
+# The opt-out variable name is DERIVED from the label (BOX_SNAPSHOT_PRISTINE,
+# BOX_SNAPSHOT_BOOTSTRAPPED) so the message can never drift from the knob the
+# operator actually has to set.
+#
+#   snapshot_mark <instance> <name> <label> <enabled> <what-this-state-is>
+snapshot_mark() {
+  local instance="$1" name="$2" label="$3" enabled="$4" what="$5" driver knob
+  knob="BOX_SNAPSHOT_$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]')"
+  if [ "$enabled" = 0 ]; then
+    echo "box: skipping the '$label' snapshot ($knob=0)."
     return 0
   fi
   driver="$(storage_driver)"
@@ -1134,31 +1190,70 @@ snapshot_pristine() {
   # (:294) there is no CoW at all: the snapshot is a full copy of the root,
   # several GB and minutes, on EVERY mint. Skip it there — but loudly, and
   # naming the by-hand command, because a silent skip teaches an operator to
-  # expect a mark that will not be there.
+  # expect a mark that will not be there. With two marks the objection is
+  # twice the size, so the skip covers both: a 'dir' host is not asked to pay
+  # for one full root copy per mint, let alone two.
   if [ "$driver" = dir ]; then
-    echo "box: NOT taking the 'pristine' snapshot — this host's storage pool is the 'dir'" >&2
+    echo "box: NOT taking the '$label' snapshot — this host's storage pool is the 'dir'" >&2
     echo "box: driver, which has no copy-on-write, so the mark would be a full multi-GB copy" >&2
     echo "box: of the root disk on every mint rather than the near-free btrfs one." >&2
-    echo "box: take it by hand if you want it here:  box snapshot $name pristine" >&2
+    echo "box: take it by hand if you want it here:  box snapshot $name $label" >&2
     echo "box: or fix the host (btrfs is what 'box setup-host' installs by default)." >&2
     return 0
   fi
   # Neither probe answered — an unusual host, or a tier that cannot read the
   # pool. Proceed, and say what was assumed. The two mistakes are not
   # symmetric: a snapshot taken on a 'dir' host wastes disk the operator can
-  # see in 'box info' and delete, while a snapshot NOT taken is the pristine
-  # moment gone for good, which is the whole thing this exists to prevent.
-  [ -n "$driver" ] || echo "box: could not read the storage driver — taking 'pristine' anyway," \
-    "assuming copy-on-write (BOX_SNAPSHOT_PRISTINE=0 to skip)." >&2
-  echo "box: marking 'pristine' — the guest after cloud-init, before rig converges anything."
-  if ! incus snapshot create "$instance" pristine </dev/null; then
+  # see in 'box info' and delete, while a snapshot NOT taken is the moment
+  # gone for good, which is the whole thing this exists to prevent.
+  [ -n "$driver" ] || echo "box: could not read the storage driver — taking '$label' anyway," \
+    "assuming copy-on-write ($knob=0 to skip)." >&2
+  echo "box: marking '$label' — $what"
+  if ! incus snapshot create "$instance" "$label" </dev/null; then
     # An undo is not the mint's product: a mint that worked must not be
     # failed by a checkpoint that didn't.
-    echo "box: WARNING — could not take the 'pristine' snapshot (incus said why above)." >&2
-    echo "box: the box is fine; it just has no pristine mark. The mint continues." >&2
+    echo "box: WARNING — could not take the '$label' snapshot (incus said why above)." >&2
+    echo "box: the box is fine; it just has no $label mark. The mint continues." >&2
     return 0
   fi
-  echo "box: roll back to it any time with:  box restore $name pristine"
+  echo "box: roll back to it any time with:  box restore $name $label"
+}
+
+# Take the 'pristine' snapshot, or say loudly why not. Default ON: the value
+# of this mark only exists if it is already there on the bad day, and nobody
+# takes it by hand at the one moment it is true. The escape hatch is the
+# BOX_LAUNCH_TIMEOUT shape — an environment knob, not another flag on 'new'.
+snapshot_pristine() {
+  snapshot_mark "$1" "$2" pristine "${BOX_SNAPSHOT_PRISTINE:-1}" \
+    "the guest after cloud-init, before rig converges anything."
+}
+
+# Take the 'bootstrapped' snapshot (#130), after the rig hook box RAN and
+# WATCHED SUCCEED. Same default, same opt-out shape, same never-fatal
+# contract as 'pristine' — it is the same policy, one function up.
+#
+# The label is deliberately CONDITIONAL where 'pristine' is unconditional, and
+# the asymmetry is the point rather than an oversight. 'pristine' marks a
+# MOMENT that every fresh mint has, so it is taken on every fresh mint.
+# 'bootstrapped' marks an EVENT — "a tenant role converged, and nothing has
+# happened since" — and a blank box has no such event. Minting the label there
+# anyway would either duplicate 'pristine' byte for byte (nothing ran between
+# them, so it is the same disk state at twice the cost, which is precisely the
+# doubling the 'dir' skip above exists to refuse) or, worse, assert a
+# convergence that never happened. So a hookless box gets nothing, and the
+# label's presence is itself information: this box had a role and box saw it
+# converge.
+#
+# Read only in that direction. PRESENCE means the mint-time hook succeeded and
+# the box has not been touched since; ABSENCE means nothing at all — a blank
+# template, a 'dir' pool, an opt-out, or a role converged by hand afterwards
+# (see cmd_new's hook-failure path, which hands the operator the command
+# because box cannot honestly take a mark for a run it did not watch). Nothing
+# in box may treat a missing 'bootstrapped' as evidence a box is unconverged.
+snapshot_bootstrapped() {
+  snapshot_mark "$1" "$2" bootstrapped \
+    "${BOX_SNAPSHOT_BOOTSTRAPPED:-1}" \
+    "the tenant role converged, and nothing has touched the box since."
 }
 
 cmd_new() {
@@ -1451,8 +1546,26 @@ cmd_new() {
         echo "box: rig bootstrap $T_BOOTSTRAP_ROLE FAILED in $name." >&2
         echo "box: the box is up and the seed is intact — the role converges, so re-run it:" >&2
         echo "  box shell $name    # then: sudo rig bootstrap $T_BOOTSTRAP_ROLE" >&2
+        # The mark box cannot take for you (#130), said HERE because here is
+        # the only moment the operator is looking. 'bootstrapped' means "box
+        # ran the hook and watched it succeed" — a by-hand re-run happens in a
+        # shell box does not watch, so box cannot know when (or whether) it
+        # converged, and a mark taken on a guess would be a label asserting a
+        # convergence box never saw. That is the same lie #104 refused on the
+        # clone path. So: hand over the command instead of inventing the fact.
+        echo "box: no 'bootstrapped' mark was taken — box only marks a hook it watched succeed," >&2
+        echo "  and a by-hand re-run happens in a shell it does not watch. Take it yourself once" >&2
+        echo "  the role converges, at the moment it is true:" >&2
+        echo "  box snapshot $name bootstrapped" >&2
+        echo "box: 'box restore $name pristine' is still there if you would rather start the role over." >&2
         die "the tenant role did not converge — the box is incomplete, so refusing to call it ready"
       fi
+      # The hook RAN and box WATCHED it succeed — so right here the box is
+      # converged and untouched, the state an operator re-mints ten minutes
+      # for when they break a tenant role but not the OS under it. Never
+      # fatal, same as 'pristine': a mint that worked is not failed by a
+      # checkpoint that didn't.
+      snapshot_bootstrapped "$instance" "$name"
     fi
   fi
   # The login hint belongs to the claude-box template — read the EFFECTIVE
