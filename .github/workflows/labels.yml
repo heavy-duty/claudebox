@@ -9,15 +9,32 @@ name: labels
 # is ever checked out or executed — labeler reads changed paths via the API,
 # and reconcile checks out the BASE branch only. Keep it that way.
 #
-# Review-submitted transitions (bots finishing a round) ride the cron: there
-# is no pull_request_review_target, so the 15-minute tick is the wake signal —
-# the same cadence the reviewer bots poll at.
+# There is no pull_request_review_target, so a review landing cannot wake this
+# workflow directly — and the */15 cron is advisory: GitHub deprioritises short
+# intervals hard enough that a quiet repo goes hours between ticks. So the
+# handoff wakes the sweep itself: the author sets state:needs-human when handing
+# the PR to the maintainer (CONTRIBUTING step 6), and `labeled` fires this
+# workflow, which confirms or corrects that optimistic write within seconds. The
+# cron stays as the last resort, for the round an agent forgets to hand off.
+#
+# This cannot loop: the reconciler's own label writes use GITHUB_TOKEN, and
+# GitHub does not create workflow runs from GITHUB_TOKEN-triggered events. Agent
+# writes use a PAT and therefore do trigger — exactly the asymmetry wanted.
 on:
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch: # also bootstraps missing labels — run once on a fresh repo
   pull_request_target:
-    types: [opened, reopened, ready_for_review, converted_to_draft, synchronize]
+    types:
+      [
+        opened,
+        reopened,
+        ready_for_review,
+        converted_to_draft,
+        synchronize,
+        labeled,
+        unlabeled,
+      ]
 
 permissions:
   contents: read
@@ -26,7 +43,12 @@ permissions:
 
 jobs:
   scope:
-    if: github.event_name == 'pull_request_target'
+    # Not on labeled/unlabeled: those events change no paths, so labeler has
+    # nothing new to derive — and label churn is precisely what they are.
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      github.event.action != 'labeled' &&
+      github.event.action != 'unlabeled'
     runs-on: ubuntu-latest
     concurrency:
       group: labels-scope-${{ github.event.pull_request.number }}
