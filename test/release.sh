@@ -466,6 +466,7 @@ check "monotonic: a duplicate is caught even when the base ref will not resolve 
 G="$(grepo mono-vacuous '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
 check "monotonic: HEAD as its own base reports containment VACUOUS, not verified" 0 "containment vacuous" mono "$G" HEAD
 check "monotonic: ...and names uniqueness as the half that actually ran" 0 "uniqueness on HEAD checked" mono "$G" HEAD
+# shellcheck disable=SC2016  # $1/$2 expand in the child shell, by design
 check "monotonic: ...and does NOT claim headings were still present" 1 "" \
   bash -c 'cd "$1" && bash "$2" HEAD | grep -q "are still present"' _ "$G" "$MONO"
 # The PR shape keeps the containment wording — the two must not collapse.
