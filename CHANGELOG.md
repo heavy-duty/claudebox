@@ -7,6 +7,42 @@ which records not just what changed but what each drill run proved.
 
 ### Changed
 
+- **PR labels split into two axes: `state:*` (whose ball) and `blocker:*`
+  (what is in the way)** — `state:needs-rebase` is retired, replaced by
+  `blocker:conflict`, `blocker:ci-red` and `blocker:unrequested`. One rule
+  joins them: `state:needs-human` requires zero blockers.
+
+  The single-label design forced independent facts through one totally-ordered
+  value, and the ordering was where every bug lived. Mergeability, check
+  status and the review round move independently — a PR can be conflicted
+  *and* red *and* stalled at once — so a total order has to pick a winner and
+  silently drop the rest. `state:needs-rebase` was the clearest casualty: it
+  fired on both a conflict and a failing check, which need opposite work, and
+  told an agent to rebase when what it owed was a bug fix. On this repo's own
+  board, #120 was conflicted **and** red and could only say one of them.
+
+  Blockers are a set, so there is no precedence between them to get wrong.
+  What is left on the ordered axis is purely about reviews, which is the one
+  place an ordering is genuinely meaningful.
+
+  `state:bots-reviewing` also tightens to mean strictly *a request is live and
+  an answer is coming*. A ready PR nobody was asked to review read "waiting on
+  the reviewers" for the 48 hours it took the stale sweep to notice; it is now
+  `state:addressing` + `blocker:unrequested`, because the agent owes the ask.
+  Drafts are exempt (the bots ignore drafts by design), as is an explicit
+  human request — a maintainer claiming a PR early is deliberate.
+
+  The reconciler strips `state:needs-rebase` on sight, so the retirement heals
+  the board rather than stranding a label nothing recomputes. It also never
+  *names* a label the repo does not have: `gh issue edit` rejects the whole
+  call on one unknown name, so on a repo whose taxonomy predates this change
+  an unbootstrapped `blocker:*` would otherwise take the state convergence
+  down with it, on exactly the PRs the change exists to fix. Adds are filtered
+  against the repo's real label set and the shortfall is logged — and a
+  taxonomy gap skips only the label edit, never the `merge-next` clearing or
+  the stale sweep, which do not depend on the `state:*` set.
+  Fixtures 51 → 72.
+
 - **The tenant templates carry rig's family suffix: `claude` → `claude-box`,
   `codex` → `codex-box`, `grok` → `grok-box`, `staging` → `staging-box`**
   (#123, following heavy-duty/rig#76) — rig is growing a second family of
@@ -60,6 +96,21 @@ which records not just what changed but what each drill run proved.
   later and further from the cause.
 
 ### Fixed
+
+- **A failed rollup read no longer reads as "nothing is failing"** — when
+  `gh pr view` returned nothing, the fallback left the `statusCheckRollup`
+  *key* absent, and `checks_state` collapsed that into the same `NONE` as a PR
+  that genuinely has no checks. `NONE` blocks nothing, so a transient API
+  failure presented as mergeable-by-a-human: the same
+  unknown-certified-as-green shape as #136, surviving in the one place that
+  fix never looked.
+
+  `checks_state` now distinguishes the two — `UNREADABLE` for an absent key,
+  `NONE` for a present-but-empty array — and the sweep leaves an `UNREADABLE`
+  PR exactly as it is rather than relabelling on facts it did not read. It is
+  deliberately **not** a blocker: blocking on it would flap the entire board
+  on one bad API call, and the next tick is fifteen minutes away. Fixtures
+  64 → 66.
 
 - **`state:needs-human` no longer appears on PRs a human cannot merge** (#136)
   — `decide_state()` derived state from three inputs (draft flag, requested
