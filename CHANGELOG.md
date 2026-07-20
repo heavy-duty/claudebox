@@ -399,6 +399,33 @@ which records not just what changed but what each drill run proved.
   exists. (`drill/doctor.sh` was checked and needs nothing: it already reads
   into `ufw_out` and is safe by construction, not by absent `pipefail`.)
 
+- **The racing-reader sweep guards the class, not one spelling — and now
+  names a second writer** (#124) — the sweep #107 added matched
+  `ufw status[^|]*\| *grep`, which caught every historical instance and none
+  of the equivalent spellings. `head -n1`, `sed -n '1p;q'`,
+  `awk '/x/ {print; exit}'` and `read` all close the pipe early, SIGPIPE the
+  writer, and yield the identical 141 under `pipefail`; the pin guarded the
+  instance spelling of the very thing it existed to generalise. Both halves
+  of the matcher are alternations now. The reader half is deliberately not
+  narrowed to the early-exit spellings — separating `grep -q` from `grep -c`
+  by regex is precision that rots, and every `ufw status` site in the tree
+  already captures first, so banning the pipe outright costs nothing.
+  The writer half gains `incus config trust list`, because
+  **`host/revoke-user.sh:206` piped it into `grep -q` as the `--purge`
+  leftover assert** — under `set -euo pipefail`, so unlike `drill/wipe.sh`
+  nothing but the writer's size was holding it, and sitting left of `&&` a
+  141 is `set -e`-exempt too. It would have read as "no leftover cert" on a
+  host that still trusts the revoked user's certificate and reported the
+  purge complete: fail-open, on the path whose whole job is to prove access
+  is gone. Now captured into `trust_csv` and matched with `[[ ]]` (leading
+  newline so the first CSV row still anchors like the `^` it replaces —
+  verified equivalent to the old `grep` across nine anchoring cases). Writers
+  are enumerated rather than generalised: ~150 legitimate `| grep` sites
+  exist under `host/` and `drill/`, nearly all re-reading an already-captured
+  string, so the sweep claims only what it can check and grows one named
+  writer at a time. The `id -nG | tr | grep -qx` shapes in grant/revoke/setup
+  are deliberately untouched — single tiny writes, not realistically racy.
+
 ## 0.8.0 — 2026-07-19
 
 ### Added

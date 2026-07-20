@@ -2008,9 +2008,9 @@ check "teardown-host: refuses without a TTY and names the override (#113)" 2 \
 
 # #102's race, pinned as a CLASS rather than at the one site that had it
 # (#107). A daemon-free run cannot exercise a UFW teardown, so the shape is
-# pinned instead: nowhere under host/ or drill/ may `ufw status` be piped into
-# a reader that exits on its first match. `Status: active` is ufw's FIRST line,
-# so the reader matches, closes the pipe, ufw takes SIGPIPE, and the pipeline
+# pinned instead: nowhere under host/ or drill/ may a known multi-line writer
+# be piped into a line reader. `Status: active` is ufw's FIRST line, so the
+# reader matches, closes the pipe, ufw takes SIGPIPE, and the pipeline
 # yields 141 — under pipefail the branch silently reads false and the whole
 # firewall block is skipped on a host the operator was told is clean.
 #
@@ -2022,13 +2022,36 @@ check "teardown-host: refuses without a TTY and names the override (#113)" 2 \
 # Comment lines are stripped before matching: each fix's own commentary quotes
 # the racing shape to explain it, and a pin that cannot tell prose from code
 # would fail on the very comment documenting why it exists.
+#
+# BOTH halves of the matcher are alternations, and both were widened in #124:
+#
+#   · READERS. Pinning `| grep` guarded the instance spelling, not the class.
+#     `head -n1`, `sed -n '1p;q'` and `awk '/x/ {print; exit}'` all close the
+#     pipe early and produce the identical wrong answer under pipefail. The
+#     alternation is deliberately NOT restricted to the early-exit spellings
+#     (`grep -q` but not `grep -c`, `sed …q` but not `sed s///`): telling
+#     those apart by regex is exactly the kind of precision that rots, and
+#     the house idiom is to capture first anyway — all six `ufw status` sites
+#     in the tree already do. Banning the pipe outright costs nothing real
+#     and cannot be defeated by a spelling nobody enumerated.
+#
+#   · WRITERS. Enumerated, not generalised. `incus config trust list` joins
+#     `ufw status` because host/revoke-user.sh used it as a leftover-detection
+#     condition under `set -euo pipefail` (#124). A generic "no multi-line
+#     writer feeds a reader" matcher is unwritable here: ~150 legitimate
+#     `| grep` sites exist across host/ and drill/, nearly all reading an
+#     already-captured string back out of `printf '%s\n' "$var"`. So the
+#     sweep claims exactly what it can check — THESE writers are never piped
+#     — and grows one named writer at a time.
 # shellcheck disable=SC2016  # "$1" is the subshell's positional, passed below
-check "no 'ufw status' is piped into an early-exit reader under host/ or drill/" 0 "" \
+check "no multi-line writer is piped into a line reader under host/ or drill/" 0 "" \
   bash -c 'bad=""
     for f in "$1"/host/*.sh "$1"/drill/*.sh; do
-      grep -vE "^[[:space:]]*#" "$f" | grep -qE "ufw status[^|]*\| *grep" && bad="$bad ${f#"$1"/}"
+      grep -vE "^[[:space:]]*#" "$f" \
+        | grep -qE "(ufw status|incus config trust list)[^|]*\| *(grep|head|sed|awk|read)" \
+        && bad="$bad ${f#"$1"/}"
     done
-    [ -z "$bad" ] || { printf "racing ufw reads in:%s\n" "$bad"; exit 1; }' \
+    [ -z "$bad" ] || { printf "racing reads in:%s\n" "$bad"; exit 1; }' \
     _ "$ROOT"
 
 # The other direction, per file that removes UFW rules: the capture present and
@@ -2042,6 +2065,18 @@ for f in host/teardown-host.sh drill/wipe.sh; do
   check "$f: the numbered-delete loop breaks on absence, not on a pipe" 0 "" \
     grep -qF '[ -n "$line" ] || break' "$ROOT/$f"
 done
+
+# Same other-direction pin for the non-ufw writer the sweep now names: the
+# --purge leftover assert must match a captured trust store, so the sweep
+# cannot be satisfied by deleting the assert instead of fixing it. That assert
+# is the last thing standing between "purge INCOMPLETE" and a silent claim of
+# success on a host that still trusts the revoked user's certificate.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "revoke-user: the purge leftover assert reads a captured trust store" 0 "" \
+  grep -qF 'trust_csv="$(incus config trust list' "$ROOT/host/revoke-user.sh"
+# shellcheck disable=SC2016  # ditto
+check "revoke-user: the cert leftover check matches the capture, not a pipe" 0 "" \
+  grep -qF '"$trust_csv" == *$' "$ROOT/host/revoke-user.sh"
 check "drill: reads the installed tree through current/" 0 "" \
   grep -qF '.local/share/box/current/VERSION' "$ROOT/drill/drill.sh"
 

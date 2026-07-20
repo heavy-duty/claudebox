@@ -200,10 +200,23 @@ fi
 # and a promise the header makes is a promise this block checks. The
 # incus-user state directory too — it was purged for releases without being
 # re-checked, which is exactly the gap this block exists to close.
+# The trust store is read into a capture rather than piped into a reader that
+# stops at its first match — #102's shape, and this file is `set -euo pipefail`
+# already, so unlike drill/wipe.sh (#107) nothing but the writer's size is
+# holding it. A reader that exits early SIGPIPEs incus mid-table and the
+# pipeline yields 141; sitting left of `&&` that is also set -e-exempt, so it
+# would read as "no leftover cert" on a host that still trusts the revoked
+# user's certificate and the purge would report success. Fail-open, on the
+# cleanup path whose entire job is to prove access is gone.
+# Un-racy in practice today — the trust store is small and likely one write —
+# so this is defensive, not a live defect. Captured so it cannot become one.
+trust_csv="$(incus config trust list --format csv --columns nf 2>/dev/null || true)"
+
 leftover=""
 incus project show "$project" >/dev/null 2>&1 </dev/null && leftover="$leftover $project"
 incus network show "$bridge" >/dev/null 2>&1 </dev/null && leftover="$leftover $bridge"
-incus config trust list --format csv --columns nf 2>/dev/null | grep -q "^incus-user-$uid," \
+# Leading newline so the first CSV row anchors like the `^` this replaces.
+[[ $'\n'"$trust_csv" == *$'\n'"incus-user-$uid,"* ]] \
   && leftover="$leftover cert:incus-user-$uid"
 $SUDO test -d "/var/lib/incus/users/$uid" 2>/dev/null \
   && leftover="$leftover /var/lib/incus/users/$uid"
