@@ -16,7 +16,7 @@ single reply, and a human takes the final review.
 |---|---|---|---|---|
 | `state:building` | `#FBCA04` | the coding agent, still building | PR opened as draft | marked ready + bot reviews requested |
 | `state:bots-reviewing` | `#1D76DB` | the reviewer bots to finish the round | ready with reviews requested, or fixes pushed and reviews re-requested | all three bots have reviewed the round |
-| `state:addressing` | `#D93F0B` | the coding agent to reply, fix, or ask | all bots reviewed and not all approved; or nobody was asked; or a blocker is up | the thing the blocker names is done |
+| `state:addressing` | `#D93F0B` | the coding agent to reply, fix, or ask | all bots reviewed and not all approved; or nobody was asked; or a blocker is up | the round-reply is posted and fixes pushed — and any blocker named alongside is cleared |
 | `state:needs-human` | `#8250DF` | the human reviewer | the PR **could be merged right now**: no blockers, three formal head-current approvals — and the human review is requested | merged — or changes requested, which cycles back to `state:addressing` |
 
 `bots-reviewing` and `addressing` are deliberately distinct: staleness in the
@@ -35,7 +35,7 @@ PR carries as many as apply.
 |---|---|---|---|
 | `blocker:conflict` | `#B60205` | GitHub says `CONFLICTING` — the agent owes a **rebase** | it merges cleanly |
 | `blocker:ci-red` | `#B60205` | a check failed — the agent owes a **fix**, which a rebase will not provide | checks are green |
-| `blocker:unrequested` | `#E99695` | somebody still owes a verdict and **nobody was asked** for one | reviews are requested |
+| `blocker:unrequested` | `#E99695` | this head has no verdict from somebody — never reviewed, or staled by a push — and **nobody was asked** for one | reviews are requested |
 
 One rule joins the axes: **`state:needs-human` requires zero blockers.** Any
 blocker means the work is the agent's, whatever the review round says.

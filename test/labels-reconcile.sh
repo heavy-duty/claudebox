@@ -201,7 +201,17 @@ expect "ready, nobody asked, nothing reviewed raises unrequested" blocker:unrequ
 # ...the partial case is equally stalled: one verdict in, nobody asked for the rest
 REVIEWS_JSON="$(reviews "$(rev "$BOT1" APPROVED head1 "" t1)")"
 expect "one bot in, none requested is still unrequested" blocker:unrequested "$(blockers)"
+# ...a STALE round with nobody asked is the same debt, and arguably worse: the
+#    page carries approvals that no longer describe the tree. Guarding on
+#    MISSING alone let this one through with no blocker at all.
+REVIEWS_JSON="$(reviews \
+  "$(rev "$BOT1" APPROVED oldhead "" t1)" \
+  "$(rev "$BOT2" APPROVED oldhead "" t2)" \
+  "$(rev "$BOT3" APPROVED oldhead "" t3)")"
+expect "a stale round with nobody asked is unrequested too" blocker:unrequested "$(blockers)"
+expect "...and is still the agent's ball" state:addressing "$(decide_state)"
 # ...but a live request means an answer IS coming
+REVIEWS_JSON="$(reviews "$(rev "$BOT1" APPROVED head1 "" t1)")"
 REQUESTED="$BOT2"
 expect "a live bot request is not a stalled round" "" "$(blockers)"
 # ...and a draft is exempt: the bots ignore drafts by design

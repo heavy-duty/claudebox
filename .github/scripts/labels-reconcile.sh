@@ -194,12 +194,17 @@ blockers() { # → the blocker:* labels this PR should carry, one per line
   # explicit human request — a maintainer claiming a PR early is deliberate,
   # not a dropped ball.
   if [ "$DRAFT" != true ] && ! requested "$HUMAN"; then
-    local b any_missing=false any_requested=false
+    local b v owed=false any_requested=false
     for b in "${BOTS[@]}"; do
       requested "$b" && any_requested=true
-      [ "$(bot_verdict "$b")" = MISSING ] && any_missing=true
+      # MISSING and STALE are both verdicts this head does not have: nobody
+      # reviewed it, or everybody reviewed something else. The agent owes an
+      # ask either way — the stale round is if anything the worse of the two,
+      # since it has approvals on the page that no longer describe the tree.
+      v="$(bot_verdict "$b")"
+      case "$v" in MISSING | STALE) owed=true ;; esac
     done
-    if [ "$any_missing" = true ] && [ "$any_requested" = false ]; then
+    if [ "$owed" = true ] && [ "$any_requested" = false ]; then
       echo blocker:unrequested
     fi
   fi
@@ -350,6 +355,30 @@ reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
   done
   add="${add#,}"
   remove="${remove#,}"
+
+  # Never NAME a label the repo does not have. `gh issue edit --add-label`
+  # rejects the WHOLE call on one unknown name — nothing is applied — so a
+  # single missing blocker would take the state convergence down with it, on
+  # exactly the PRs this change exists to fix, surfacing only as a log line.
+  # Batching state and blockers into one edit for anti-flicker is what widened
+  # that blast radius; filtering the add side is what closes it again.
+  # Removals need no filter: they are built from has_label, so the label
+  # provably exists. REPO_LABELS unreadable means no filtering rather than
+  # filtering everything out — a failed read must not silently strip the board.
+  if [ -n "${REPO_LABELS:-}" ]; then
+    local kept="" missing="" want
+    for want in ${add//,/ } "$desired"; do
+      [ "$want" = "$desired" ] && continue
+      if grep -qxF "$want" <<<"$REPO_LABELS"; then kept="$kept,$want"
+      else missing="$missing $want"; fi
+    done
+    add="${kept#,}"
+    if ! grep -qxF "$desired" <<<"$REPO_LABELS"; then
+      log "#$n: WARNING: state label '$desired' does not exist — run the workflow manually to bootstrap"
+      return
+    fi
+    [ -n "$missing" ] && log "#$n: WARNING: missing label(s)$missing — state still converged; dispatch the workflow to bootstrap"
+  fi
   if ! has_label "$desired" || [ -n "$remove" ] || [ -n "$add" ]; then
     args=(--add-label "$desired${add:+,$add}")
     [ -n "$remove" ] && args+=(--remove-label "$remove")
@@ -403,6 +432,11 @@ main() {
     log "workflow_dispatch: bootstrapping the taxonomy"
     bootstrap_labels
   fi
+
+  # The repo's label set, read ONCE per sweep — reconcile_pr filters every
+  # add against it, because one unknown name fails the whole edit call.
+  REPO_LABELS="$(gh label list -R "$REPO" --limit 200 --json name --jq '.[].name' 2>/dev/null || echo "")"
+  [ -z "$REPO_LABELS" ] && log "WARNING: could not read the label set — applying labels unfiltered"
 
   local n
   for n in $(gh pr list -R "$REPO" --state open --limit 100 --json number --jq '.[].number'); do

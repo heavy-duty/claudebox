@@ -33,7 +33,13 @@ which records not just what changed but what each drill run proved.
   human request — a maintainer claiming a PR early is deliberate.
 
   The reconciler strips `state:needs-rebase` on sight, so the retirement heals
-  the board rather than stranding a label nothing recomputes. Fixtures 51 → 64.
+  the board rather than stranding a label nothing recomputes. It also never
+  *names* a label the repo does not have: `gh issue edit` rejects the whole
+  call on one unknown name, so on a repo whose taxonomy predates this change
+  an unbootstrapped `blocker:*` would otherwise take the state convergence
+  down with it, on exactly the PRs the change exists to fix. Adds are filtered
+  against the repo's real label set and the shortfall is logged.
+  Fixtures 51 → 66.
 
 - **The tenant templates carry rig's family suffix: `claude` → `claude-box`,
   `codex` → `codex-box`, `grok` → `grok-box`, `staging` → `staging-box`**
