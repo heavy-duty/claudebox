@@ -38,8 +38,10 @@ which records not just what changed but what each drill run proved.
   call on one unknown name, so on a repo whose taxonomy predates this change
   an unbootstrapped `blocker:*` would otherwise take the state convergence
   down with it, on exactly the PRs the change exists to fix. Adds are filtered
-  against the repo's real label set and the shortfall is logged.
-  Fixtures 51 → 66.
+  against the repo's real label set and the shortfall is logged — and a
+  taxonomy gap skips only the label edit, never the `merge-next` clearing or
+  the stale sweep, which do not depend on the `state:*` set.
+  Fixtures 51 → 72.
 
 - **The tenant templates carry rig's family suffix: `claude` → `claude-box`,
   `codex` → `codex-box`, `grok` → `grok-box`, `staging` → `staging-box`**

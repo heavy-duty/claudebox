@@ -365,21 +365,29 @@ reconcile_pr() { # $1 = PR number; relies on the globals set from its fetch
   # Removals need no filter: they are built from has_label, so the label
   # provably exists. REPO_LABELS unreadable means no filtering rather than
   # filtering everything out — a failed read must not silently strip the board.
+  local skip_edit=false
   if [ -n "${REPO_LABELS:-}" ]; then
     local kept="" missing="" want
-    for want in ${add//,/ } "$desired"; do
-      [ "$want" = "$desired" ] && continue
+    for want in ${add//,/ }; do
       if grep -qxF "$want" <<<"$REPO_LABELS"; then kept="$kept,$want"
       else missing="$missing $want"; fi
     done
     add="${kept#,}"
+    # A missing STATE label skips only the EDIT — never the rest of this
+    # function. Everything below is independent of the state:* taxonomy, and
+    # returning here stranded it: `merge-next` kept claiming "merge this one
+    # next" on a PR the board had moved to the agent, and the stale sweep
+    # stopped running. That is the original false-invitation bug, reintroduced
+    # in the very fix meant to survive a cold-start repo — and a regression
+    # against the old behaviour, which failed the edit and fell through.
     if ! grep -qxF "$desired" <<<"$REPO_LABELS"; then
-      log "#$n: WARNING: state label '$desired' does not exist — run the workflow manually to bootstrap"
-      return
+      log "#$n: WARNING: state label '$desired' does not exist — skipping the label edit; dispatch the workflow to bootstrap"
+      skip_edit=true
+    elif [ -n "$missing" ]; then
+      log "#$n: WARNING: missing label(s)$missing — state still converged; dispatch the workflow to bootstrap"
     fi
-    [ -n "$missing" ] && log "#$n: WARNING: missing label(s)$missing — state still converged; dispatch the workflow to bootstrap"
   fi
-  if ! has_label "$desired" || [ -n "$remove" ] || [ -n "$add" ]; then
+  if [ "$skip_edit" = false ] && { ! has_label "$desired" || [ -n "$remove" ] || [ -n "$add" ]; }; then
     args=(--add-label "$desired${add:+,$add}")
     [ -n "$remove" ] && args+=(--remove-label "$remove")
     if run gh issue edit "$n" -R "$REPO" "${args[@]}" >/dev/null; then

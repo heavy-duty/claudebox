@@ -379,5 +379,38 @@ DRAFT=true MERGEABLE=CONFLICTING
 expect "a draft is building even when conflicted" state:building "$(decide_state)"
 DRAFT=false MERGEABLE=MERGEABLE CHECKS=SUCCESS REQUESTED="" REVIEWS_JSON='[]'
 
+# ---------------------------------------------------------------------------
+# reconcile_pr's cold-start path. Everything above tests pure functions, which
+# is exactly why a per-PR `return` in the label pre-flight got through review:
+# the fixtures could not reach it. A missing state:* label must skip the label
+# EDIT only — merge-next clearing and the stale sweep are independent of the
+# taxonomy, and stranding them reintroduced the false-invitation bug (a
+# `merge-next` claim surviving on a PR the board had moved to the agent).
+# ---------------------------------------------------------------------------
+reconcile_probe() { # $1 = REPO_LABELS content → the log lines reconcile_pr emits
+  (
+    REPO_LABELS="$1" REPO=owner/repo NOW="$(date +%s)"
+    LABELS="merge-next"                      # the PR carries a queue claim
+    DRAFT=false HEAD_SHA=head1 REQUESTED="" REVIEWS_JSON='[]'
+    MERGEABLE=MERGEABLE CHECKS=SUCCESS
+    PR_JSON='{"created_at":"2020-01-01T00:00:00Z"}'
+    run() { :; }                              # swallow mutations
+    gh() { :; }                               # no network
+    reconcile_pr 777 2>&1
+  )
+}
+
+cold="$(reconcile_probe "merge-next")"        # state:* labels absent entirely
+expect "a cold-start repo still clears merge-next" \
+  yes "$(grep -q 'cleared merge-next' <<<"$cold" && echo yes || echo no)"
+expect "...and still runs the stale sweep" \
+  yes "$(grep -q 'stale (' <<<"$cold" && echo yes || echo no)"
+expect "...while warning that the state label is missing" \
+  yes "$(grep -q "state label 'state:addressing' does not exist" <<<"$cold" && echo yes || echo no)"
+
+warm="$(reconcile_probe "$(printf 'state:addressing\nmerge-next\nstale\nblocker:unrequested')")"
+expect "a bootstrapped repo converges the state as well" \
+  yes "$(grep -q 'state -> state:addressing' <<<"$warm" && echo yes || echo no)"
+
 printf 'labels-reconcile tests: %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
