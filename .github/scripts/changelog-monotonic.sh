@@ -83,11 +83,12 @@ merge_base="$(git merge-base "$base_ref" HEAD 2>/dev/null || true)"
 # version. Field $2, the same split changelog-armed.sh and release-notes.sh
 # use, so the three cannot disagree about what a section header is.
 # 'Unreleased' fails the shape and is excluded by construction.
-headings() {
+headings_raw() {
   awk '
     /^## / && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+/ { print $2 }
-  ' | sort -u
+  '
 }
+headings() { headings_raw | sort -u; }
 
 # The changelog may not exist at the merge base at all (the commit that adds
 # it). Nothing to have deleted, so nothing to assert.
@@ -96,6 +97,57 @@ base_file="$(git show "$merge_base:$changelog" 2>/dev/null || true)"
   echo "changelog-monotonic: $changelog does not exist at the merge base ($(git rev-parse --short "$merge_base")) — nothing could have been deleted."
   exit 0
 }
+
+# --- uniqueness on HEAD (the #118 class) -------------------------------------
+# Containment catches a DELETED heading. It cannot catch a DUPLICATED one: the
+# duplicate is head-side SURPLUS, and `comm -23` (base minus head) is blind to
+# extras on the head side — with or without `sort -u`, base {0.8.0} minus head
+# {0.8.0, 0.8.0} is empty. Multiset comparison does not close it either, for
+# the same reason. The assert that does is uniqueness of version headings ON
+# HEAD, kept alongside containment rather than replacing it.
+#
+# This is the shape #118's bad rebase actually produced: two
+# `## 0.8.0 — 2026-07-19` headings with the incoming entry between them. Every
+# other guard stayed green — markers absent, changelog-armed.sh happy (the top
+# section was still right), tests and shellcheck clean — while
+# release-notes.sh re-armed its grab on the second heading and folded post-cut
+# prose into the shipped release body.
+#
+# Nothing legitimate repeats a version heading: the ceremony stamps a NEW
+# version, and 'Unreleased' fails the version shape and never reaches here.
+dupes="$(headings_raw < "$changelog" | sort | uniq -d)"
+if [ -n "$dupes" ]; then
+  {
+    echo "changelog-monotonic: $changelog has DUPLICATE release heading(s):"
+    echo
+    printf '%s\n' "$dupes" | sed 's/^/    ## /'
+    echo
+    cat <<EOF
+  Each version heading must appear exactly once. A repeat splits one release
+  into two same-named sections, and release-notes.sh re-arms its extraction on
+  every matching '## ' line — so the published body for that version absorbs
+  whatever sits between the copies, and an entry stranded there is dropped from
+  the NEXT release's notes as well.
+
+  This is the #118 shape: an entry meant for '## Unreleased' was inserted after
+  a shipped heading, and the heading re-added below it. The fix is one heading,
+  with the entry above it under '## Unreleased':
+
+      ## Unreleased
+
+      ### Fixed
+
+      - **Your entry**
+
+      ## $(printf '%s\n' "$dupes" | head -1) — DATE     <- exactly once
+
+  Quick check on any changelog-touching rebase:
+
+      diff <(git show origin/main:$changelog | grep '^## ') <(grep '^## ' $changelog)
+EOF
+  } >&2
+  exit 1
+fi
 
 base_headings="$(printf '%s\n' "$base_file" | headings)"
 head_headings="$(headings < "$changelog")"

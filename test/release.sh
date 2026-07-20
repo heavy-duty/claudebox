@@ -335,6 +335,27 @@ check "monotonic: ...and why nothing else says so (git merges it cleanly)" 1 "gi
 check "monotonic: ...on a tree changelog-armed.sh calls FINE (the #122 gap)" 0 "agrees" \
   bash "$ARMED" "$G/CHANGELOG.md" "$ROOT/VERSION"
 
+# --- the #118 incident as it ACTUALLY happened: a DUPLICATED heading -------
+# The deletion case above is the near-miss. What the bad rebase really produced
+# was two '## 0.8.0 — 2026-07-19' headings with the incoming entry stranded
+# between them. Containment cannot see this: the duplicate is head-side
+# SURPLUS, and `comm -23` (base minus head) is blind to extras on the head side
+# — with or without `sort -u`, and multiset comparison does not close it for
+# the same reason. Uniqueness on HEAD is the assert that does.
+G="$(grepo mono-dup '## Unreleased' '' '## 0.8.0 — 2026-07-19' '' '### Added' '' '- **Shipped prose**')"
+head_changelog "$G" '## Unreleased' '' '## 0.8.0 — 2026-07-19' '' '### Fixed' '' '- **An entry**' '' '## 0.8.0 — 2026-07-19' '' '### Added' '' '- **Shipped prose**'
+check "monotonic: a DUPLICATED release heading fails (the #118 shape)" 1 "DUPLICATE release heading" mono "$G" main
+check "monotonic: ...and names the repeated heading" 1 "## 0.8.0" mono "$G" main
+check "monotonic: ...and says what a repeat does to release-notes extraction" 1 "re-arms its extraction" mono "$G" main
+# Containment alone is green on this exact tree — nothing was deleted. Pinned
+# so a future simplification cannot collapse the two asserts into one.
+# shellcheck disable=SC2016  # $1/$2 are the inner shell's positionals, not ours
+check "monotonic: ...on a tree where NOTHING was deleted (containment is blind)" 1 "" \
+  bash -c 'cd "$1" && bash "$2" main 2>&1 | grep -q "DELETES release heading"' _ "$G" "$MONO"
+# And, as with the deletion case, the other guard calls this tree fine.
+check "monotonic: ...on a tree changelog-armed.sh calls FINE" 0 "agrees" \
+  bash "$ARMED" "$G/CHANGELOG.md" "$ROOT/VERSION"
+
 # --- the release ceremony's stamp: an ADD, never a removal -----------------
 # '## Unreleased' -> '## 0.8.1 — DATE' adds 0.8.1 and removes no X.Y.Z
 # heading, because 'Unreleased' is not one. A false positive here would make

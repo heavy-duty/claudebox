@@ -103,6 +103,18 @@ which records not just what changed but what each drill run proved.
   `CHANGELOG_MONOTONIC_STRICT=1` and checks out with `fetch-depth: 0` so the
   guard can never quietly stop guarding.
 
+  Review of this PR found the guard's first cut incomplete, and the gap is the
+  shape the incident *actually* had. Containment catches a **deleted** heading;
+  it cannot catch a **duplicated** one, because the duplicate is head-side
+  surplus and `comm -23` (base minus head) is blind to extras on the head side
+  — with or without `sort -u`, and multiset comparison does not close it for
+  the same reason. So the guard now also asserts that version headings are
+  **unique on HEAD**, alongside containment rather than instead of it. Nothing
+  legitimate repeats one: the ceremony stamps a new version, and `Unreleased`
+  fails the version shape. Both trees are pinned in `test/release.sh` — the
+  deletion near-miss and the real duplicate — each with `changelog-armed.sh`
+  asserted green on it, which is the whole reason this script exists.
+
 ## 0.8.0 — 2026-07-19
 
 ### Added
