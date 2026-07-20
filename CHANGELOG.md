@@ -359,6 +359,21 @@ which records not just what changed but what each drill run proved.
   wrong default: it is the only thing to roll back *to*, at exactly the
   moment that matters. No behaviour change.
 
+- **`teardown-host.sh` refuses a terminal-less run instead of aborting mute**
+  (#113) — the most destructive script in the tree was the one that would not
+  tell a non-interactive caller how to proceed. With no `--yes`/`BOX_YES` and
+  no TTY it fell straight into `read`, took the instant EOF and exited 1
+  saying only `aborted` — a refusal that names neither the cause nor the
+  override. It now checks `[ -t 0 ]` and refuses with
+  `--yes (or BOX_YES=1) means yes.`, exit **2** — "you invoked this wrong",
+  the same contract and the same code as `host/revoke-user.sh --purge` and
+  `install.sh`'s `confirm()`, versus 1 for "you were asked and you said no".
+  The gate sits *below* the `--yes`/`BOX_YES` arm, so consent given
+  non-interactively still runs headless — CI's uninstall drill and
+  `box uninstall --purge-host --force` forward `--yes` and are unaffected —
+  and *above* the first `incus` call, so the refusal costs no daemon and
+  `test/cli.sh` drives it for real rather than grepping for it.
+
 ## 0.8.0 — 2026-07-19
 
 ### Added
