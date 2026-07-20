@@ -291,6 +291,25 @@ expect "a finished re-run supersedes an earlier in-flight run" SUCCESS \
   "$(rollup "[$(inflight_ build 2026-07-20T15:19:00Z),\
               $(run_ build SUCCESS 2026-07-20T15:19:45Z)]" | checks_state)"
 
+# -- the wind-down window. A predecessor cancelled by the concurrency group
+#    does not stop the instant its replacement starts, so its completion
+#    routinely lands AFTER the successor's start — on box's aa5a6ba the
+#    replacement started 15:19:38 and the run it cancelled finished 15:19:51.
+#    Dating by "newest stamp of any kind" compares the dead run's completion
+#    against the live run's start, which is not an ordering on runs, and the
+#    predecessor wins. Every fixture above spaces completion before start, so
+#    none of them can see it. run_() cannot express the overlap either — it
+#    carries no startedAt — hence the explicit payloads.
+overlap_() { jq -n --arg n "$1" --arg o "$2" --arg s "$3" --arg c "$4" \
+  '{__typename:"CheckRun", workflowName:"ci", name:$n, conclusion:$o,
+    startedAt:$s, completedAt:$c}'; }
+expect "a predecessor finishing after its replacement started is still older (CANCELLED)" PENDING \
+  "$(rollup "[$(overlap_ scope CANCELLED 2026-07-20T15:19:00Z 2026-07-20T15:19:51Z),\
+              $(inflight_ scope 2026-07-20T15:19:38Z)]" | checks_state)"
+expect "...and the same when it finished green — mid-flight is not mergeable" PENDING \
+  "$(rollup "[$(overlap_ build SUCCESS 2026-07-20T15:19:00Z 2026-07-20T15:19:51Z),\
+              $(inflight_ build 2026-07-20T15:19:38Z)]" | checks_state)"
+
 # -- the classifier feeds the state machine: a cancelled required check must
 #    take the PR off the human's plate, which is the whole point of #136.
 DRAFT=false HEAD_SHA=head1 REQUESTED="$HUMAN" REVIEWS_JSON="$ALL_APPROVE" MERGEABLE=MERGEABLE

@@ -103,16 +103,25 @@ which records not just what changed but what each drill run proved.
   context collapsing to its newest entry: a re-run does not evict the run it
   replaced, so this PR's own tip carried a `CANCELLED` `scope` beside the
   `SUCCESS` `scope` that superseded it, and judging every entry would have
-  stranded every re-run PR in `needs-rebase`. Which entry is newest is decided
-  on the newest timestamp a run actually carries, because a run still in flight
-  does not omit its completion — `gh` marshals the Go zero time as the *string*
-  `"0001-01-01T00:00:00Z"`, which `//` will not fall through. Dating on
-  completion therefore sorted the live re-run to the bottom and picked the run
-  it superseded, reporting the old `SUCCESS` while a replacement was still
-  running: #136 restored, by the very rule meant to close it. An entry carrying
-  no usable timestamp sorts last rather than first, so an undateable in-flight
-  run is never discarded in favour of a stale success — every ambiguity here
-  resolves toward "not settled".
+  stranded every re-run PR in `needs-rebase`.
+
+  A run is dated by **when it began**, which took two corrections to get right
+  and both restored #136 in the meantime. Dating on completion fails because a
+  run still in flight does not omit its completion — `gh` marshals the Go zero
+  time as the *string* `"0001-01-01T00:00:00Z"`, which `//` will not fall
+  through — so the live re-run sorted to the bottom and the run it superseded
+  was judged instead. Taking the *newest* stamp a run carries fails for a
+  subtler reason: it resolves to `completedAt` for a finished run and
+  `startedAt` for a live one, which are different quantities, so it never
+  ordered runs at all. A run cancelled by the concurrency group drains *after*
+  its replacement starts — 13 seconds on this PR's own `aa5a6ba` — so the dead
+  predecessor routinely out-dated the live run replacing it, and a green
+  predecessor in that window read `SUCCESS` with a re-run still in flight.
+  Start time has neither failure: a replacement always begins after the run it
+  replaces, whatever order they finish in. An entry carrying no usable stamp
+  sorts last rather than first, so an undateable in-flight run is never
+  discarded in favour of a stale success — every ambiguity resolves toward
+  "not settled".
 
   `UNKNOWN` mergeability is deliberately not treated as unmergeable: GitHub
   reports it for about a minute after every merge while it recomputes, and
@@ -128,8 +137,9 @@ which records not just what changed but what each drill run proved.
   shapes, the mixed round, the whole check-outcome enum, and the in-flight
   re-run superseding both a green and a cancelled predecessor — in both
   directions, since a run that *finished* after an earlier in-flight entry
-  settles the context — are pinned in `test/labels-reconcile.sh`
-  (19 fixtures → 49).
+  settles the context, and across the drain window where the predecessor
+  completes last — are pinned in `test/labels-reconcile.sh`
+  (19 fixtures → 51).
 
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
   `globstar` makes `**` descend into subdirectories, but a glob still does
