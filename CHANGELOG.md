@@ -126,8 +126,10 @@ which records not just what changed but what each drill run proved.
   only **clears** it the moment the PR stops being mergeable-by-a-human, which
   is precisely the staleness that made `needs-human` untrustworthy. Both live
   shapes, the mixed round, the whole check-outcome enum, and the in-flight
-  re-run superseding both a green and a cancelled predecessor are pinned in
-  `test/labels-reconcile.sh` (19 fixtures → 48).
+  re-run superseding both a green and a cancelled predecessor — in both
+  directions, since a run that *finished* after an earlier in-flight entry
+  settles the context — are pinned in `test/labels-reconcile.sh`
+  (19 fixtures → 49).
 
 - **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
   `globstar` makes `**` descend into subdirectories, but a glob still does

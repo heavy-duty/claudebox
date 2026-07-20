@@ -277,11 +277,19 @@ expect "a replacement in flight for a CANCELLED run is pending, not failed" PEND
   "$(rollup "[$(run_ build CANCELLED 2026-07-20T15:00:00Z),\
               $(inflight_ build 2026-07-20T15:10:00Z)]" | checks_state)"
 # an entry carrying no usable timestamp is treated as newest, not oldest —
-# ambiguity resolves toward "not settled" rather than toward a stale success
+# ambiguity resolves toward "not settled" rather than toward a stale success.
+# Guarded by the sort tiebreak rather than the dating expression: reverting
+# only `at:` leaves this passing, so the two changes are separately pinned.
 expect "an undateable in-flight run is not discarded for a stale success" PENDING \
   "$(rollup "[$(run_ build SUCCESS 2026-07-20T15:00:00Z),\
               $(jq -n '{__typename:"CheckRun",workflowName:"ci",name:"build",conclusion:"",startedAt:null,completedAt:null}')]" \
      | checks_state)"
+# ...and the reverse direction, which stops "in flight sorts last" being
+# widened into "in flight always wins": a run that FINISHED after an earlier
+# in-flight entry is the newer word, and the context is settled.
+expect "a finished re-run supersedes an earlier in-flight run" SUCCESS \
+  "$(rollup "[$(inflight_ build 2026-07-20T15:19:00Z),\
+              $(run_ build SUCCESS 2026-07-20T15:19:45Z)]" | checks_state)"
 
 # -- the classifier feeds the state machine: a cancelled required check must
 #    take the PR off the human's plate, which is the whole point of #136.
