@@ -1256,6 +1256,17 @@ check "clone: does NOT re-stamp the image — the disk really came from it (#103
   restamp_has "$CLONELOG" 'user\.box\.image'
 check "clone: does NOT re-stamp the role — the source's rig converged it (#103)" 1 "" \
   restamp_has "$CLONELOG" 'user\.box\.role'
+# The third column, and the one review found: 'mode.asked' is neither lineage
+# nor re-stampable. It is a mint-event fact whose asker was the SOURCE's
+# operator, and a clone refuses --vm/--container, so nobody was asked anything
+# here. It is CLEARED — there is no true value to give it.
+check "clone: clears the inherited mode.asked — nobody asked THIS box (#103)" 0 "" \
+  grep -qF 'config unset w2 user.box.mode.asked' "$CLONELOG"
+check "clone: ...and does not re-stamp it with a fabricated answer (#103)" 1 "" \
+  restamp_has "$CLONELOG" 'user\.box\.mode\.asked'
+# Cleared, never set-to-empty: an empty value is still a key on the instance.
+check "clone: clears it rather than setting it empty (#103)" 1 "" \
+  grep -qE 'config set .*user\.box\.mode\.asked=($|[[:space:]])' "$CLONELOG"
 # Order: the re-stamp lands on the copied instance BEFORE it is started, so a
 # clone is never observable wearing its source's provenance. Fail-closed — an
 # absent line makes the arithmetic fail, not pass.
@@ -1267,6 +1278,17 @@ restamp_precedes_start() {
 }
 check "clone: the re-stamp precedes the start (#103)" 0 "" \
   restamp_precedes_start "$CLONELOG"
+# The clear rides the same rule for the same reason: a clone must never be
+# observable — not for one moment, not to 'box info' — wearing an 'asked' its
+# operator never gave. Fail-closed the same way.
+clear_precedes_start() {
+  local unset_ln start
+  unset_ln="$(grep -n 'config unset .* user.box.mode.asked' "$1" | head -1 | cut -d: -f1)"
+  start="$(grep -n '^incus start ' "$1" | head -1 | cut -d: -f1)"
+  [ -n "$unset_ln" ] && [ -n "$start" ] && [ "$unset_ln" -lt "$start" ]
+}
+check "clone: the mode.asked clear precedes the start too (#103)" 0 "" \
+  clear_precedes_start "$CLONELOG"
 
 # --- the read half: 'box info' surfaces it ---------------------------------
 # A stamp nothing can read is not done. cmd_info printed NAME/STATE/TYPE/IPV4
@@ -1304,13 +1326,25 @@ check "info: surfaces the origin (#103)" 0 "ORIGIN     mint" infobox "$STAMPED"
 # Still the box it always was: the new block is additive, above the snapshots.
 check "info: still prints the state block it always did" 0 "IPV4       10.1.2.3" infobox "$STAMPED"
 
-# A clone reads back as a clone, naming its source.
+# A clone reads back as a clone, naming its source. Modelled on what the
+# --from branch actually leaves behind: origin re-stamped, mode.asked cleared.
 CLONECFG="$MWORK/clone.cfg"
-{ grep -v '^user.box.origin ' "$STAMPED"
+{ grep -v -e '^user.box.origin ' -e '^user.box.mode.asked ' "$STAMPED"
   echo 'user.box.origin clone'
   echo 'user.box.origin.from work/authed'; } > "$CLONECFG"
 check "info: a clone says so, and names the box it came from (#103)" \
   0 "ORIGIN     clone of work/authed" infobox "$CLONECFG"
+# ...and stays silent about a demand nobody made of it. The MODE line is gated
+# on 'asked' precisely so absence renders as silence rather than as a guess;
+# TYPE above still reports VM off the instance type, so nothing is lost.
+info_has_mode() { infobox "$1" | grep -q '^MODE'; }
+check "info: a clone prints no MODE line — nobody asked IT anything (#103)" 1 "" \
+  info_has_mode "$CLONECFG"
+check "info: ...while TYPE still reports what it actually is (#103)" \
+  0 "TYPE       VM" infobox "$CLONECFG"
+# The mint keeps its MODE line — there, the operator really was asked.
+check "info: a MINT still surfaces what was asked for (#103)" \
+  0 "MODE       vm (asked: auto)" infobox "$STAMPED"
 
 # --- legacy boxes: the promise that they keep working under every verb ------
 # A box carrying the boundary tag and NOTHING else — every box minted before

@@ -43,6 +43,17 @@ which records not just what changed but what each drill run proved.
   records **one hop** — a clone of a clone names its parent and forgets its
   grandparent, because the alternative is an unbounded chain in a config
   value and the parent is the box an operator can go look at.
+  One key sits in **neither** column and is therefore *cleared*:
+  `user.box.mode.asked`. It records whether a container was asked for or
+  fallen back into, which makes it a mint-*event* fact — and the asker was
+  the **source's** operator. A clone refuses `--vm`/`--container` outright,
+  so nobody was asked anything about this instance, and there is no true
+  value to re-stamp it with; inheriting it made `box info` print
+  `MODE vm (asked: auto)` on a clone, describing a demand never made of it.
+  The clear lands with the re-stamp, before the start, and the read side
+  needs no special case: the `MODE` line is gated on `asked`, so absence
+  renders as silence while `TYPE` still reports VM or CT off the preserved
+  instance type.
 - **`box info` grew a provenance block** (#103) — it printed
   `NAME / STATE / TYPE / IPV4`, exposures and snapshots, and surfaced *none*
   of the `user.box.*` keys, including the two that already existed. A stamp

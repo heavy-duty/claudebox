@@ -1079,6 +1079,17 @@ cmd_new() {
     # that rig role — reading them off the source is the whole point of a clone.
     # ('incus copy' preserves the instance type too, so mode stays true as well.)
     #
+    # 'mode.asked' is the one key that sits in NEITHER column, and so it is
+    # CLEARED rather than re-stamped or inherited. It is a mint-event fact —
+    # only the mint knew whether a container was asked for or fallen back into
+    # for want of /dev/kvm — and the asker was the SOURCE's operator. A clone
+    # refuses --vm/--container outright (nobody was asked anything here), so an
+    # inherited 'asked' makes 'box info' print a demand that was never made of
+    # this instance. There is no true value to re-stamp it with: the honest
+    # answer is absence, and absence is already how the whole block renders
+    # what it does not know — the MODE line simply does not print, while TYPE
+    # above still says VM or CT off the preserved instance type.
+    #
     # origin.from records ONE hop. A clone of a clone names its parent and
     # forgets its grandparent: the alternative is an unbounded chain in a config
     # value, and the parent is the box an operator can actually go look at.
@@ -1088,6 +1099,11 @@ cmd_new() {
       user.box.created="$(mint_time)" \
       user.box.origin=clone \
       user.box.origin.from="$srcref"
+    # Cleared, not set-to-empty: an empty value is still a key, and a reader
+    # that greps the config would find it. Tolerated failure because the source
+    # may predate the stamp and never have carried the key at all — a clone
+    # must not die over a key that was already absent.
+    incus config unset "$instance" user.box.mode.asked >/dev/null 2>&1 || true
     incus start "$instance"
     wait_agent "$instance"
     reset_identity "$instance"
