@@ -1695,9 +1695,17 @@ chmod +x "$ISHIM/incus"
 
 # A fabricated "newer release": the same CLI, a different VERSION — what an
 # upgrade actually is, from the installer's point of view.
-SRC9="$WORK/src-9.9.9"; mkdir -p "$SRC9/bin"
+SRC9="$WORK/src-9.9.9"; mkdir -p "$SRC9/bin" "$SRC9/host"
 cp "$ROOT/bin/box" "$SRC9/bin/box"; chmod +x "$SRC9/bin/box"
 echo "9.9.9-drill" > "$SRC9/VERSION"
+# A stub host/setup-host.sh that only announces itself: enough to prove WHETHER
+# the installer ran host setup, and from WHICH version's tree, with no Incus and
+# no root. The real script builds the isolation stack; this one echoes (#115).
+cat > "$SRC9/host/setup-host.sh" <<'STUB'
+#!/usr/bin/env bash
+echo "SETUP-HOST-RAN-FROM 9.9.9-drill"
+STUB
+chmod +x "$SRC9/host/setup-host.sh"
 SRC8="$WORK/src-8.8.8"; mkdir -p "$SRC8/bin"
 cp "$ROOT/bin/box" "$SRC8/bin/box"; chmod +x "$SRC8/bin/box"
 echo "8.8.8-drill" > "$SRC8/VERSION"
@@ -1706,6 +1714,15 @@ inst() {  # inst <box_home> <box_bin> [VAR=val ...] — run install.sh for real
   local h="$1" b="$2"; shift 2
   env HOME="$FAKEHOME" PATH="$ISHIM:$PATH" FAKE_BOXES= \
       BOX_HOME="$h" BOX_BIN="$b" BOX_YES=1 BOX_SKIP_SETUP_HOST=1 \
+      BOX_INSTALL_SOURCE="$ROOT" "$@" bash "$ROOT/install.sh"
+}
+inst_setup() {  # like inst, but WITHOUT BOX_SKIP_SETUP_HOST — host setup is the
+  # thing under test, so the switch that suppresses it has to come off. Safe
+  # offline: the only setup-host on these fabricated sources is the echo stub
+  # above, and BOX_YES=1 answers its prompt.
+  local h="$1" b="$2"; shift 2
+  env HOME="$FAKEHOME" PATH="$ISHIM:$PATH" FAKE_BOXES= \
+      BOX_HOME="$h" BOX_BIN="$b" BOX_YES=1 \
       BOX_INSTALL_SOURCE="$ROOT" "$@" bash "$ROOT/install.sh"
 }
 ibox() {  # ibox [VAR=val ...] <cmd...> — run an installed box under the shim
@@ -1783,6 +1800,32 @@ check "migrate: current points at the migrated version" 0 "versions/$VER" readli
 check "migrate: the PATH symlink was re-pointed through current" 0 "$H3/current/bin/box" readlink "$B3/box"
 check "migrate: the migrated install answers --version" 0 "box $VER" ibox "$B3/box" --version
 
+# #117: the migration is not silent about the entry it manufactured. The old
+# tree is now a first-class 'box versions' row the operator never installed —
+# so the output has to name the way back out (uninstall) and the reason to
+# keep it (rollback), at the migration AND again in the closing summary, which
+# is the half an operator scrolling ~250 lines of install output actually sees.
+H3B="$WORK/h3b"; B3B="$WORK/b3b"; mkdir -p "$H3B/bin" "$B3B"
+cp "$ROOT/bin/box" "$H3B/bin/box"; chmod +x "$H3B/bin/box"
+cp "$ROOT/VERSION" "$H3B/VERSION"
+ln -s "$H3B/bin/box" "$B3B/box"
+mig_out="$WORK/mig-out.txt"
+inst "$H3B" "$B3B" BOX_INSTALL_SOURCE="$SRC9" >"$mig_out" 2>&1 || true
+check "migrate: the output points at the reap command (#117)" 0 "box uninstall $VER" \
+  cat "$mig_out"
+check "migrate: ...and names keeping it as a rollback target (#117)" 0 "keep it to roll back" \
+  cat "$mig_out"
+check "migrate: ...and the closing summary re-states it (#117)" 0 "was migrated to versions/$VER" \
+  cat "$mig_out"
+# ...and the note is conditional: an install with nothing to migrate must not
+# mention a migration at all. grep exits 1 when the string is absent, which is
+# the pass here.
+nomig_out="$WORK/nomig-out.txt"
+H3C="$WORK/h3c"; B3C="$WORK/b3c"
+inst "$H3C" "$B3C" >"$nomig_out" 2>&1 || true
+check "migrate: a NON-migrating install stays silent about migration (#117)" 1 "" \
+  grep -qF "was migrated to versions/" "$nomig_out"
+
 # ...and the seamless 0.6.0 → 0.7.0 upgrade: flat tree in, new version beside it.
 H4="$WORK/h4"; B4="$WORK/b4"; mkdir -p "$H4/bin" "$B4"
 cp "$ROOT/bin/box" "$H4/bin/box"; chmod +x "$H4/bin/box"
@@ -1794,6 +1837,44 @@ check "migrate+upgrade: both versions present" 0 "" \
   bash -c "[ -d '$H4/versions/$VER' ] && [ -d '$H4/versions/9.9.9-drill' ]"
 check "migrate+upgrade: no boxes → the new version is the default" 0 "box 9.9.9-drill" \
   ibox "$B4/box" --version
+
+# #115, end to end and fully offline: a flat pre-0.7.0 tree must still count as
+# "no install yet" and RUN host setup. The migration converts the flat tree into
+# versions/<v>, which is precisely what used to make had_install read 1 — the
+# host then skipped setup-host while 'box --version' reported the new release,
+# leaving every host-side artifact (box-firewall, #102) at the old one. The stub
+# setup-host echoes a marker, so the marker IS the proof it ran.
+H4B="$WORK/h4b"; B4B="$WORK/b4b"; mkdir -p "$H4B/bin" "$B4B"
+cp "$ROOT/bin/box" "$H4B/bin/box"; chmod +x "$H4B/bin/box"
+cp "$ROOT/VERSION" "$H4B/VERSION"
+ln -s "$H4B/bin/box" "$B4B/box"
+check "flat upgrade: host setup RUNS over a migrated flat tree (#115)" 0 "SETUP-HOST-RAN-FROM 9.9.9-drill" \
+  inst_setup "$H4B" "$B4B" BOX_INSTALL_SOURCE="$SRC9"
+
+# The converse, so the gate is proven to still GATE: H4B is now a genuinely
+# versioned tree, which HAS already made the host-setup decision — a re-run must
+# not redo it. Without this, "fix" and "run setup-host unconditionally" would be
+# indistinguishable.
+vers_out="$WORK/versioned-upgrade-out.txt"
+inst_setup "$H4B" "$B4B" BOX_INSTALL_SOURCE="$SRC8" >"$vers_out" 2>&1 || true
+check "versioned upgrade: an existing versioned install still SKIPS host setup" 0 "already had a box install" \
+  cat "$vers_out"
+check "versioned upgrade: ...and the stub did NOT run" 1 "" \
+  grep -qF "SETUP-HOST-RAN-FROM" "$vers_out"
+
+# 'current' does not always flip: the #66 guard holds the default under existing
+# boxes. Host setup must still come from the version just installed, or the
+# upgrade converges the host with the OLD release's host scripts — reinstating
+# the very staleness #115 is about. The flat fixture carries no host/ dir at all,
+# so going through 'current' could not even find a script to run.
+H10="$WORK/h10"; B10="$WORK/b10"; mkdir -p "$H10/bin" "$B10"
+cp "$ROOT/bin/box" "$H10/bin/box"; chmod +x "$H10/bin/box"
+cp "$ROOT/VERSION" "$H10/VERSION"
+ln -s "$H10/bin/box" "$B10/box"
+check "flat upgrade under boxes: setup-host runs the NEW version's script" 0 "SETUP-HOST-RAN-FROM 9.9.9-drill" \
+  inst_setup "$H10" "$B10" BOX_INSTALL_SOURCE="$SRC9" FAKE_BOXES=work
+check "flat upgrade under boxes: ...while the default correctly stayed put (#66)" 0 "box $VER" \
+  ibox "$B10/box" --version
 
 # A broken current must halt the single-version path BEFORE any decision: the
 # CURRENT guard keys off what current resolves to, and a dangling link makes
