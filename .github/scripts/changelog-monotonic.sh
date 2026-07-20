@@ -209,4 +209,17 @@ EOF
 fi
 
 count="$(printf '%s\n' "$base_headings" | grep -c . || true)"
-echo "changelog-monotonic: all $count release heading(s) at the merge base ($(git rev-parse --short "$merge_base")) are still present in $changelog"
+head_count="$(printf '%s\n' "$head_headings" | grep -c . || true)"
+
+# The success line has two honest forms, because this step now runs on two
+# shapes of event. On a push to main the merge base IS HEAD: containment
+# compared the file against itself and asserted nothing, and deletion is
+# undetectable on that event by construction. Reporting "all N still present"
+# there would be the same dishonesty the skip messages were fixed for — a log
+# claiming a check that did no work. Uniqueness is the half that actually ran,
+# so that is the half the line names.
+if [ "$merge_base" = "$(git rev-parse HEAD)" ]; then
+  echo "changelog-monotonic: containment vacuous (the merge base IS HEAD, so nothing could have been deleted between them) — uniqueness on HEAD checked $head_count release heading(s)."
+else
+  echo "changelog-monotonic: all $count release heading(s) at the merge base ($(git rev-parse --short "$merge_base")) are still present in $changelog"
+fi

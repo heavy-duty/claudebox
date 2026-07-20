@@ -120,8 +120,15 @@ which records not just what changed but what each drill run proved.
   Fixed by moving, not rewriting: uniqueness now runs directly after the file
   exists, before any git access. The skip messages say *containment* skipped and
   that uniqueness already passed, so a skip no longer claims nothing was
-  checked. The guard is also no longer gated to `pull_request` — deletion is
-  vacuous on a push to main, but duplication is vacuous on no tree, so a
+  checked — and the success line got the same treatment, because dropping the
+  gate made `merge_base == HEAD` a routine path rather than a degradation. On a
+  push to main containment compares the file against itself and asserts nothing,
+  so the line now reports containment *vacuous* and names uniqueness as the half
+  that ran, instead of claiming N headings were verified present by a comparison
+  that could not have detected their absence.
+
+  The guard is also no longer gated to `pull_request` — deletion is vacuous on
+  a push to main, but duplication is vacuous on no tree, so a
   duplicate reaching main by any other route went unasserted. That gate could
   not simply be dropped: `github.base_ref` is empty on a push, and a bare
   `origin/` under `STRICT=1` is a hard failure on every push to main, so the

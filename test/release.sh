@@ -457,12 +457,31 @@ G="$(grepo mono-143-nobase '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
 head_changelog "$G" '## 0.8.0 — 2026-07-19' '' '- **a**' '' '## 0.8.0 — 2026-07-19' '' '- **b**'
 check "monotonic: a duplicate is caught even when the base ref will not resolve (#143)" 1 "DUPLICATE release heading" mono "$G" no-such-ref
 
+# --- the push-to-main shape: containment vacuous, uniqueness real ----------
+# With the pull_request gate gone (#143), merge_base == HEAD is a ROUTINE path,
+# not a degradation. Containment compares the file against itself and asserts
+# nothing, so a line reading "all N still present" would claim a check that did
+# no work — the same dishonesty the skip messages were fixed for. The success
+# line therefore has two forms, and this pins which one each event gets.
+G="$(grepo mono-vacuous '## 0.8.0 — 2026-07-19' '' '- **Shipped**')"
+check "monotonic: HEAD as its own base reports containment VACUOUS, not verified" 0 "containment vacuous" mono "$G" HEAD
+check "monotonic: ...and names uniqueness as the half that actually ran" 0 "uniqueness on HEAD checked" mono "$G" HEAD
+check "monotonic: ...and does NOT claim headings were still present" 1 "" \
+  bash -c 'cd "$1" && bash "$2" HEAD | grep -q "are still present"' _ "$G" "$MONO"
+# The PR shape keeps the containment wording — the two must not collapse.
+head_changelog "$G" '## 0.8.0 — 2026-07-19' '' '- **Shipped**' '' '## 0.9.0 — 2026-07-20' '' '- **New**'
+check "monotonic: a real base still reports containment, naming the count" 0 "still present" mono "$G" main
+
 # --- and the real tree, through the real script ----------------------------
 # HEAD as its own base: the merge base is HEAD, so the sets are identical by
 # construction. Proves the script runs against the actual CHANGELOG.md and
 # parses its real headings, without depending on an `origin/main` that a
 # fresh clone or a detached CI checkout may not have.
-check "monotonic: THIS tree passes against itself (the parser meets reality)" 0 "still present" \
+# HEAD as its own base is now the VACUOUS-containment path (#143), so the
+# assertion moved to uniqueness's count — which is the stronger proof of the
+# original intent anyway: it says the parser read the REAL CHANGELOG.md and
+# found real headings in it, rather than that a self-comparison came out equal.
+check "monotonic: THIS tree passes against itself (the parser meets reality)" 0 "uniqueness on HEAD checked" \
   mono "$ROOT" HEAD
 
 # The guard is only a guard if CI runs it — and only if CI runs it with the
@@ -478,8 +497,17 @@ check "ci.yml: ...and STRICT, so a skip is a red run and not a green one" 0 "" \
 # tree — and dropping that gate is only safe with the base-ref fallback, since
 # `github.base_ref` is empty on a push and a bare `origin/` under STRICT is a
 # hard failure on every push to main.
-check "ci.yml: the monotonic step is not gated to pull_request (#143)" 1 "" \
-  grep -qF "if: github.event_name == 'pull_request'" "$ROOT/.github/workflows/ci.yml"
+# Scoped to the step's OWN block, deliberately. A file-wide negative would
+# forbid any FUTURE step in ci.yml from being pull_request-gated and would fail
+# citing #143 when one legitimately is — #143 constrains this step, not the file.
+mono_step_block() {
+  awk '/^      - name: no shipped changelog heading/ {f=1; print; next}
+       f && /^      - name: / {exit}
+       f {print}' "$ROOT/.github/workflows/ci.yml"
+}
+mono_step_gated() { mono_step_block | grep -q 'if:'; }
+check "ci.yml: the monotonic step itself is not pull_request-gated (#143)" 1 "" mono_step_gated
+check "ci.yml: ...and the block was actually found (guards the awk above)" 0 "changelog-monotonic" mono_step_block
 check "ci.yml: ...and falls back to ref_name, so a push has a base to resolve" 0 "" \
   grep -qF 'github.base_ref || github.ref_name' "$ROOT/.github/workflows/ci.yml"
 check "CONTRIBUTING: names the append-only rule for release headings" 0 "" \
