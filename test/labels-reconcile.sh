@@ -258,6 +258,13 @@ ctx_() { jq -n --arg n "$1" --arg s "$2" --arg t "${3:-2026-07-20T15:00:00Z}" \
   '{__typename:"StatusContext", context:$n, state:$s, createdAt:$t}'; }
 
 expect "no checks at all is NONE" NONE "$(rollup '[]' | checks_state)"
+# A failed fetch leaves no rollup KEY; a PR with no checks leaves an empty
+# ARRAY. Collapsing the two let an API hiccup read as "nothing is failing" —
+# the same unknown-certified-as-green shape as #136, in the one place that
+# fix did not look. The caller skips an UNREADABLE PR rather than relabelling.
+expect "a failed read is UNREADABLE, not NONE" UNREADABLE "$(echo '{}' | checks_state)"
+expect "...and a real empty rollup is still NONE" NONE \
+  "$(echo '{"mergeable":"MERGEABLE","statusCheckRollup":[]}' | checks_state)"
 expect "all green is SUCCESS" SUCCESS \
   "$(rollup "[$(run_ a SUCCESS),$(run_ b SUCCESS)]" | checks_state)"
 expect "a queued run is PENDING" PENDING \
