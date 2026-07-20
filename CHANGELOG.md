@@ -59,6 +59,29 @@ which records not just what changed but what each drill run proved.
   operator copy-pastes is as wrong as a role box executes, and it fails
   later and further from the cause.
 
+### Fixed
+
+- **CI's shellcheck sweep never lints `.github/scripts/*.sh`** (#116) —
+  `globstar` makes `**` descend into subdirectories, but a glob still does
+  not *match* a dot-prefixed name, so `**/` never entered `.github/`. The
+  three scripts that escaped are the release path: `changelog-armed.sh` (the
+  #108/#110 guard that gates every PR, and had never been linted),
+  `release-notes.sh` (which produces the published release body), and
+  `labels-reconcile.sh` (the label state machine) — while the step's own
+  comment promised that "a script in a new subdirectory is linted without
+  anyone remembering to edit this list". Latent, not broken: all three pass
+  shellcheck as-is, so this lands as a no-op on current code and the fix is
+  that a regression in them would now be caught. `dotglob` alongside
+  `globstar` closes it, measured rather than assumed — it adds exactly those
+  three and nothing else, a checkout's `.git` carrying no `*.sh` (its hooks
+  ship as `*.sample`). Paired with a CLASS check in the same shape as the
+  `eof_guard_sweep` of #112: the sweep now compares the globbed set against
+  `git ls-files '*.sh'` and fails naming any tracked script it does not
+  cover, so the gap cannot reopen silently the next time a dot-directory or
+  a shopt subtlety hides one. `eof_guard_sweep` itself carried the identical
+  blind spot — it rebuilds the same glob — and is widened the same way.
+
+
 ## 0.8.0 — 2026-07-19
 
 ### Added
