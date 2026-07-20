@@ -501,12 +501,19 @@ check "ci.yml: ...and STRICT, so a skip is a red run and not a green one" 0 "" \
 # Scoped to the step's OWN block, deliberately. A file-wide negative would
 # forbid any FUTURE step in ci.yml from being pull_request-gated and would fail
 # citing #143 when one legitimately is — #143 constrains this step, not the file.
+# Terminates on a new STEP or a new JOB. The job boundary is not optional: the
+# monotonic step is the LAST step of `check`, so stopping only at the next
+# `- name:` runs the block into the `rehearsal` job below and swallows its
+# job-level `if:`. That reintroduces the very bug the scoping fixed — an
+# unrelated edit failing while citing #143 — just moved from "any step in the
+# file" to "this step plus the head of the next job".
 mono_step_block() {
   awk '/^      - name: no shipped changelog heading/ {f=1; print; next}
-       f && /^      - name: / {exit}
+       f && (/^      - / || /^  [^ ]/) {exit}
        f {print}' "$ROOT/.github/workflows/ci.yml"
 }
-mono_step_gated() { mono_step_block | grep -q 'if:'; }
+# Anchored: an `if:` appearing inside a `run:` line is not a step condition.
+mono_step_gated() { mono_step_block | grep -q '^        if:'; }
 check "ci.yml: the monotonic step itself is not pull_request-gated (#143)" 1 "" mono_step_gated
 check "ci.yml: ...and the block was actually found (guards the awk above)" 0 "changelog-monotonic" mono_step_block
 check "ci.yml: ...and falls back to ref_name, so a push has a base to resolve" 0 "" \
