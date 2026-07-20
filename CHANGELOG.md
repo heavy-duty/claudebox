@@ -74,6 +74,37 @@ which records not just what changed but what each drill run proved.
   cpu/memory/disk/tier out of the namespace and the lineage keys out of the
   clone's re-stamp.
 
+- **Every fresh mint marks a `pristine` snapshot, before rig converges
+  anything** (#104, child of heavy-duty/rig#62) — `cmd_new` runs launch →
+  `wait_agent` → `cloud-init status --wait` → the rig bootstrap hook, and in
+  the gap between the last two the guest **is** pristine Debian plus box's
+  thin seed. That is exactly the state rig#62's "back to pristine Debian"
+  names; it existed for a few seconds on every mint box has ever taken, and
+  nothing captured it. Now `box restore <box> pristine` is the whole answer
+  for every creds-free tenant role, because everything `rig bootstrap
+  claude|codex|grok|staging` does — docker, node, the agent CLI, the
+  agent-context file, the role marker — is box-local and file-shaped, so a
+  filesystem rollback reaches all of it without paying a ~10-minute re-mint.
+  Default on and unconditional within a fresh mint (a blank box has no rig
+  hook but has the same moment, and the label must mean one thing on every
+  box), never fatal (a mint that worked is not failed by a checkpoint that
+  didn't), and **never taken on a `--from` clone**: a clone skips cloud-init
+  and rig entirely, so it has no pristine moment, and a mark taken there
+  would be the source's worked-in state wearing a label that promises
+  pristine Debian. A clone inherits its source's snapshots (copying a box) or
+  starts with none (copying a snapshot), and `box new` says which. On a host
+  whose pool uses the `dir` driver — the documented fallback in
+  `host/setup-host.sh`, where there is no copy-on-write and the mark would be
+  a full multi-GB copy of the root on every mint — the mint skips it loudly
+  and names the by-hand command, rather than silently doubling every mint's
+  disk cost; the driver is read back from the `box-net` profile's own root
+  pool, so it is the pool that actually placed the instance. Snapshots do not
+  outlive their box (`box rm` takes every one with it), so the help text,
+  README and design doc say plainly that this is an **undo, not a backup** —
+  `box export` remains the durable path — and that it cannot reach off-box
+  state such as a tailnet join or a runner registration. `BOX_SNAPSHOT_PRISTINE=0`
+  opts out, in the `BOX_LAUNCH_TIMEOUT` shape rather than a new flag.
+
 ### Changed
 
 - **`state:needs-human` no longer waits on the cron to become true** (#141)

@@ -332,6 +332,48 @@ refuses rather than assuming yes).
 Forgotten what you called a checkpoint? `box info work` prints the box's
 snapshot labels and the `--from` line to clone one.
 
+### `pristine` — the one checkpoint box takes for you
+
+Every fresh mint marks a snapshot called `pristine`
+([#104](https://github.com/heavy-duty/box/issues/104)) at the one moment it
+is true: **after cloud-init, before `rig bootstrap` converges the tenant
+role.** At that instant the guest is pristine Debian plus box's thin seed
+(the user, tmux, rig) and nothing else — the state
+[heavy-duty/rig#62](https://github.com/heavy-duty/rig/issues/62) calls "back
+to pristine Debian". It exists for a few seconds on every mint, so box
+captures it rather than asking you to be quick.
+
+```sh
+box restore work pristine   # undo the tenant role and everything since
+```
+
+That is a complete undo for every tenant role: everything `rig bootstrap
+claude|codex|grok|staging` does — docker, node, the agent CLI, the
+agent-context file, the role marker — is box-local and file-shaped, so a
+filesystem rollback reaches all of it, without paying a ~10-minute re-mint.
+
+Three things it deliberately does not do:
+
+- **It is an undo, not a backup.** Snapshots die with their box: `box rm`
+  deletes a box _and_ every snapshot it has. `box export` is the only state
+  that outlives the box — see below.
+- **It cannot reach off-box state.** A tailnet join, a GitHub runner
+  registration, a pushed commit: those are records held somewhere else, and
+  no filesystem rollback undoes them (rig#62 covers those separately).
+- **A `--from` clone gets no `pristine` of its own.** A clone skips
+  cloud-init and rig entirely, so it has no pristine moment to capture, and
+  box will not label a source's worked-in state as one. Cloning a _box_
+  inherits the source's snapshots (a real `pristine` among them, if the
+  source had one); cloning a _snapshot_ starts with none. `box new` says
+  which of the two you got.
+
+On a host whose storage pool uses the `dir` driver, a snapshot is a full
+multi-GB copy rather than a near-free copy-on-write mark, so the mint
+**skips** `pristine` and says so loudly — take it by hand with `box snapshot
+<box> pristine` if you want it anyway. btrfs is what `box setup-host`
+installs by default precisely so snapshots are cheap. `BOX_SNAPSHOT_PRISTINE=0`
+skips the mark on any host.
+
 ## Survive the host: `box export` / `box import`
 
 Snapshots live _inside_ a box, and `box rm` deletes the box **and** its
@@ -397,6 +439,8 @@ box tmux <box> [session]     # attach/create a tmux session — survives disconn
 box snapshot <box> [label]   # checkpoint (label defaults to manual-<epoch>)
 box restore <box> <snap> [--force]
                              # roll back to a snapshot — destructive, asks first
+                             # 'pristine' is auto-marked at mint: back to
+                             # pristine Debian + box's seed, before rig ran
 box export <box> [<file>] [--instance-only]
                              # one portable file (snapshots incl.) — survives rm & host
 box import <file> [--name <box>]

@@ -455,6 +455,146 @@ check "templates: no template names a creds-holding role" 1 "" bash -c '
   grep -h "^BOX_BOOTSTRAP_ROLE=" "'"$ROOT"'"/templates/*/box.env | grep -qE "workload|host|custom"'
 
 # ---------------------------------------------------------------------------
+# The 'pristine' mark (#104, child of heavy-duty/rig#62). The whole feature is
+# a MOMENT: the guest after cloud-init and before rig converges anything. Get
+# the position wrong by one step and the mark is a lie — a 'pristine' taken
+# after 'rig bootstrap' is a converged box wearing the wrong label, and
+# nothing at runtime would ever say so. So the position is pinned by line
+# order, the way the other mint-path guards are (a daemon-free run cannot
+# mint), and the policy half is DRIVEN against a stubbed incus.
+# ---------------------------------------------------------------------------
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "pristine: the mark is taken in the fresh-mint branch" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "snapshot_pristine \"\$instance\""'
+# AFTER cloud-init: before it, the guest is mid-install and the mark is not
+# pristine Debian, it is a half-provisioned one.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "pristine: the mark orders AFTER the cloud-init wait" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  wait="$(printf "%s\n" "$fn" | grep -n "cloud-init status --wait" | head -1 | cut -d: -f1)"
+  snap="$(printf "%s\n" "$fn" | grep -n "snapshot_pristine " | head -1 | cut -d: -f1)"
+  [ -n "$wait" ] && [ -n "$snap" ] && [ "$wait" -lt "$snap" ]'
+# BEFORE the rig hook: this is the assertion the whole issue rests on.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "pristine: the mark orders BEFORE the rig bootstrap hook (the moment)" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  snap="$(printf "%s\n" "$fn" | grep -n "snapshot_pristine " | head -1 | cut -d: -f1)"
+  run="$(printf "%s\n" "$fn" | grep -n "rig bootstrap \$T_BOOTSTRAP_ROLE" | head -1 | cut -d: -f1)"
+  [ -n "$snap" ] && [ -n "$run" ] && [ "$snap" -lt "$run" ]'
+# NOT under the T_BOOTSTRAP_ROLE guard: a blank box has no rig hook but has
+# the same pristine moment, and "box restore <box> pristine" must mean one
+# thing on every box box mints.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "pristine: the mark is unconditional, not gated on a tenant role" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  snap="$(printf "%s\n" "$fn" | grep -n "snapshot_pristine " | head -1 | cut -d: -f1)"
+  guard="$(printf "%s\n" "$fn" | grep -n "if \[ -n \"\$T_BOOTSTRAP_ROLE\" \]" | head -1 | cut -d: -f1)"
+  [ -n "$snap" ] && [ -n "$guard" ] && [ "$snap" -lt "$guard" ]'
+
+# THE CLONE TRAP. --from skips cloud-init and the rig hook entirely, so the
+# pristine moment never happens on that path. A mark taken there would be
+# "whatever the source was" — converged, worked-in — wearing a label that
+# promises pristine Debian, which is strictly worse than no mark. Pin the
+# ABSENCE: extract the clone branch alone (up to its 'else') and assert
+# nothing in it takes the mark.
+CLONEBR="$(mktemp)"
+awk '/if \[ -n "\$from" \]; then/,/^  else$/' "$ROOT/bin/box" > "$CLONEBR"
+check "pristine: the clone branch extracted from bin/box (guards the awk)" 0 "incus copy" cat "$CLONEBR"
+check "pristine: a --from clone takes NO mark of its own (the correctness trap)" 1 "" \
+  grep -q "snapshot_pristine" "$CLONEBR"
+check "pristine: nothing on the clone path creates a snapshot at all" 1 "" \
+  grep -q "incus snapshot create" "$CLONEBR"
+# Inheritance is the other half of the decision, and it must be SAID: a clone
+# of a box carries the source's snapshots (a real pristine among them), a
+# clone of a snapshot carries none. Silence there sends the operator to
+# 'box info' to find out which world they are in.
+check "pristine: the clone narrates whether a pristine rode along" 0 "" \
+  grep -q "no 'pristine' mark here" "$CLONEBR"
+rm -f "$CLONEBR"
+
+# The policy half, DRIVEN not grepped: extract storage_driver +
+# snapshot_pristine and run them against a stubbed incus, so every branch is
+# actually executed on a host with no daemon.
+PRISFN="$(mktemp)"
+awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_pristine\(\) \{/,/^\}/' "$ROOT/bin/box" > "$PRISFN"
+check "pristine: the functions extracted from bin/box (guards the awk)" 0 "BOX_SNAPSHOT_PRISTINE" cat "$PRISFN"
+check "pristine: the extracted functions are valid bash" 0 "" bash -n "$PRISFN"
+
+# pris <driver> [env...] — drive snapshot_pristine against a fake pool of
+# <driver>. 'none' makes both probes answer nothing (the unreadable-pool
+# case). Every incus call the function can make is stubbed and echoed, so the
+# assertions read the real control flow, not a mock's opinion of it.
+pris() { # pris <driver> <instance> [VAR=VAL...]
+  local driver="$1" instance="$2"; shift 2
+  # shellcheck disable=SC2016  # the body is the stub's source, expanded by the
+  # inner bash from the environment 'env' sets up — never by this shell.
+  env "$@" DRIVER="$driver" INSTANCE="$instance" PRISFN="$PRISFN" bash -c '
+    incus() {
+      case "$*" in
+        "profile device get box-net root pool") printf "boxpool\n" ;;
+        "storage show boxpool")
+          [ "$DRIVER" = none ] && return 1
+          printf "name: boxpool\ndriver: %s\n" "$DRIVER" ;;
+        "storage list --format csv")
+          [ "$DRIVER" = none ] && return 1
+          printf "boxpool,%s,,0,CREATED\n" "$DRIVER" ;;
+        "snapshot create inst-x pristine") printf "STUB: snapshot created\n" ;;
+        "snapshot create fail-x pristine") printf "STUB: incus refused\n" >&2; return 1 ;;
+        *) printf "STUB: unexpected incus call: %s\n" "$*" >&2; return 1 ;;
+      esac
+    }
+    . "$PRISFN"
+    snapshot_pristine "$INSTANCE" boxname
+  ' 2>&1
+}
+# The absence assertions need a command 'check' can run, not a pipeline.
+pris_took_mark() { pris "$@" | grep -q "STUB: snapshot created"; }
+check "pristine: btrfs (the designed backend) takes the mark" 0 "STUB: snapshot created" \
+  pris btrfs inst-x
+check "pristine: btrfs names the restore command for the operator" 0 "box restore boxname pristine" \
+  pris btrfs inst-x
+# The 'dir' fallback (host/setup-host.sh:294) has no CoW: the mark would be a
+# full multi-GB copy of the root on EVERY mint. Skip — and LOUDLY, naming the
+# by-hand command, because a silent skip teaches an operator to expect a mark
+# that is not there.
+check "pristine: a 'dir' pool SKIPS the mark (no CoW — it would be a full copy)" 0 "NOT taking" \
+  pris dir inst-x
+check "pristine: the dir skip is loud and names the by-hand command" 0 "box snapshot boxname pristine" \
+  pris dir inst-x
+check "pristine: the dir skip never reaches incus snapshot create" 1 "" \
+  pris_took_mark dir inst-x
+# Neither probe answers (an unusual host, or a tier that cannot read the
+# pool). The two mistakes are not symmetric — a mark taken on 'dir' wastes
+# disk the operator can see and delete, a mark NOT taken is the moment gone
+# for good. So proceed, and say what was assumed.
+check "pristine: an unreadable pool takes the mark anyway (the asymmetry)" 0 "STUB: snapshot created" \
+  pris none inst-x
+check "pristine: ...and says what it assumed rather than pretending it knew" 0 "could not read the storage driver" \
+  pris none inst-x
+# The escape hatch is an environment knob (the BOX_LAUNCH_TIMEOUT shape), not
+# another flag on 'new'.
+check "pristine: BOX_SNAPSHOT_PRISTINE=0 skips it anywhere" 0 "BOX_SNAPSHOT_PRISTINE=0" \
+  pris btrfs inst-x BOX_SNAPSHOT_PRISTINE=0
+check "pristine: the opt-out never reaches incus snapshot create" 1 "" \
+  pris_took_mark btrfs inst-x BOX_SNAPSHOT_PRISTINE=0
+# A failed snapshot must NOT fail the mint. The mark is an undo, not the
+# mint's product: a mint that worked must not be failed by a checkpoint that
+# didn't.
+check "pristine: a failed snapshot warns and returns 0 (never fails a good mint)" 0 "WARNING" \
+  pris btrfs fail-x
+rm -f "$PRISFN"
+
+# The durability caveat, pinned in the help text: a snapshot dies with its
+# box, so nothing box says may let anyone read 'pristine' as a backup (#104's
+# closing note; 'box export' is the durable path).
+check "pristine: 'box help snapshot' refuses to sell snapshots as backups" 0 "not a backup" \
+  bash -c '"'"$ROOT"'/bin/box" help snapshot'
+check "pristine: 'box help restore' documents the mark and its off-box blind spot" 0 "off-box" \
+  bash -c '"'"$ROOT"'/bin/box" help restore'
+check "pristine: 'box help new' documents the mark and the opt-out" 0 "BOX_SNAPSHOT_PRISTINE" \
+  bash -c '"'"$ROOT"'/bin/box" help new'
+
+# ---------------------------------------------------------------------------
 # The restricted tier (#74). box_tier() is the decision the whole tier hangs
 # on, so it is DRIVEN, not grepped: extracted from bin/box, sourced, and run
 # against a shim id for every case — including the one that bites (a user in
