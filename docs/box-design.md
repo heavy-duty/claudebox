@@ -1,8 +1,8 @@
 # box design
 
 `box` is a CLI that mints and manages **trust-less, network-isolated VMs
-with a coding agent installed** (`claude`, `codex`, `grok`, or `blank` for
-none). It is infrastructure, not a project provisioner.
+with a coding agent installed** (`claude-box`, `codex-box`, `grok-box`, or
+`blank` for none). It is infrastructure, not a project provisioner.
 
 See issue #3 for the full reframe and rationale. This doc captures the durable
 design decisions.
@@ -60,15 +60,17 @@ instead of pretending to sanitize it.
 A template is a **thin, creds-free seed** — base image, the tenant user,
 tmux, and [rig](https://github.com/heavy-duty/rig) preinstalled — and what
 the box *becomes* lives in rig's bootstrap roles (rig#31): box auto-runs the
-template's creds-free tenant role after cloud-init (`rig bootstrap claude` /
-`codex` / `grok` / `staging`), which installs the agent CLI or server
-posture. The split is deliberate: cloud-init is a first-boot one-shot —
+template's creds-free tenant role after cloud-init (`rig bootstrap claude-box`
+/ `codex-box` / `grok-box` / `staging-box` — the roles carry a family suffix,
+`-box` for box tenants and `-server` for fleet machines, and the templates are
+named for the roles they converge, rig#76), which installs the agent CLI or
+server posture. The split is deliberate: cloud-init is a first-boot one-shot —
 not convergent, not re-runnable, only parse-and-grep testable — while a rig
 role is an idempotent script with effective-state asserts that can also
 converge an *existing* box to a newer spec. Anything that joins a tailnet or
-holds a key (staging's workload join) stays operator-run through
-`box shell`; box prints it as a next step and never sees the key. The seed's
-rig install is pinned by `RIG_REPO`/`RIG_REF` at mint (default
+holds a key (the staging-box tenant's workload join) stays operator-run
+through `box shell`; box prints it as a next step and never sees the key. The
+seed's rig install is pinned by `RIG_REPO`/`RIG_REF` at mint (default
 `heavy-duty/rig@main`, unpinned — the honest edge until rig#32's releases),
 and box's template suite holds the line with fail-closed absence greps: no
 agent CLI, no docker, no tailscale, no context-file heredocs in any

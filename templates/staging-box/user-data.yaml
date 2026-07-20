@@ -1,18 +1,19 @@
 #cloud-config
-# A thin, creds-free seed (#81): the tenant user, tmux (#65), and rig —
-# nothing that joins a tailnet or admits credentials, no agent CLI, no
-# docker, no context-file heredoc. Everything this box becomes comes from
-# 'rig bootstrap codex' (heavy-duty/rig#31), which box auto-runs after
-# mint; the agent-context file — including the #80 guard (never run
-# 'box setup-host' or the drill inside a box) — is rendered by that role,
-# once, instead of being copy-pasted per template.
+# A thin, creds-free, server-class seed (#81): the 'ops' user, tmux (#65),
+# and rig — nothing that joins a tailnet or admits credentials, no docker,
+# no sshd config, no keys. The server posture comes from
+# 'rig bootstrap staging-box' (heavy-duty/rig#31), which box auto-runs after
+# mint; the tailnet workload join holds a pre-auth key and stays
+# operator-run ('box shell' → 'sudo rig bootstrap workload-server'), exactly as
+# #69 designed it — box never sees the key.
 users:
-  - name: codex
+  - name: ops
     shell: /bin/bash
     sudo: "ALL=(ALL) NOPASSWD:ALL"
     lock_passwd: true
 package_update: true
-# tmux: 'box tmux' runs 'tmux new-session' INSIDE the box (#65).
+# tmux: 'box tmux' runs 'tmux new-session' INSIDE the box (#65) — and the
+# operator babysits the workload join through it.
 # curl + ca-certificates: the rig installer below rides them, and a bare
 # cloud image is not guaranteed to ship either.
 packages:
@@ -21,7 +22,7 @@ packages:
   - ca-certificates
 runcmd:
   # Preinstall rig so the box can converge — and re-converge — via
-  # 'rig bootstrap codex'. @RIG_REPO@/@RIG_REF@ are the pin point (#81):
+  # 'rig bootstrap staging-box'. @RIG_REPO@/@RIG_REF@ are the pin point (#81):
   # box substitutes them at mint from the RIG_REPO/RIG_REF environment
   # (default heavy-duty/rig @ main — unpinned, tracking main, the same
   # honest edge as rig's own unpinned box install, until rig#32 ships a

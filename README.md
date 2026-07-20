@@ -2,8 +2,8 @@
 
 **Headless, trust-less, throwaway dev VMs.** One command mints a fresh,
 network-isolated Incus box from a **template**; the coding-agent templates
-hand you a CLI agent on Debian 13 — `claude` (Claude Code), `codex` (OpenAI
-Codex), `grok` (xAI Grok) — **box mints, [rig](https://github.com/heavy-duty/rig)
+hand you a CLI agent on Debian 13 — `claude-box` (Claude Code), `codex-box`
+(OpenAI Codex), `grok-box` (xAI Grok) — **box mints, [rig](https://github.com/heavy-duty/rig)
 converges**: the template is a thin seed, and the agent tooling lands via a
 creds-free `rig bootstrap` role auto-run at mint
 ([#81](https://github.com/heavy-duty/box/issues/81)). The box is the product
@@ -217,13 +217,14 @@ VM boundary itself is proven on real hardware, like the rest of the drill).
 ## Quick start
 
 ```sh
-box new --name work --template claude   # a creds-free coding-agent box (~10 min cold)
-box shell work                   # enter as the template's user
+box new --name work --template claude-box   # a creds-free coding-agent box (~10 min cold)
+box shell work                              # enter as the template's user
 ```
 
-Pick whichever coding-agent template you like — `claude`, `codex`, `grok` — or
-`blank` for none. Inside the box, authenticate as needed. The `claude` template
-looks like this; the others follow the same shape with their own login step:
+Pick whichever coding-agent template you like — `claude-box`, `codex-box`,
+`grok-box` — or `blank` for none. Inside the box, authenticate as needed. The
+`claude-box` template looks like this; the others follow the same shape with
+their own login step:
 
 ```sh
 claude                           # then run /login — copy the URL (press c), open it
@@ -238,13 +239,13 @@ claude                           # if the repo has .box/, the agent reads it and
 No coding agent is special — each is one template among several, and adding
 another is just another directory. What ships today:
 
-| Template  | What it becomes                                                        |
-| --------- | ---------------------------------------------------------------------- |
-| `blank`   | Bare Debian 13 — same isolation, no tooling. The default.              |
-| `claude`  | Claude Code, creds-free — where this project started                   |
-| `codex`   | OpenAI Codex CLI, creds-free                                           |
-| `grok`    | xAI Grok CLI, creds-free                                               |
-| `staging` | Server-class: docker + sshd hardening via rig; VM-only, autostarts     |
+| Template      | What it becomes                                                    |
+| ------------- | ------------------------------------------------------------------ |
+| `blank`       | Bare Debian 13 — same isolation, no tooling. The default.          |
+| `claude-box`  | Claude Code, creds-free — where this project started               |
+| `codex-box`   | OpenAI Codex CLI, creds-free                                       |
+| `grok-box`    | xAI Grok CLI, creds-free                                           |
+| `staging-box` | Server-class: docker + sshd hardening via rig; VM-only, autostarts |
 
 **Templates are thin seeds; rig does the becoming**
 ([#81](https://github.com/heavy-duty/box/issues/81)). A template is a
@@ -255,8 +256,11 @@ pin tokens below). The seed is deliberately small — the tenant user, tmux,
 and [rig](https://github.com/heavy-duty/rig) preinstalled, nothing that
 joins a tailnet or admits credentials — and after cloud-init settles, box
 auto-runs the template's **creds-free** tenant role inside the guest
-(`rig bootstrap claude` / `codex` / `grok` / `staging`,
-[rig#31](https://github.com/heavy-duty/rig/issues/31)). The agent CLI,
+(`rig bootstrap claude-box` / `codex-box` / `grok-box` / `staging-box`,
+[rig#31](https://github.com/heavy-duty/rig/issues/31); the roles carry a
+family suffix — `-box` for box tenants, `-server` for fleet machines — and a
+template is named for the role it converges,
+[rig#76](https://github.com/heavy-duty/rig/issues/76)). The agent CLI,
 docker, the server posture and the agent-context file all come from that
 role — convergent and idempotent, so the same command re-run later converges
 an *existing* box to a newer spec (`box shell <box>` →
@@ -265,9 +269,9 @@ an *existing* box to a newer spec (`box shell <box>` →
 `box setup-host`, `box teardown-host` or the drill *inside* a box — once,
 from rig's roles, instead of copy-pasted per template.
 
-**Anything that joins or admits stays operator-run.** The `staging` box's
-tailnet workload join holds a pre-auth key, so box only prints it as the
-next step — `box shell <name>`, then `sudo rig bootstrap workload` — and
+**Anything that joins or admits stays operator-run.** The `staging-box`
+tenant's tailnet workload join holds a pre-auth key, so box only prints it as the
+next step — `box shell <name>`, then `sudo rig bootstrap workload-server` — and
 never sees the key ([#69](https://github.com/heavy-duty/box/issues/69)'s
 split, kept).
 
@@ -279,9 +283,9 @@ carries `@RIG_REPO@`/`@RIG_REF@` tokens that box resolves at mint from the
 environment:
 
 ```sh
-box new --name work --template claude                  # heavy-duty/rig @ main
+box new --name work --template claude-box              # heavy-duty/rig @ main
 RIG_REPO=you/rig RIG_REF=my-branch \
-  box new --name trial --template claude               # a rig branch under review
+  box new --name trial --template claude-box           # a rig branch under review
 ```
 
 Both directions of that edge track `main` unpinned today — said honestly,
