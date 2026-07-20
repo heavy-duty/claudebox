@@ -5,6 +5,64 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Added
+
+- **A minted box records how it was minted, and `box info` reads it back**
+  (#103) — `cmd_new` knew a great deal at the moment it launched and wrote
+  three `user.*` keys, dropping the rest on the floor: the box version that
+  minted it, the base image (an *unpinned alias on a moving remote* — two
+  boxes minted a month apart from "the same template" are not the same box,
+  and nothing on either said so), the rig role, which rig repo and ref
+  converged it, the mint time, and whether a container was chosen or fallen
+  back into for want of `/dev/kvm`. There is no host-side per-box store —
+  the Incus instance config *is* the database — so every one of those facts
+  was simply gone the moment the mint returned. The same single write point
+  now carries them as `user.box.*`, plus `user.box.schema=1` naming the
+  stamp's *shape* (an integer, not the box version: it moves only when a key
+  is removed or repurposed, never when one is added). The alias's resolved
+  fingerprint is pinned in a second call after the launch, read from
+  `volatile.base_image` — best-effort by construction, because a box that
+  exists and boots must never be failed over a provenance field. Deliberately
+  not stamped: cpu/memory (`limits.*` hold them, and a duplicate drifts the
+  first time someone edits a limit by hand), disk (a VM's *is* the root
+  device size and a container's does not exist — its root rides the pool),
+  and the tier, which `box_tier()` derives from whoever is *asking*.
+- **A clone re-stamps its own provenance instead of inheriting a lie**
+  (#103) — `incus copy` carries every `user.*` key forward (drill audit item
+  B2), which is what makes a clone know its template and user for free and is
+  exactly why the mint stamp could not ride along untouched: an inherited
+  stamp does not go stale, it goes **false**, claiming a mint time the clone
+  was not present for and a box version that never saw it. `box new --from`
+  now re-stamps the four keys that describe *this* instance's coming into
+  being — schema, version, created, `origin=clone` with `origin.from=<src>` —
+  on the copied instance *before* it is started, so a clone is never
+  observable wearing its source's provenance. The lineage keys (template,
+  user, image, role, rig pin) are left alone on purpose: the clone's disk
+  genuinely did come from them, and re-deriving them from the cloning
+  process's own template lookup would be the actual lie. `origin.from`
+  records **one hop** — a clone of a clone names its parent and forgets its
+  grandparent, because the alternative is an unbounded chain in a config
+  value and the parent is the box an operator can go look at.
+- **`box info` grew a provenance block** (#103) — it printed
+  `NAME / STATE / TYPE / IPV4`, exposures and snapshots, and surfaced *none*
+  of the `user.box.*` keys, including the two that already existed. A stamp
+  nothing can read is not a stamp. Every key is read with absence tolerated:
+  `incus config get` on an unset key prints empty and exits 0 (audit item
+  B4), so "no stamp" and "the daemon said no" arrive identically, and both
+  must render as a box with blanks. **Boxes minted before this stamp existed
+  keep working under every verb** — the README's standing promise, and the
+  same one `user.claudebox` carries — showing `MINTED (not recorded — this
+  box predates the mint stamp)` rather than an invented time or an error; a
+  pre-rename box still reads as the claude template. A schema this box does
+  not recognise is treated as *newer than me*: it shows what it understands
+  and says so, because a box outlives the release that minted it and refusing
+  to describe one a later release minted perfectly well is the wrong answer.
+  `box info --json` needed no code — the keys ride `incus list --format json`
+  in `config`. `test/cli.sh` drives both halves against a fake incus that
+  logs the arguments box builds, including the absence assertions that keep
+  cpu/memory/disk/tier out of the namespace and the lineage keys out of the
+  clone's re-stamp.
+
 ### Changed
 
 - **`state:needs-human` no longer waits on the cron to become true** (#141)

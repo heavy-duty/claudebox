@@ -205,8 +205,15 @@ rm -rf "$EVILROOT"
 # grep -q failure mode).
 # ---------------------------------------------------------------------------
 RUFN="$(mktemp)"
-awk '/^render_userdata\(\) \{/,/^\}/' "$ROOT/bin/box" > "$RUFN"
+# The pin's DEFAULTS live in rig_repo/rig_ref, one definition shared with the
+# mint stamp (#103) — extract them alongside the function that reads them, or
+# the extracted copy silently renders an empty repo and every assertion below
+# goes green against nothing.
+{ grep -cE '^rig_(repo|ref)\(\)' "$ROOT/bin/box" | grep -qx 2 || echo 'die "the rig pin helpers moved — this extraction is stale"'
+  grep -E '^rig_(repo|ref)\(\)' "$ROOT/bin/box"
+  awk '/^render_userdata\(\) \{/,/^\}/' "$ROOT/bin/box"; } > "$RUFN"
 check "render_userdata: extracted from bin/box (guards the awk)" 0 "RIG_REPO" cat "$RUFN"
+check "render_userdata: the pin's defaults came with it (guards the grep)" 0 "heavy-duty/rig" cat "$RUFN"
 check "render_userdata: the extracted function is valid bash"    0 "" bash -n "$RUFN"
 
 SEED="$(mktemp)"
@@ -1067,6 +1074,290 @@ check "import: reset_identity follows the start" 0 "" bash -c '
 # backup API is what 'incus export' rides; blocked by default — #70).
 check "grant: allows backups (the export workflow)" 0 "" \
   grep -qF 'restricted.backups allow' "$ROOT/host/grant-user.sh"
+
+# ---------------------------------------------------------------------------
+# The mint stamp (#103) — DRIVEN on both halves, write and read.
+#
+# There is no host-side per-box store: the Incus instance config IS the
+# database, so the only proof that a fact survives the mint is the argument
+# list box hands 'incus launch'. A fake incus logs every call verbatim and
+# answers just enough for cmd_new and cmd_info to run to completion with no
+# daemon anywhere — the same trick the confirm-gate drive uses above.
+#
+# The read half matters as much as the write half, and legacy boxes most of
+# all: every box minted before this stamp existed carries none of these keys,
+# and a box outlives the release that minted it. 'incus config get' on an
+# unset key prints EMPTY and exits 0 (audit B4), so "no stamp" and "daemon
+# said no" arrive identically — 'box info' must render both as a box with
+# blanks, never as an error.
+# ---------------------------------------------------------------------------
+MSHIM="$(mktemp -d)"; MWORK="$(mktemp -d)"
+cat > "$MSHIM/incus" <<'SHIM'
+#!/usr/bin/env bash
+# Fake incus for the mint-stamp drive. Knobs, all optional:
+#   FAKE_BASE_IMAGE  what 'config get <i> volatile.base_image' resolves to;
+#                    empty = incus does not know it (the degraded mint)
+#   FAKE_CFG         a file of "<key> <value>" lines answering 'config get'
+#   FAKE_ROW         the csv row 'list --columns nstS' returns
+# The launch carries a whole cloud-init seed, so the call is logged with its
+# newlines flattened — an assertion about "the launch line" must see one line.
+printf 'incus %s\n' "$*" | tr '\n' ' ' >> "$FAKE_INCUS_LOG"
+printf '\n' >> "$FAKE_INCUS_LOG"
+case "$*" in
+  *volatile.base_image) printf '%s\n' "${FAKE_BASE_IMAGE-}" ;;
+  "config get "*)
+    [ -n "${FAKE_CFG:-}" ] || exit 0
+    key="$*"; key="${key##* }"
+    awk -v k="$key" '$1 == k { $1 = ""; sub(/^ /, ""); print }' "$FAKE_CFG" ;;
+  *"--columns nstS") printf '%s\n' "${FAKE_ROW-}" ;;
+  *"--columns 4")    echo '10.1.2.3 (enp5s0)' ;;
+esac
+exit 0
+SHIM
+chmod +x "$MSHIM/incus"
+
+export FAKE_BASE_IMAGE=deadbeefcafe0123456789   # what the alias resolves to
+mintbox() {  # mintbox <logfile> <args...> — the real box, shimmed, no TTY
+  local log="$1"; shift
+  : > "$log"
+  env FAKE_INCUS_LOG="$log" PATH="$MSHIM:$PATH" "$BOX" "$@" </dev/null >"$log.out" 2>&1
+  local rc=$?
+  cat "$log.out"
+  return "$rc"
+}
+# The launch line, isolated: every assertion below is about ONE incus call, and
+# grepping the whole log would let a key stamped by some other call pass.
+launchline() { grep -m1 '^incus launch ' "$1"; }
+# launch_has/restamp_has <log> <ere> — a matcher per surface, so the ABSENCE
+# assertions (a key that must not be stamped) are a plain non-zero exit rather
+# than a nest of quoting.
+launch_has()  { launchline "$1" | grep -qE "$2"; }
+restamp_has() { grep -F 'config set' "$1" | grep -qE "$2"; }
+
+# --- the write half: a fresh mint ------------------------------------------
+MLOG="$MWORK/mint.log"
+check "mint: a shimmed 'box new' runs to completion" 0 "ready" \
+  mintbox "$MLOG" new --name w1 --template claude --container
+# Each key on its own check: a single grep for the whole block would go green
+# on a partial stamp, and "which fact was dropped" is the useful failure.
+check "mint: stamps the schema — the stamp's SHAPE, not the box version (#103)" \
+  0 "user.box.schema=1" launchline "$MLOG"
+check "mint: stamps the box version that minted it (#103)" \
+  0 "user.box.version=$(cat "$ROOT/VERSION")" launchline "$MLOG"
+check "mint: stamps the base image ALIAS asked for (#103)" \
+  0 "user.box.image=images:debian/13/cloud" launchline "$MLOG"
+check "mint: stamps the mode it minted as (#103)" \
+  0 "user.box.mode=container" launchline "$MLOG"
+# The demand, not just the outcome: TYPE already says CT afterwards, but only
+# the mint knew whether a container was ASKED for or fallen back into.
+check "mint: stamps the mode that was ASKED, not only the outcome (#103)" \
+  0 "user.box.mode.asked=container" launchline "$MLOG"
+check "mint: stamps the rig role box will auto-run (#103)" \
+  0 "user.box.role=claude" launchline "$MLOG"
+check "mint: stamps which rig converged it — repo (#103)" \
+  0 "user.box.rig.repo=heavy-duty/rig" launchline "$MLOG"
+check "mint: stamps which rig converged it — ref (#103)" \
+  0 "user.box.rig.ref=main" launchline "$MLOG"
+check "mint: stamps the origin (#103)" 0 "user.box.origin=mint" launchline "$MLOG"
+# The timestamp's SHAPE, so a local-time or seconds-since-epoch spelling fails
+# here: UTC ISO 8601, which is the only form that sorts and travels.
+check "mint: stamps the mint time as UTC ISO 8601 (#103)" 0 "" \
+  launch_has "$MLOG" 'user\.box\.created=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+# The existing three keys are UNTOUCHED — the stamp extends the namespace, it
+# does not rewrite it, and box_user()/the login hint read two of them.
+check "mint: the pre-existing boundary tag still rides the same line" \
+  0 "user.box=1" launchline "$MLOG"
+check "mint: the pre-existing template stamp is untouched" \
+  0 "user.box.template=claude" launchline "$MLOG"
+check "mint: the pre-existing user stamp is untouched" \
+  0 "user.box.user=claude" launchline "$MLOG"
+# Deliberately NOT stamped. limits.* already hold cpu/memory and a duplicate
+# drifts the first time someone edits a limit by hand; a container's disk does
+# not exist (its root rides the pool); and the tier is a fact about whoever is
+# ASKING. Absence assertions, so a well-meant addition has to argue here first.
+check "mint: does NOT duplicate cpu into the user.box namespace (#103)" 1 "" \
+  launch_has "$MLOG" 'user\.box\.cpu'
+check "mint: does NOT duplicate memory into the user.box namespace (#103)" 1 "" \
+  launch_has "$MLOG" 'user\.box\.memory'
+check "mint: does NOT stamp a disk — a container's does not exist (#103)" 1 "" \
+  launch_has "$MLOG" 'user\.box\.disk'
+check "mint: does NOT stamp the tier — it describes the asker, not the box (#103)" 1 "" \
+  launch_has "$MLOG" 'user\.box\.tier'
+
+# --- the resolved fingerprint: the alias is not a reproducible fact ---------
+# $T_IMAGE is an unpinned alias on a moving remote. Incus resolves it during
+# the launch and records what it landed on; box reads that back and pins it.
+check "mint: pins the RESOLVED image fingerprint after the launch (#103)" 0 "" \
+  grep -qF "config set w1 user.box.image.fingerprint=$FAKE_BASE_IMAGE" "$MLOG"
+check "mint: ...and it is a SECOND call, not something the launch could know" 1 "" \
+  launch_has "$MLOG" 'image\.fingerprint'
+# The load-bearing half of that design: a box that exists and boots must never
+# be failed over a provenance field. With no fingerprint to be had, the mint
+# still succeeds and the alias stands alone as the honest partial answer.
+NOFP="$MWORK/nofp.log"
+FAKE_BASE_IMAGE=""   # exported above; incus does not know what the alias resolved to
+check "mint: an unknowable fingerprint does not fail the mint (#103)" 0 "ready" \
+  mintbox "$NOFP" new --name w4 --template blank --container
+check "mint: ...and it stamped no empty fingerprint key either (#103)" 1 "" \
+  grep -q 'image.fingerprint' "$NOFP"
+FAKE_BASE_IMAGE=deadbeefcafe0123456789
+
+# --- a seed that installs no rig is stamped no rig pin ----------------------
+# 'blank' carries no @RIG_REPO@ token, so there is no rig to name. A stamp
+# that named one anyway would be fiction, which is worse than a missing key.
+check "mint: the 'blank' seed installs no rig, so no rig pin is stamped (#103)" 1 "" \
+  launch_has "$NOFP" 'user\.box\.rig\.'
+check "mint: ...and no role either — blank names none (#103)" 1 "" \
+  launch_has "$NOFP" 'user\.box\.role'
+
+# --- the rig pin has ONE definition, and both readers get the same answer ---
+# The seed substitutes it and the stamp records it. Two spellings of the same
+# default would eventually disagree, and a stamp that disagrees with the seed
+# it shipped alongside is worse than no stamp. Driven through the environment
+# override, so the two are compared on a value neither can have hardcoded.
+RIGLOG="$MWORK/rig.log"
+export RIG_REPO=someone/rig RIG_REF=probe-ref
+mintbox "$RIGLOG" new --name w5 --template claude --container >/dev/null 2>&1
+unset RIG_REPO RIG_REF
+check "mint: the rig pin override reaches the STAMP (#103)" 0 "" \
+  launch_has "$RIGLOG" 'user\.box\.rig\.repo=someone/rig'
+check "mint: ...both halves of it (#103)" 0 "" \
+  launch_has "$RIGLOG" 'user\.box\.rig\.ref=probe-ref'
+check "mint: ...and the SEED it shipped with carries the same pin (#103)" 0 "" \
+  launch_has "$RIGLOG" 'someone/rig/probe-ref'
+
+# --- the clone: the sharpest edge of the whole stamp ------------------------
+# 'incus copy' carries every user.* key forward (audit B2) — which is what
+# makes a clone know its template for free, and is exactly why the stamp
+# cannot ride along untouched. An inherited stamp does not go stale, it goes
+# FALSE: the clone would claim a mint time it was not present for, by a box
+# version that never saw it.
+CLONELOG="$MWORK/clone.log"
+check "clone: a shimmed 'box new --from' runs to completion" 0 "cloned" \
+  mintbox "$CLONELOG" new --name w2 --from work/authed
+check "clone: re-stamps the origin as a clone, not a mint (#103)" 0 "" \
+  grep -qF 'user.box.origin=clone' "$CLONELOG"
+check "clone: names the source it was taken from — one hop (#103)" 0 "" \
+  grep -qF 'user.box.origin.from=work/authed' "$CLONELOG"
+check "clone: re-stamps the box version that made THIS instance (#103)" 0 "" \
+  grep -qF "user.box.version=$(cat "$ROOT/VERSION")" "$CLONELOG"
+check "clone: re-stamps a fresh created time (#103)" 0 "" \
+  grep -qE 'user\.box\.created=[0-9]{4}-[0-9]{2}-[0-9]{2}T' "$CLONELOG"
+# The other half of the decision, and the reason it is a decision at all: the
+# LINEAGE keys are left alone on purpose. The clone's disk genuinely came from
+# that image, that template, that user, that role — re-stamping them from the
+# cloning process's own template lookup would be the actual lie, and would
+# break the login hint that reads user.box.template off the instance.
+check "clone: does NOT re-stamp the template — it is inherited lineage (#103)" 1 "" \
+  restamp_has "$CLONELOG" 'user\.box\.template'
+check "clone: does NOT re-stamp the user — box_user() reads the source's (#103)" 1 "" \
+  restamp_has "$CLONELOG" 'user\.box\.user'
+check "clone: does NOT re-stamp the image — the disk really came from it (#103)" 1 "" \
+  restamp_has "$CLONELOG" 'user\.box\.image'
+check "clone: does NOT re-stamp the role — the source's rig converged it (#103)" 1 "" \
+  restamp_has "$CLONELOG" 'user\.box\.role'
+# Order: the re-stamp lands on the copied instance BEFORE it is started, so a
+# clone is never observable wearing its source's provenance. Fail-closed — an
+# absent line makes the arithmetic fail, not pass.
+restamp_precedes_start() {
+  local set start
+  set="$(grep -n 'config set .* user.box.origin=clone' "$1" | head -1 | cut -d: -f1)"
+  start="$(grep -n '^incus start ' "$1" | head -1 | cut -d: -f1)"
+  [ -n "$set" ] && [ -n "$start" ] && [ "$set" -lt "$start" ]
+}
+check "clone: the re-stamp precedes the start (#103)" 0 "" \
+  restamp_precedes_start "$CLONELOG"
+
+# --- the read half: 'box info' surfaces it ---------------------------------
+# A stamp nothing can read is not done. cmd_info printed NAME/STATE/TYPE/IPV4
+# and surfaced none of the keys that already existed.
+STAMPED="$MWORK/stamped.cfg"
+cat > "$STAMPED" <<'CFG'
+user.box 1
+user.box.schema 1
+user.box.created 2026-07-19T14:22:07Z
+user.box.version 0.8.0
+user.box.image images:debian/13/cloud
+user.box.image.fingerprint 8a2f1c9d4e5b6a7c8d9e
+user.box.mode vm
+user.box.mode.asked auto
+user.box.template claude
+user.box.user claude
+user.box.role claude
+user.box.rig.repo heavy-duty/rig
+user.box.rig.ref main
+user.box.origin mint
+CFG
+infobox() {  # infobox <cfg-file> — 'box info work' against a canned config
+  env FAKE_INCUS_LOG=/dev/null FAKE_CFG="$1" FAKE_ROW='work,RUNNING,VIRTUAL-MACHINE,0' \
+    PATH="$MSHIM:$PATH" "$BOX" info work </dev/null 2>&1
+}
+check "info: surfaces the mint time and the box that minted it (#103)" \
+  0 "MINTED     2026-07-19T14:22:07Z by box 0.8.0" infobox "$STAMPED"
+check "info: surfaces the image alias AND what it resolved to (#103)" \
+  0 "IMAGE      images:debian/13/cloud @ 8a2f1c9d4e5b" infobox "$STAMPED"
+check "info: surfaces the template with its user and role (#103)" \
+  0 "TEMPLATE   claude (user claude, role claude)" infobox "$STAMPED"
+check "info: surfaces which rig converged it (#103)" \
+  0 "RIG        heavy-duty/rig@main" infobox "$STAMPED"
+check "info: surfaces the origin (#103)" 0 "ORIGIN     mint" infobox "$STAMPED"
+# Still the box it always was: the new block is additive, above the snapshots.
+check "info: still prints the state block it always did" 0 "IPV4       10.1.2.3" infobox "$STAMPED"
+
+# A clone reads back as a clone, naming its source.
+CLONECFG="$MWORK/clone.cfg"
+{ grep -v '^user.box.origin ' "$STAMPED"
+  echo 'user.box.origin clone'
+  echo 'user.box.origin.from work/authed'; } > "$CLONECFG"
+check "info: a clone says so, and names the box it came from (#103)" \
+  0 "ORIGIN     clone of work/authed" infobox "$CLONECFG"
+
+# --- legacy boxes: the promise that they keep working under every verb ------
+# A box carrying the boundary tag and NOTHING else — every box minted before
+# this stamp existed. It must still render, exit 0, and say plainly that the
+# mint was not recorded rather than inventing one or erroring out.
+LEGACY="$MWORK/legacy.cfg"; printf 'user.box 1\n' > "$LEGACY"
+check "info: a box with NO stamp at all still renders, exit 0 (#103)" \
+  0 "NAME       work" infobox "$LEGACY"
+check "info: ...and says the mint was not recorded, rather than inventing one" \
+  0 "predates the mint stamp" infobox "$LEGACY"
+info_has() { infobox "$1" | grep -qE "$2"; }
+check "info: ...and prints no half-empty IMAGE/ORIGIN lines for keys it lacks" 1 "" \
+  info_has "$LEGACY" '^(IMAGE|ORIGIN|RIG|MODE) '
+# A pre-rename box carries user.claudebox=1 and no metadata at all, and is
+# always a Claude box — the same mapping box_user() makes, honored forever.
+PRERENAME="$MWORK/prerename.cfg"; printf 'user.claudebox 1\n' > "$PRERENAME"
+check "info: a pre-rename box still reads as the claude template (#103)" \
+  0 "TEMPLATE   claude" infobox "$PRERENAME"
+
+# --- a schema from the future is not a broken box --------------------------
+# A box outlives the release that minted it, so an OLDER box will one day read
+# a NEWER box's stamp. It shows what it understands and says so; refusing to
+# describe a box a later release minted perfectly well is the wrong answer.
+FUTURE="$MWORK/future.cfg"
+{ grep -v '^user.box.schema ' "$STAMPED"; echo 'user.box.schema 99'; } > "$FUTURE"
+check "info: an unrecognised (newer) schema is noted, not refused (#103)" \
+  0 "NOTE" infobox "$FUTURE"
+check "info: ...and it still shows every key it DOES understand (#103)" \
+  0 "MINTED     2026-07-19T14:22:07Z" infobox "$FUTURE"
+check "info: ...and it still exits 0 — a future box is not a broken box (#103)" \
+  0 "ORIGIN" infobox "$FUTURE"
+# A non-integer schema lands on the same side: noted, never fatal under set -e.
+GARBAGE="$MWORK/garbage.cfg"
+{ grep -v '^user.box.schema ' "$STAMPED"; echo 'user.box.schema not-a-number'; } > "$GARBAGE"
+check "info: a non-integer schema is noted, not fatal (#103)" 0 "NOTE" infobox "$GARBAGE"
+
+# VERSION has ONE reader in bin/box — box_version() — and both 'box --version'
+# and the mint stamp go through it. A second 'cat $root/VERSION' is how the two
+# would eventually disagree about what minted a box.
+# shellcheck disable=SC2016  # '$root' is bin/box's variable, matched literally
+one_version_reader() {
+  [ "$(grep -cF 'cat "$root/VERSION"' "$ROOT/bin/box")" -eq 1 ]
+}
+check "the tree's VERSION has a single reader, box_version() (#103)" 0 "" \
+  one_version_reader
+
+rm -rf "$MSHIM" "$MWORK"
 
 # The rehearsal itself stays runnable: syntax-checked here, run on real hosts.
 check "multiuser.sh is valid bash" 0 "" bash -n "$ROOT/drill/multiuser.sh"

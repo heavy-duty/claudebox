@@ -12,7 +12,18 @@ inst=""   # the resolved Incus instance, set by the 'box' precondition
 
 die() { echo "box: $*" >&2; exit 1; }         # 1 = it went wrong
 usage_error() { echo "box: $*" >&2; echo "try 'box help'." >&2; exit 2; }  # 2 = you asked wrong
-version() { echo "box $(cat "$root/VERSION" 2>/dev/null || echo unknown) ($root)"; }
+# The tree's own version, read in ONE place. 'box --version' says it out loud;
+# the mint stamp (#103) writes it onto every instance box creates, so a box can
+# still name the release that made it long after that release is history.
+box_version() { cat "$root/VERSION" 2>/dev/null || echo unknown; }
+version() { echo "box $(box_version) ($root)"; }
+
+# The SHAPE of the mint stamp, not the box version — an integer that changes
+# only when a key is removed or repurposed, never when one is added (a reader
+# that does not know a key simply does not print it). Absent means pre-stamp:
+# every box minted before #103 has no schema key at all, and must keep working
+# under every verb, which is the same promise 'user.claudebox' carries.
+BOX_STAMP_SCHEMA=1
 
 # Which tier is THIS PROCESS? Decided from live credentials (argless 'id -nG':
 # what the kernel will present when incus opens the socket), never from the
@@ -73,7 +84,7 @@ CMDS=(
   "new^--name <box> [--template <t>] [--from <src>[/<snap>]] [--cpu <n>] [--memory <size>] [--disk <size>] [--vm|--container]^^Mint a box from a template (default: blank), or --from an existing box/snapshot^fn:cmd_new^"
   "templates^^^List the templates this install can mint^fn:cmd_templates^"
   "list^[--json]^^List your boxes^fn:cmd_list^"
-  "info^<box> [--json]^box^One box: state, type, IP, and its snapshot labels^fn:cmd_info^"
+  "info^<box> [--json]^box^One box: state, type, IP, what minted it, snapshot labels^fn:cmd_info^"
   "shell^<box>^box^Open a shell in a box, as its template's user^fn:cmd_shell^"
   "exec^<box> -- <cmd...>^box^Run a command inside a box^fn:cmd_exec^"
   "tmux^<box> [<session>]^box^Attach or create a tmux session in a box — survives disconnects^fn:cmd_tmux^"
@@ -1002,8 +1013,16 @@ load_template() {
 # environment must die on the host, never execute in the guest. bash's =~
 # anchors to the whole string — a multi-line value cannot sneak one clean
 # line past it the way a line-oriented grep would.
+# The rig pin, resolved from the mint environment, in ONE place: render_userdata
+# substitutes it into the seed, and the mint stamp (#103) records it onto the
+# instance. Two spellings of the same default would eventually disagree, and a
+# stamp that disagrees with the seed is worse than no stamp at all.
+rig_repo() { printf '%s\n' "${RIG_REPO:-heavy-duty/rig}"; }
+rig_ref()  { printf '%s\n' "${RIG_REF:-main}"; }
+
 render_userdata() {
-  local f="$1" repo="${RIG_REPO:-heavy-duty/rig}" ref="${RIG_REF:-main}" data
+  local f="$1" repo data ref
+  repo="$(rig_repo)"; ref="$(rig_ref)"
   [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] \
     || die "RIG_REPO must look like owner/repo: $repo"
   [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] \
@@ -1026,6 +1045,13 @@ cmd_templates() {
   echo "mint one:  box new --name <box> --template <template>"
 }
 
+# When this instance came into being. A timestamp in a CONVERGENT file would be
+# churn — the same run writing a different byte every time — but a mint is not
+# convergent: it happens exactly once, to exactly one instance, and is never
+# re-run against it. UTC and ISO 8601 so it sorts as a string and means the same
+# thing on every host that reads it back.
+mint_time() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
 cmd_new() {
   [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
   require_stack
@@ -1037,6 +1063,31 @@ cmd_new() {
     case "$from" in */*) snap="${from#*/}" ;; esac
     srcref="$(iname_of "$src")"; [ -n "$snap" ] && srcref="$srcref/$snap"
     incus copy "$srcref" "$instance"
+    # 'incus copy' carries every user.* key forward (audit B2) — which is what
+    # makes a clone know its template and user for free, and is also why the
+    # mint stamp (#103) cannot simply ride along. A clone that inherited the
+    # stamp verbatim would claim to have been minted at the source's mint time,
+    # by the box version that minted the SOURCE, in a mint that never touched
+    # this instance. That is not a stale field, it is a false one.
+    #
+    # So re-stamp exactly the keys that describe THIS instance's coming into
+    # being, and leave the rest alone:
+    #   · version / created / schema — the clone was made HERE, NOW, by THIS box
+    #   · origin=clone, origin.from=<srcref> — how, and from what
+    # Deliberately NOT re-stamped, because they are lineage and stay true: the
+    # clone's disk really did come from that image, that template, that user and
+    # that rig role — reading them off the source is the whole point of a clone.
+    # ('incus copy' preserves the instance type too, so mode stays true as well.)
+    #
+    # origin.from records ONE hop. A clone of a clone names its parent and
+    # forgets its grandparent: the alternative is an unbounded chain in a config
+    # value, and the parent is the box an operator can actually go look at.
+    incus config set "$instance" \
+      user.box.schema="$BOX_STAMP_SCHEMA" \
+      user.box.version="$(box_version)" \
+      user.box.created="$(mint_time)" \
+      user.box.origin=clone \
+      user.box.origin.from="$srcref"
     incus start "$instance"
     wait_agent "$instance"
     reset_identity "$instance"
@@ -1077,6 +1128,47 @@ cmd_new() {
     # which user. 'incus copy' preserves user.* keys (audit B2), so a clone
     # knows what it is without ever consulting the template again.
     #
+    # And the rest of what this line knows and used to drop on the floor (#103).
+    # There is no host-side per-box store — the Incus instance config IS the
+    # database — so a fact not written here is simply gone the moment the mint
+    # returns. The stamp describes the MINT, not the outcome: it lands before
+    # cloud-init and before rig, and nothing later edits it.
+    #
+    #   schema   the stamp's shape, so a future reader knows what it is holding
+    #   version  the box that minted it — 'box --version' is a fact about the
+    #            binary in front of you, never about the box you are looking at
+    #   image    the alias asked for. It is an UNPINNED alias on a moving
+    #            remote: two boxes minted a month apart from "the same
+    #            template" are not the same box, and the alias alone cannot
+    #            say so. What it resolved to is pinned after the launch below.
+    #   mode     what it minted as, and what was ASKED — a container that fell
+    #            back for want of /dev/kvm and one the operator asked for read
+    #            identically afterwards, and only the mint knew which
+    #   role      the rig role box auto-runs at the hook below
+    #   rig.*     WHICH rig converged it, stamped only for a seed that actually
+    #            installs rig from the pin ('blank' seeds none, so it gets none)
+    #   created   when. See mint_time() for why a timestamp belongs here.
+    #   origin    mint. A clone re-stamps it (see the --from branch above).
+    #
+    # NOT stamped, on purpose: cpu/memory (limits.* already hold them, and a
+    # duplicate drifts the first time someone edits the limit by hand); disk
+    # (a VM's is the root device size, and a container's does not exist — its
+    # root rides the pool, so a stamped value would be fiction); and tier,
+    # which box_tier() derives from whoever is ASKING, not from the box.
+    local stamp=(
+      --config user.box.schema="$BOX_STAMP_SCHEMA"
+      --config user.box.version="$(box_version)"
+      --config user.box.image="$T_IMAGE"
+      --config user.box.mode="$m"
+      --config user.box.mode.asked="$mode"
+      --config user.box.created="$(mint_time)"
+      --config user.box.origin=mint
+    )
+    [ -z "$T_BOOTSTRAP_ROLE" ] || stamp+=(--config user.box.role="$T_BOOTSTRAP_ROLE")
+    if grep -q '@RIG_REPO@' "$root/templates/$t/user-data.yaml" 2>/dev/null; then
+      stamp+=(--config user.box.rig.repo="$(rig_repo)" --config user.box.rig.ref="$(rig_ref)")
+    fi
+    #
     # The launch is narrated and TIME-BOXED (#93). Twice in the 2026-07-19
     # release drill the child 'incus launch' wedged before the create was
     # even accepted — 'incus operation list' empty, the instance never
@@ -1095,6 +1187,7 @@ cmd_new() {
       --config user.box=1 \
       --config user.box.template="$t" \
       --config user.box.user="$T_USER" \
+      "${stamp[@]}" \
       --config limits.cpu="$T_CPU" \
       --config limits.memory="$T_MEMORY" \
       --config cloud-init.user-data="$(render_userdata "$root/templates/$t/user-data.yaml")" \
@@ -1132,6 +1225,20 @@ cmd_new() {
       # Not a wedge: incus refused and said why on stderr, right above.
       die "incus launch failed (exit $rc)"
     fi
+    # The one field the launch line could not know: 'user.box.image' above is
+    # the ALIAS, and an alias on a moving remote is not a reproducible fact.
+    # Incus resolves it during the launch and records what it landed on in
+    # volatile.base_image — read it back and pin it into the stamp, so an
+    # incident six months from now can ask "was this box built on the image
+    # that broke?" and get an answer instead of a template name.
+    #
+    # Best-effort BY CONSTRUCTION, and that is the whole design of this line:
+    # it runs only after a launch that already succeeded, and a box that exists
+    # and boots must never be failed over a provenance field. Every failure
+    # here is silent and leaves the alias standing as the honest partial answer
+    # — a stamp with no fingerprint, which is exactly how cmd_info renders it.
+    local fp; fp="$(incus config get "$instance" volatile.base_image 2>/dev/null || true)"
+    [ -z "$fp" ] || incus config set "$instance" user.box.image.fingerprint="$fp" >/dev/null 2>&1 || true
     wait_agent "$instance"
     echo "box: waiting for phase-1 (cloud-init)..."
     echo "box: (its full narration, live:  incus exec $name -- tail -f /var/log/cloud-init-output.log)"
@@ -1284,6 +1391,59 @@ cmd_list() {
   fi
 }
 
+# One instance config key. 'incus config get' on an UNSET key prints empty and
+# exits 0 (audit B4) — so the '|| true' here covers the daemon refusing, not the
+# key being absent, and every caller below reads absence as an empty string.
+box_cfg() { incus config get "$1" "$2" 2>/dev/null || true; }
+
+# The mint stamp (#103), read back for 'box info'. Every key is optional and so
+# is the whole block: a box minted before the stamp existed carries none of it
+# and must render as a box with blanks — never as an error, and never as a box
+# wearing a mint time it does not have. Legacy boxes are not a transitional
+# case: a box outlives the release that minted it, which is exactly what the
+# legacy 'user.claudebox' tag already says out loud at resolve_box.
+box_provenance() {
+  local i="$1" schema created ver img fp m asked tpl u role rrepo rref origin from
+  schema="$(box_cfg "$i" user.box.schema)"
+  created="$(box_cfg "$i" user.box.created)"; ver="$(box_cfg "$i" user.box.version)"
+  img="$(box_cfg "$i" user.box.image)";       fp="$(box_cfg "$i" user.box.image.fingerprint)"
+  m="$(box_cfg "$i" user.box.mode)";          asked="$(box_cfg "$i" user.box.mode.asked)"
+  tpl="$(box_cfg "$i" user.box.template)";    u="$(box_cfg "$i" user.box.user)"
+  role="$(box_cfg "$i" user.box.role)"
+  rrepo="$(box_cfg "$i" user.box.rig.repo)";  rref="$(box_cfg "$i" user.box.rig.ref)"
+  origin="$(box_cfg "$i" user.box.origin)";   from="$(box_cfg "$i" user.box.origin.from)"
+  # A pre-rename box has no metadata at all but is always a Claude box — the
+  # same mapping box_user() makes, for the same reason.
+  [ -n "$tpl" ] || [ "$(box_cfg "$i" user.claudebox)" != 1 ] || { tpl=claude; u="${u:-claude}"; }
+
+  echo
+  if [ -n "$created" ] || [ -n "$ver" ]; then
+    printf '%-11s%s\n' MINTED "${created:-(time not recorded)} by box ${ver:-unknown}"
+  else
+    printf '%-11s%s\n' MINTED "(not recorded — this box predates the mint stamp)"
+  fi
+  if [ -n "$tpl" ]; then
+    local paren=""
+    [ -z "$u" ] || paren="user $u"
+    [ -z "$role" ] || paren="${paren:+$paren, }role $role"
+    printf '%-11s%s\n' TEMPLATE "$tpl${paren:+ ($paren)}"
+  fi
+  [ -z "$img" ] || printf '%-11s%s\n' IMAGE "$img${fp:+ @ ${fp:0:12}…}"
+  # The mode is only worth a line alongside what was ASKED: TYPE above already
+  # says VM or CT, but only the mint knew whether a container was chosen or
+  # fallen back into for want of /dev/kvm.
+  [ -z "$asked" ] || printf '%-11s%s\n' MODE "${m:-?} (asked: $asked)"
+  [ -z "$rrepo" ] || printf '%-11s%s\n' RIG "$rrepo@${rref:-?}"
+  [ -z "$origin" ] || printf '%-11s%s\n' ORIGIN "$origin${from:+ of $from}"
+  # A schema box does not recognise is NEWER than box, not broken: show what is
+  # understood and say so, rather than refusing to describe a box that a later
+  # release minted perfectly well. (A non-integer lands here too, which is the
+  # right side to fail on.)
+  if [ -n "$schema" ] && { ! [ "$schema" -eq "$schema" ] 2>/dev/null || [ "$schema" -gt "$BOX_STAMP_SCHEMA" ]; }; then
+    printf '%-11s%s\n' NOTE "stamp schema '$schema' is newer than this box ($(box_version)) reads ($BOX_STAMP_SCHEMA) — showing what it understands"
+  fi
+}
+
 cmd_info() {
   local box="${args[0]}" row
   if [ "$json" -eq 1 ]; then incus list "$inst" --format json; return; fi
@@ -1304,6 +1464,12 @@ cmd_info() {
     listen="$(incus config device get "$inst" "$d" listen 2>/dev/null)"
     printf '%-11s%s → port %s\n' EXPOSED "${listen#tcp:}" "${d#expose-}"
   done < <(incus config device list "$inst" 2>/dev/null)
+
+  # What built this box, from what, when, with which box (#103). Nothing else
+  # on the host records it — the instance config IS the store — so a stamp
+  # nothing surfaces is a stamp nobody has. 'box info --json' carries the keys
+  # for free: 'incus list --format json' includes config verbatim.
+  box_provenance "$inst"
 
   echo
   case "${snaps:-0}" in
