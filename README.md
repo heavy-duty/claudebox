@@ -390,7 +390,7 @@ the door is per-port, punched and removable at runtime.
 box new --name <box> [--template <t>] [--from <src>[/<snap>]] [--cpu <n>] [--memory <size>] [--disk <size>] [--vm|--container]
 box templates                # list the templates this install can mint
 box list                     # list your boxes
-box info <box>               # one box: state, IP, exposures, snapshot labels
+box info <box>               # one box: state, IP, exposures, provenance, snapshots
 box shell <box>              # enter as the template's user
 box exec <box> -- <cmd...>   # run a command in the box
 box tmux <box> [session]     # attach/create a tmux session — survives disconnects
@@ -426,6 +426,49 @@ clones an existing box or snapshot. VM mode (`--vm`, the default where
 `/dev/kvm` exists) is the trust-less target; container mode (auto-fallback,
 `security.nesting=true`) is for hosts without nested virt — weaker isolation,
 dev/test only.
+
+## What minted this box: `box info`
+
+A box outlives the release that minted it, the template that shaped it and the
+image build it came from — and until
+[#103](https://github.com/heavy-duty/box/issues/103) it recorded none of them.
+There is no host-side per-box store; the Incus instance config _is_ the
+database, so a fact not written at mint time is simply gone. `box new` now
+stamps what it knew, and `box info` reads it back:
+
+```
+NAME       work
+STATE      RUNNING
+TYPE       VM
+IPV4       10.x.x.x
+
+MINTED     2026-07-19T14:22:07Z by box 0.8.1
+TEMPLATE   claude (user claude, role claude)
+IMAGE      images:debian/13/cloud @ 8a2f1c9d4e5b…
+MODE       vm (asked: auto)
+RIG        heavy-duty/rig@main
+ORIGIN     mint
+```
+
+The image line carries both halves on purpose: the template names an
+_unpinned alias on a moving remote_, so what it resolved to at that mint is the
+only reproducible fact. `box info --json` carries every key verbatim — they
+ride `incus list --format json` in `config`.
+
+**A clone re-stamps.** `incus copy` preserves `user.*` keys, so a clone inherits
+its source's template and user for free — but inheriting the mint stamp would
+not make it stale, it would make it **false**: the clone was not present at that
+mint. `box new --from` therefore re-stamps the four keys that describe _this_
+instance's coming into being (`ORIGIN clone of work/authed`, a fresh time, the
+box version that cloned it) and leaves the lineage keys alone, because the
+clone's disk genuinely did come from that image, template and role. `origin.from`
+records one hop: a clone of a clone names its parent, not its grandparent.
+
+**Boxes minted before this stamp existed keep working**, under this verb and
+every other — they render as a box with blanks and say `MINTED (not recorded)`
+rather than erroring. `user.box.schema` names the stamp's _shape_ (an integer,
+not the box version) so a box minted by a later release reads back on an older
+box as "here is what I understand, and there is more I don't".
 
 ## Boxes are just Incus instances
 
