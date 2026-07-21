@@ -374,6 +374,42 @@ multi-GB copy rather than a near-free copy-on-write mark, so the mint
 installs by default precisely so snapshots are cheap. `BOX_SNAPSHOT_PRISTINE=0`
 skips the mark on any host.
 
+### `bootstrapped` — the same undo, one step later
+
+A mint whose template names a bootstrap role marks a second snapshot,
+`bootstrapped` ([#130](https://github.com/heavy-duty/box/issues/130)), once
+`rig bootstrap` has run and box has **watched it succeed**. That is the box
+converged and not yet touched — the state you actually wanted back most of
+the time.
+
+```sh
+box restore work bootstrapped   # keep the tenant role, undo what you did to it
+box restore work pristine       # throw the tenant role away too
+```
+
+Same rules as `pristine`: default on, never fatal, skipped loudly on a `dir`
+pool (with two marks that disk cost is twice the size, so a CoW-less host is
+not asked to pay it), and `BOX_SNAPSHOT_BOOTSTRAPPED=0` skips it anywhere.
+The same two caveats apply, unchanged: it **dies with the box** on `box rm`
+(`box export` is the durable path), and it **cannot reach off-box state** —
+a tailnet device record, a runner registration (rig#62).
+
+**Read the label in one direction only.** Its _presence_ means the mint-time
+hook converged and nothing has touched the box since. Its _absence_ means
+nothing at all, because box only marks a hook it watched:
+
+- A **blank** box runs no hook, so there is no convergence to mark. It gets
+  none — `pristine` and `bootstrapped` would be the same disk state at twice
+  the cost, and a label claiming a convergence that never happened is worse
+  than no label.
+- A box whose hook **failed** gets none either. box tells you to re-run the
+  role by hand through `box shell`, and a by-hand run happens in a shell box
+  does not watch — so box hands you `box snapshot <box> bootstrapped` to take
+  at the moment it is true, rather than inventing a fact.
+- A `dir`-pool host and `BOX_SNAPSHOT_BOOTSTRAPPED=0` both skip it.
+
+`box info <box>` is what actually tells you which labels a box has.
+
 ## Survive the host: `box export` / `box import`
 
 Snapshots live _inside_ a box, and `box rm` deletes the box **and** its
@@ -441,6 +477,8 @@ box restore <box> <snap> [--force]
                              # roll back to a snapshot — destructive, asks first
                              # 'pristine' is auto-marked at mint: back to
                              # pristine Debian + box's seed, before rig ran
+                             # 'bootstrapped' too, if a rig hook converged:
+                             # the role kept, everything since undone
 box export <box> [<file>] [--instance-only]
                              # one portable file (snapshots incl.) — survives rm & host
 box import <file> [--name <box>]

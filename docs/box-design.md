@@ -55,6 +55,21 @@ has none, and box refuses to label a worked-in state as pristine. On a `dir`
 pool the mark would be a full copy rather than a CoW one, so the mint skips
 it loudly.
 
+A second, **`bootstrapped`**, is marked one step later (#130) — after the rig
+hook has run and box has *watched it succeed*. Same policy, literally the same
+function: default on, never fatal, skipped on `dir`, opt-out via
+`BOX_SNAPSHOT_BOOTSTRAPPED=0`. Where the two differ is deliberate.
+`pristine` marks a **moment** every fresh mint has, so it is unconditional;
+`bootstrapped` marks an **event**, so it is not. A blank box has no hook and
+therefore no event — marking it anyway would duplicate `pristine` byte for
+byte at twice the disk cost, or assert a convergence that never happened. A
+failed hook gets no mark either: box tells the operator to re-run the role
+through `box shell`, which is a run box does not watch, so it hands over `box
+snapshot <n> bootstrapped` instead of guessing. The consequence is a label
+that is only ever read one way — **presence** means "converged and untouched";
+**absence** means nothing, and nothing in box may treat a missing
+`bootstrapped` as evidence a box is unconverged.
+
 Snapshots are in-box state: `box rm` deletes a box *and* its snapshots, and a
 clone still lives on the same host. The off-host mechanism is `box export` /
 `box import` (#70) — one portable backup tarball, snapshots included by

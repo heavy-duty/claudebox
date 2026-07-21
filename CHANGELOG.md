@@ -138,6 +138,33 @@ which records not just what changed but what each drill run proved.
   class), which under `pipefail` could have narrated the wrong inheritance
   shape on a clone that does carry a `pristine`.
 
+- **A mint that converges a tenant role marks a `bootstrapped` snapshot after
+  the hook succeeds** (#130, the half #104 deferred and #128 argued out) —
+  `pristine` throws the tenant role away; `bootstrapped` keeps it and throws
+  away only what you did afterwards, which is the undo an operator reaches for
+  far more often and which otherwise costs a ~10-minute re-mint. Same policy
+  as `pristine`, sharing one function with it (`snapshot_mark`) so the
+  never-fatal contract exists in exactly one place: default on,
+  `BOX_SNAPSHOT_BOOTSTRAPPED=0` opts out, a `dir` pool skips it loudly — with
+  two marks that disk objection is twice the size, so a CoW-less host is not
+  asked to pay for one full root copy per mint, let alone two — and a failed
+  snapshot warns without failing a good mint. **Deliberately conditional where
+  `pristine` is unconditional**: `pristine` marks a *moment* every fresh mint
+  has, `bootstrapped` marks an *event* — a rig hook box ran and watched
+  succeed — and a blank box has no such event, so it gets no mark rather than
+  a byte-identical duplicate of `pristine` at twice the cost. When the hook
+  **fails**, box takes no mark either and says so where the operator is
+  looking: the failure message now hands over `box snapshot <box>
+  bootstrapped` to take after the by-hand re-run, because box will not label a
+  convergence it did not watch. So the label is documented as one-directional
+  on every surface — its **presence** means the hook converged and nothing has
+  touched the box since; its **absence** means nothing at all (a blank
+  template, a `dir` pool, an opt-out, or a hand-converged box). Same durability
+  caveats as `pristine`, restated rather than referenced: it dies with the box
+  on `box rm` (`box export` is the durable path), and no filesystem rollback
+  reaches off-box state such as a tailnet device record or a runner
+  registration (heavy-duty/rig#62).
+
 ### Changed
 
 - **`state:needs-human` no longer waits on the cron to become true** (#141)

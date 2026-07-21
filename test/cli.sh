@@ -524,7 +524,7 @@ rm -f "$CLONEBR"
 # snapshot_pristine and run them against a stubbed incus, so every branch is
 # actually executed on a host with no daemon.
 PRISFN="$(mktemp)"
-awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_pristine\(\) \{/,/^\}/' "$ROOT/bin/box" > "$PRISFN"
+awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_mark\(\) \{/,/^\}/;/^snapshot_pristine\(\) \{/,/^\}/' "$ROOT/bin/box" > "$PRISFN"
 check "pristine: the functions extracted from bin/box (guards the awk)" 0 "BOX_SNAPSHOT_PRISTINE" cat "$PRISFN"
 check "pristine: the extracted functions are valid bash" 0 "" bash -n "$PRISFN"
 
@@ -629,6 +629,198 @@ check "pristine: 'box help restore' documents the mark and its off-box blind spo
   bash -c '"'"$ROOT"'/bin/box" help restore'
 check "pristine: 'box help new' documents the mark and the opt-out" 0 "BOX_SNAPSHOT_PRISTINE" \
   bash -c '"'"$ROOT"'/bin/box" help new'
+
+# ---------------------------------------------------------------------------
+# The 'bootstrapped' mark (#130, the deferred half of #104). Where 'pristine'
+# marks a MOMENT every fresh mint has, this marks an EVENT: a rig hook box ran
+# and WATCHED SUCCEED. So the two load-bearing facts are opposite in shape —
+# 'pristine' is pinned as unconditional, this one is pinned as gated, and the
+# gate is what keeps the label from asserting a convergence that never
+# happened. Position and gating are pinned by line order (a daemon-free run
+# cannot mint); the policy half is DRIVEN against a stubbed incus, exactly as
+# the pristine block above drives it.
+# ---------------------------------------------------------------------------
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "bootstrapped: the mark is taken in the fresh-mint branch" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" | grep -q "snapshot_bootstrapped \"\$instance\""'
+# AFTER the hook: a mark taken before it would be 'pristine' under a name that
+# claims convergence — the same lie #104 refused on the clone path.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "bootstrapped: the mark orders AFTER the rig bootstrap hook" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  run="$(printf "%s\n" "$fn" | grep -Fn "rig bootstrap \"\$T_BOOTSTRAP_ROLE\" </dev/null" | head -1 | cut -d: -f1)"
+  snap="$(printf "%s\n" "$fn" | grep -n "snapshot_bootstrapped " | head -1 | cut -d: -f1)"
+  [ -n "$run" ] && [ -n "$snap" ] && [ "$run" -lt "$snap" ]'
+# GATED on T_BOOTSTRAP_ROLE — the blank-template asymmetry, chosen. A hookless
+# box has no convergence to mark; marking one anyway would either duplicate
+# 'pristine' byte for byte at twice the disk cost or assert an event that did
+# not happen. This is the exact inverse of the pristine guard above, and both
+# must hold at once.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "bootstrapped: the mark IS gated on a tenant role (the blank asymmetry)" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  guard="$(printf "%s\n" "$fn" | grep -n "if \[ -n \"\$T_BOOTSTRAP_ROLE\" \]" | head -1 | cut -d: -f1)"
+  snap="$(printf "%s\n" "$fn" | grep -n "snapshot_bootstrapped " | head -1 | cut -d: -f1)"
+  [ -n "$guard" ] && [ -n "$snap" ] && [ "$guard" -lt "$snap" ]'
+# NOT after a FAILED hook. The failure branch ends in a 'die', so the mark is
+# unreachable from it — pinned by asserting the mark sits after that die, i.e.
+# on the far side of a branch that never returns.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "bootstrapped: a FAILED hook dies before ever reaching the mark" 0 "" bash -c '
+  fn="$(awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box")"
+  d="$(printf "%s\n" "$fn" | grep -n "die \"the tenant role did not converge" | head -1 | cut -d: -f1)"
+  snap="$(printf "%s\n" "$fn" | grep -n "snapshot_bootstrapped " | head -1 | cut -d: -f1)"
+  [ -n "$d" ] && [ -n "$snap" ] && [ "$d" -lt "$snap" ]'
+# ...and the operator is HANDED the command at the one moment they are
+# looking. This is the answer to the sharpest objection in #130: the mark is
+# absent exactly on the boxes whose convergence needed intervention, so the
+# failure path must name the by-hand command rather than leave a silent hole.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "bootstrapped: the hook-failure message hands over the by-hand command" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -q "box snapshot \$name bootstrapped"'
+# The clone branch takes neither mark. Reuses #104's extraction shape.
+CLONEBR2="$(mktemp)"
+awk '/if \[ -n "\$from" \]; then/,/^  else$/' "$ROOT/bin/box" > "$CLONEBR2"
+check "bootstrapped: the clone branch extracted from bin/box (guards the awk)" 0 "incus copy" cat "$CLONEBR2"
+check "bootstrapped: a --from clone takes no 'bootstrapped' either" 1 "" \
+  grep -q "snapshot_bootstrapped" "$CLONEBR2"
+rm -f "$CLONEBR2"
+
+# The never-fatal contract lives ONCE. Two marks share one policy function on
+# purpose: the failure handling is the part that must not be got subtly
+# different in two places. If a future change copy-pastes the policy instead of
+# calling it, this bites. (The other create is cmd_snapshot's, the by-hand
+# verb, which is deliberately fatal — an explicit 'box snapshot' that fails
+# must fail.)
+check "bootstrapped: exactly one auto-mark policy — 'incus snapshot create' twice in bin/box" 0 "2" \
+  bash -c 'grep -c "incus snapshot create" "'"$ROOT"'/bin/box"'
+
+# The policy half, DRIVEN. Same stub shape as pris() above, one label over.
+BOOTFN="$(mktemp)"
+awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_mark\(\) \{/,/^\}/;/^mark_taken\(\)/;/^snapshot_bootstrapped\(\) \{/,/^\}/' \
+  "$ROOT/bin/box" > "$BOOTFN"
+check "bootstrapped: the functions extracted from bin/box (guards the awk)" 0 "snapshot_bootstrapped" cat "$BOOTFN"
+check "bootstrapped: the extracted functions are valid bash" 0 "" bash -n "$BOOTFN"
+
+boot() { # boot <driver> <instance> [VAR=VAL...]
+  local driver="$1" instance="$2"; shift 2
+  # shellcheck disable=SC2016  # the body is the stub's source, expanded by the
+  # inner bash from the environment 'env' sets up — never by this shell.
+  env "$@" DRIVER="$driver" INSTANCE="$instance" BOOTFN="$BOOTFN" bash -c '
+    incus() {
+      case "$*" in
+        "profile device get box-net root pool") printf "boxpool\n" ;;
+        "storage show boxpool")
+          [ "$DRIVER" = none ] && return 1
+          printf "name: boxpool\ndriver: %s\n" "$DRIVER" ;;
+        "storage list --format csv")
+          [ "$DRIVER" = none ] && return 1
+          printf "boxpool,%s,,0,CREATED\n" "$DRIVER" ;;
+        "snapshot create inst-x bootstrapped") printf "STUB: snapshot created\n" ;;
+        "snapshot create fail-x bootstrapped") printf "STUB: incus refused\n" >&2; return 1 ;;
+        *) printf "STUB: unexpected incus call: %s\n" "$*" >&2; return 1 ;;
+      esac
+    }
+    . "$BOOTFN"
+    snapshot_bootstrapped "$INSTANCE" boxname
+  ' 2>&1
+}
+boot_took_mark() { boot "$@" | grep -q "STUB: snapshot created"; }
+check "bootstrapped: btrfs (the designed backend) takes the mark" 0 "STUB: snapshot created" \
+  boot btrfs inst-x
+check "bootstrapped: btrfs names the restore command for the operator" 0 "box restore boxname bootstrapped" \
+  boot btrfs inst-x
+# The 'dir' skip, and with two marks the disk objection is twice the size: a
+# CoW-less host must not be asked to pay for one full root copy per mint, let
+# alone two. Same refusal, same loudness, same by-hand command.
+check "bootstrapped: a 'dir' pool SKIPS the mark (no CoW — it would be a full copy)" 0 "NOT taking" \
+  boot dir inst-x
+check "bootstrapped: the dir skip is loud and names the by-hand command" 0 "box snapshot boxname bootstrapped" \
+  boot dir inst-x
+check "bootstrapped: the dir skip never reaches incus snapshot create" 1 "" \
+  boot_took_mark dir inst-x
+check "bootstrapped: an unreadable pool takes the mark anyway (the asymmetry)" 0 "STUB: snapshot created" \
+  boot none inst-x
+check "bootstrapped: ...and says what it assumed rather than pretending it knew" 0 "could not read the storage driver" \
+  boot none inst-x
+check "bootstrapped: BOX_SNAPSHOT_BOOTSTRAPPED=0 skips it anywhere" 0 "BOX_SNAPSHOT_BOOTSTRAPPED=0" \
+  boot btrfs inst-x BOX_SNAPSHOT_BOOTSTRAPPED=0
+check "bootstrapped: the opt-out never reaches incus snapshot create" 1 "" \
+  boot_took_mark btrfs inst-x BOX_SNAPSHOT_BOOTSTRAPPED=0
+# The opt-out knob name is DERIVED from the label, so the message can never
+# drift from the variable an operator actually has to set — and one label's
+# knob must not silently disable the other's.
+check "bootstrapped: the opt-out is a per-label knob — PRISTINE=0 does not silence it" 0 "" \
+  boot_took_mark btrfs inst-x BOX_SNAPSHOT_PRISTINE=0
+check "bootstrapped: a failed snapshot warns and returns 0 (never fails a good mint)" 0 "WARNING" \
+  boot btrfs fail-x
+
+# --- only offer a rollback that EXISTS -------------------------------------
+# The never-fatal contract means snapshot_mark returns 0 whether it took the
+# mark, skipped it, or was refused — so the exit status cannot answer "is
+# there something to restore?" and any message offering one must ask 'marks'.
+# Driven per path rather than asserted once: the three no-mark paths fail
+# differently and a single case would let the other two regress silently.
+took() { # took <driver> <label> [VAR=VAL...] — did THIS run create the mark?
+  local driver="$1" label="$2"; shift 2
+  # shellcheck disable=SC2016  # the body is the stub's source, expanded by the
+  # inner bash from the environment 'env' sets up — never by this shell.
+  env "$@" DRIVER="$driver" LABEL="$label" BOOTFN="$BOOTFN" bash -c '
+    incus() {
+      case "$*" in
+        "profile device get box-net root pool") printf "boxpool\n" ;;
+        "storage show boxpool")
+          [ "$DRIVER" = none ] && return 1
+          printf "name: boxpool\ndriver: %s\n" "$DRIVER" ;;
+        "storage list --format csv")
+          [ "$DRIVER" = none ] && return 1
+          printf "boxpool,%s,,0,CREATED\n" "$DRIVER" ;;
+        "snapshot create fail-x "*) return 1 ;;
+        "snapshot create "*) printf "STUB: snapshot created\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    marks=""
+    . "$BOOTFN"
+    snapshot_mark "$INSTANCE_X" boxname "$LABEL" "${ENABLED:-1}" "some state" >/dev/null 2>&1
+    mark_taken "$LABEL" && echo TAKEN || echo ABSENT
+  ' 2>&1
+}
+check "rollback: a mark that WAS created is remembered" 0 "TAKEN" \
+  took btrfs pristine INSTANCE_X=inst-x
+check "rollback: a 'dir' skip is NOT remembered (no CoW, no mark)" 0 "ABSENT" \
+  took dir pristine INSTANCE_X=inst-x
+check "rollback: the opt-out knob is NOT remembered" 0 "ABSENT" \
+  took btrfs pristine INSTANCE_X=inst-x ENABLED=0
+check "rollback: a REFUSED create is not remembered (incus said no)" 0 "ABSENT" \
+  took btrfs pristine INSTANCE_X=fail-x
+# One label's mark must not answer for another's.
+check "rollback: marks do not bleed between labels" 0 "ABSENT" \
+  bash -c 'marks=" bootstrapped "; . "'"$BOOTFN"'"; mark_taken pristine && echo TAKEN || echo ABSENT'
+# The call site itself, pinned statically: the hook-failure message offers the
+# restore only under the guard. On a 'dir' host EVERY hook failure reaches this
+# line with no pristine mark, so an unconditional offer is a copy-pasteable
+# command that errors at the one moment the operator is standing there.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "rollback: the hook-failure restore offer is GATED on the mark existing" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -B12 "box restore \$name pristine. is still there" \
+    | grep -q "if mark_taken pristine; then"'
+rm -f "$BOOTFN"
+
+# The label is one-directional and the docs must say so: its PRESENCE means the
+# hook converged untouched, its ABSENCE means nothing at all. Without that
+# sentence a missing mark reads as "unconverged", which is exactly the false
+# coverage #130 warns about.
+check "bootstrapped: 'box help restore' refuses to let absence imply anything" 0 "absence proves NOTHING" \
+  bash -c '"'"$ROOT"'/bin/box" help restore'
+check "bootstrapped: 'box help restore' repeats the off-box blind spot for it too" 0 "cannot undo anything" \
+  bash -c '"'"$ROOT"'/bin/box" help restore'
+check "bootstrapped: 'box help new' documents the mark and the opt-out" 0 "BOX_SNAPSHOT_BOOTSTRAPPED" \
+  bash -c '"'"$ROOT"'/bin/box" help new'
+check "bootstrapped: 'box help snapshot' names the by-hand fallback" 0 "box snapshot work bootstrapped" \
+  bash -c '"'"$ROOT"'/bin/box" help snapshot'
 
 # ---------------------------------------------------------------------------
 # The restricted tier (#74). box_tier() is the decision the whole tier hangs
