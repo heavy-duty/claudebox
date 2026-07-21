@@ -698,7 +698,7 @@ check "bootstrapped: exactly one auto-mark policy — 'incus snapshot create' tw
 
 # The policy half, DRIVEN. Same stub shape as pris() above, one label over.
 BOOTFN="$(mktemp)"
-awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_mark\(\) \{/,/^\}/;/^snapshot_bootstrapped\(\) \{/,/^\}/' \
+awk '/^storage_driver\(\) \{/,/^\}/;/^snapshot_mark\(\) \{/,/^\}/;/^mark_taken\(\)/;/^snapshot_bootstrapped\(\) \{/,/^\}/' \
   "$ROOT/bin/box" > "$BOOTFN"
 check "bootstrapped: the functions extracted from bin/box (guards the awk)" 0 "snapshot_bootstrapped" cat "$BOOTFN"
 check "bootstrapped: the extracted functions are valid bash" 0 "" bash -n "$BOOTFN"
@@ -755,6 +755,58 @@ check "bootstrapped: the opt-out is a per-label knob — PRISTINE=0 does not sil
   boot_took_mark btrfs inst-x BOX_SNAPSHOT_PRISTINE=0
 check "bootstrapped: a failed snapshot warns and returns 0 (never fails a good mint)" 0 "WARNING" \
   boot btrfs fail-x
+
+# --- only offer a rollback that EXISTS -------------------------------------
+# The never-fatal contract means snapshot_mark returns 0 whether it took the
+# mark, skipped it, or was refused — so the exit status cannot answer "is
+# there something to restore?" and any message offering one must ask 'marks'.
+# Driven per path rather than asserted once: the three no-mark paths fail
+# differently and a single case would let the other two regress silently.
+took() { # took <driver> <label> [VAR=VAL...] — did THIS run create the mark?
+  local driver="$1" label="$2"; shift 2
+  # shellcheck disable=SC2016  # the body is the stub's source, expanded by the
+  # inner bash from the environment 'env' sets up — never by this shell.
+  env "$@" DRIVER="$driver" LABEL="$label" BOOTFN="$BOOTFN" bash -c '
+    incus() {
+      case "$*" in
+        "profile device get box-net root pool") printf "boxpool\n" ;;
+        "storage show boxpool")
+          [ "$DRIVER" = none ] && return 1
+          printf "name: boxpool\ndriver: %s\n" "$DRIVER" ;;
+        "storage list --format csv")
+          [ "$DRIVER" = none ] && return 1
+          printf "boxpool,%s,,0,CREATED\n" "$DRIVER" ;;
+        "snapshot create fail-x "*) return 1 ;;
+        "snapshot create "*) printf "STUB: snapshot created\n" ;;
+        *) return 1 ;;
+      esac
+    }
+    marks=""
+    . "$BOOTFN"
+    snapshot_mark "$INSTANCE_X" boxname "$LABEL" "${ENABLED:-1}" "some state" >/dev/null 2>&1
+    mark_taken "$LABEL" && echo TAKEN || echo ABSENT
+  ' 2>&1
+}
+check "rollback: a mark that WAS created is remembered" 0 "TAKEN" \
+  took btrfs pristine INSTANCE_X=inst-x
+check "rollback: a 'dir' skip is NOT remembered (no CoW, no mark)" 0 "ABSENT" \
+  took dir pristine INSTANCE_X=inst-x
+check "rollback: the opt-out knob is NOT remembered" 0 "ABSENT" \
+  took btrfs pristine INSTANCE_X=inst-x ENABLED=0
+check "rollback: a REFUSED create is not remembered (incus said no)" 0 "ABSENT" \
+  took btrfs pristine INSTANCE_X=fail-x
+# One label's mark must not answer for another's.
+check "rollback: marks do not bleed between labels" 0 "ABSENT" \
+  bash -c 'marks=" bootstrapped "; . "'"$BOOTFN"'"; mark_taken pristine && echo TAKEN || echo ABSENT'
+# The call site itself, pinned statically: the hook-failure message offers the
+# restore only under the guard. On a 'dir' host EVERY hook failure reaches this
+# line with no pristine mark, so an unconditional offer is a copy-pasteable
+# command that errors at the one moment the operator is standing there.
+# shellcheck disable=SC2016  # the $-strings are literals in the target file
+check "rollback: the hook-failure restore offer is GATED on the mark existing" 0 "" bash -c '
+  awk "/^cmd_new\(\) \{/,/^\}/" "'"$ROOT"'/bin/box" \
+    | grep -B12 "box restore \$name pristine. is still there" \
+    | grep -q "if mark_taken pristine; then"'
 rm -f "$BOOTFN"
 
 # The label is one-directional and the docs must say so: its PRESENCE means the

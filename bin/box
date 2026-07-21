@@ -9,6 +9,12 @@ root="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 remote=""; mode="auto"; name=""; from=""; template=""; force=0; json=0; want_help=0
 cpu=""; memory=""; disk=""; instance_only=0
 inst=""   # the resolved Incus instance, set by the 'box' precondition
+# Labels snapshot_mark actually CREATED this run, space-separated. Every path
+# through snapshot_mark returns 0 on purpose — the never-fatal contract — so
+# the exit status cannot tell a mark that was taken from one that was skipped
+# (dir pool, knob=0) or refused (incus said no). Anything that offers the
+# operator a mark must ask this, not assume the call happened.
+marks=""
 
 die() { echo "box: $*" >&2; exit 1; }         # 1 = it went wrong
 usage_error() { echo "box: $*" >&2; echo "try 'box help'." >&2; exit 2; }  # 2 = you asked wrong
@@ -1216,8 +1222,14 @@ snapshot_mark() {
     echo "box: the box is fine; it just has no $label mark. The mint continues." >&2
     return 0
   fi
+  marks="$marks $label"
   echo "box: roll back to it any time with:  box restore $name $label"
 }
+
+# Did THIS run actually create <label>? The only honest source for a message
+# that offers a rollback: see 'marks' above for why the return status cannot
+# answer it.
+mark_taken() { case " $marks " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
 # Take the 'pristine' snapshot, or say loudly why not. Default ON: the value
 # of this mark only exists if it is already there on the bad day, and nobody
@@ -1557,7 +1569,17 @@ cmd_new() {
         echo "  and a by-hand re-run happens in a shell it does not watch. Take it yourself once" >&2
         echo "  the role converges, at the moment it is true:" >&2
         echo "  box snapshot $name bootstrapped" >&2
-        echo "box: 'box restore $name pristine' is still there if you would rather start the role over." >&2
+        # Only offer the rollback that EXISTS. Three mints reach this line
+        # with no pristine mark, all by this stack's own design: a 'dir' pool
+        # (skipped), BOX_SNAPSHOT_PRISTINE=0, and a refused create (warned,
+        # mint continued). On a 'dir' host that is EVERY hook failure, and an
+        # operator standing at the one moment this message exists for would
+        # copy-paste a restore that errors. Offering a mark the disk does not
+        # have is the same lie this PR refuses one message earlier, when it
+        # declines to invent a 'bootstrapped' it never watched.
+        if mark_taken pristine; then
+          echo "box: 'box restore $name pristine' is still there if you would rather start the role over." >&2
+        fi
         die "the tenant role did not converge — the box is incomplete, so refusing to call it ready"
       fi
       # The hook RAN and box WATCHED it succeed — so right here the box is
