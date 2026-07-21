@@ -409,8 +409,35 @@ check "drill-recorded: a -dev tree does not even look for the drills dir" 0 "not
   bash "$DRILLED" "$WORK/nope-drills" "$WORK/drill-dev/VERSION"
 
 # --- and the tree under test ----------------------------------------------
-check "drill-recorded: THIS tree passes its own guard" 0 "" \
-  bash "$DRILLED" "$ROOT/drills" "$ROOT/VERSION"
+# The property is that the guard's VERDICT IS CORRECT FOR THIS TREE — not that
+# it always passes. Those come apart on a ceremony tree, and demanding success
+# is wrong there in a way that took a red release PR to notice.
+#
+# A -dev tree is vacuous, so it must pass. A ceremony tree passes only once a
+# human has run the drill and written the record — which is the entire point of
+# the gate. Asserting exit 0 unconditionally therefore made test/release.sh
+# UN-GREENABLE on every release branch before its drill, and reported it as a
+# `release-flow tests` failure rather than as the gate doing its job: the same
+# noise-and-misattribution shape as #146, where a fixture read the repo's real
+# VERSION and only misbehaved on the ceremony tree.
+#
+# So: assert the verdict that this tree's own state entails. Green in all three
+# states — dev, ceremony-without-record, ceremony-with-record — and still red if
+# the guard ever disagrees with the tree in front of it.
+THIS_VER="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+case "$THIS_VER" in
+  *-dev)
+    check "drill-recorded: THIS tree is -dev, and the guard is vacuous on it" 0 "nothing to assert" \
+      bash "$DRILLED" "$ROOT/drills" "$ROOT/VERSION" ;;
+  *)
+    if [ -s "$ROOT/drills/$THIS_VER.md" ]; then
+      check "drill-recorded: THIS ceremony tree HAS its record, and the guard accepts it" 0 "" \
+        bash "$DRILLED" "$ROOT/drills" "$ROOT/VERSION"
+    else
+      check "drill-recorded: THIS ceremony tree has NO record yet, and the guard refuses it" 1 "no drill record" \
+        bash "$DRILLED" "$ROOT/drills" "$ROOT/VERSION"
+    fi ;;
+esac
 
 # drills/ is release evidence and drill/RUNS.md is the harness's own log. The
 # rewrite is only coherent if both keep existing and the docs say which is
