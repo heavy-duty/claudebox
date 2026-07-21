@@ -54,6 +54,42 @@ labels tell you where everything is without opening anything.
 7. **Checks must be green**: `shellcheck` and `bash test/cli.sh` locally
    mirror what CI runs; the multi-user rehearsal runs in CI on a real Incus.
 
+## Changelog entries
+
+Every PR that changes behaviour adds **one line** to `## Unreleased`. One line
+is the whole rule — if it wraps more than twice in your editor, cut it down.
+
+- **Say what changed, and stop.** Why it was wrong, how it was found, what it
+  cost, what it implies — that belongs in the PR body and the commit message,
+  which is where anyone chasing the reasoning already goes. This file answers
+  one question: what is different in this version.
+- **Any word that can be removed, is removed.**
+- **Lead with the surface, not the mechanism.** "`state:needs-human` is set at
+  handoff" beats "the labels workflow now also wakes on `labeled`".
+- **Cite the issue or PR** — `(#141)` — and let the reader follow it for the
+  rest.
+- **Mark a breaking change** with a leading `BREAKING:`.
+- Group under `### Added` / `### Changed` / `### Fixed` / `### Removed`.
+- No bold run-in headings, no sub-paragraphs, no code blocks, no prose essays.
+
+Good:
+
+```markdown
+- `state:needs-human` is set at handoff, not by the cron (#141)
+- An unreadable check rollup no longer reads as "nothing is failing" (#136)
+- BREAKING: `--class human|server` is now `--root-door closed|open` (#77)
+```
+
+Not an entry — that is a PR body:
+
+```markdown
+- **`state:needs-human` no longer waits on the cron to become true** (#141) —
+  the labels workflow now also wakes on `pull_request_target: labeled` and
+  `unlabeled`, and the author sets it themselves when handing a PR over. A
+  review landing was never a trigger. There is no `pull_request_review_target`,
+  and on fork PRs — which is all of them here — ...
+```
+
 ## Releases
 
 A release is a PR, and merging it ships it
