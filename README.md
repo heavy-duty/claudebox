@@ -508,6 +508,39 @@ box version that cloned it) and leaves the lineage keys alone, because the
 clone's disk genuinely did come from that image, template and role. `origin.from`
 records one hop: a clone of a clone names its parent, not its grandparent.
 
+**An import records the trip, and rewrites nothing**
+([#131](https://github.com/heavy-duty/box/issues/131)). Everything `incus
+import` restores is the _artifact's_ truth, so an imported box keeps its mint
+stamp verbatim — the mint time, the box version, the image and the origin
+belong to the originating host and survive the trip on purpose. What `box
+import` adds is the one fact the artifact cannot carry: that the trip happened.
+
+```
+MINTED     2026-06-01T10:00:00Z by box 0.7.0
+IMPORTED   2026-07-20T09:14:03Z by box 0.8.1 (the mint above predates it)
+ORIGIN     clone of work/authed
+```
+
+It is **not** `origin=import`, and the difference is the whole point. `origin`
+answers how the instance came into _being_ — mint or clone — and overwriting it
+would destroy that: the clone above would come back claiming to be an import,
+with nothing left saying it was ever a clone and an `origin.from` naming a
+lineage no key explains. The import is a _third_ fact, orthogonal to the first
+two, so it takes its own keys and leaves every other one alone.
+
+The `IMPORTED` line sits directly under `MINTED` because that adjacency is what
+stops the mint time being misread as this host's. Note what it does not claim:
+box has no record of _which_ host minted the box, and a box can be exported and
+re-imported onto the same host (that is the upgrade flow above), so the line
+states only the ordering — the one thing box actually knows.
+
+**A box can make the trip more than once**, and both ends are kept: the first
+import is pinned forever, the latest is refreshed on every arrival, and a count
+says how many. Last-wins alone would erase the evidence of the earlier trips,
+which is the same mistake `origin=import` makes one level up. (The shape
+follows [heavy-duty/rig#61](https://github.com/heavy-duty/rig/issues/61)'s
+manifest: a birth pair plus a latest pair.)
+
 **Boxes minted before this stamp existed keep working**, under this verb and
 every other — they render as a box with blanks and say `MINTED (not recorded)`
 rather than erroring. `user.box.schema` names the stamp's _shape_ (an integer,

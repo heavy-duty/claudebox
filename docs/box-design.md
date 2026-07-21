@@ -62,7 +62,13 @@ default, that survives `rm`, a host teardown, an upgrade, a move. The split
 of truths is the design: everything `incus import` restores is the artifact's
 (disk, config, snapshots); everything box re-stamps on import is the current
 host's (the `user.box=1` boundary tag, the `box-net` placement, a fresh
-machine identity via the same `reset_identity` a clone gets). Auth state
+machine identity via the same `reset_identity` a clone gets, and the record
+that the trip happened). That last one is #131, and it is deliberately *not*
+`origin=import`: `origin` says how the instance came into **being** — mint or
+clone — and the import is a third, orthogonal fact. Overwriting `origin` would
+make an exported clone come back claiming to be an import, with its
+`origin.from` lineage left unreadable, so the import gets its own keys and the
+artifact's mint stamp survives the trip untouched. Auth state
 rides along deliberately — and because scrubbing a disk image is a promise
 tarball surgery cannot keep, export shouts that the file is a credential
 instead of pretending to sanitize it.

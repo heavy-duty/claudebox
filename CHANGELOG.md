@@ -7,6 +7,32 @@ which records not just what changed but what each drill run proved.
 
 ### Added
 
+- **`box import` records that the trip happened — without rewriting who the
+  box was** (#131) — an imported box kept the artifact's mint stamp verbatim
+  (#103), which is correct: the mint time, box version, image and origin
+  belong to the originating host and should survive the trip. But nothing
+  recorded the *import*, so an imported box was indistinguishable from one
+  minted here at the artifact's mint time. It now stamps `user.box.imported`
+  / `user.box.imported.by` (the **first** trip, pinned once and never
+  rewritten), `user.box.imported.last` / `user.box.imported.last.by` (the
+  **latest**, refreshed on every arrival) and `user.box.imported.count` — a
+  birth pair plus a latest pair, the shape heavy-duty/rig#61 settled on for
+  the same repeated-event question, because last-wins alone would erase the
+  evidence of every earlier trip. This is deliberately **not**
+  `origin=import`: `origin` answers how the instance came into *being* — mint
+  or clone — and overwriting it would make an exported clone come back
+  claiming to be an import, with nothing left saying it was ever a clone and
+  an `origin.from` naming a lineage no key explains any more. The import is a
+  *third* fact, orthogonal to the first two, so it takes its own keys and
+  every key the artifact carried is left exactly as it arrived. `box info`
+  prints an `IMPORTED` line directly under `MINTED`, because that adjacency is
+  what stops the artifact's mint time being misread as this host's; it states
+  only the ordering (`the mint above predates it`) and never claims another
+  host, since box has no record of which host minted a box and a re-import
+  onto the *same* host is the documented upgrade flow. `user.box.schema` does
+  not move — adding a key is not a breaking change — and is not written by the
+  import at all, so a legacy artifact with no stamp still reads as
+  `MINTED (not recorded)` rather than acquiring a shape it does not have.
 - **A minted box records how it was minted, and `box info` reads it back**
   (#103) — `cmd_new` knew a great deal at the moment it launched and wrote
   three `user.*` keys, dropping the rest on the floor: the box version that

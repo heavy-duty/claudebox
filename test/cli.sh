@@ -1567,6 +1567,277 @@ one_version_reader() {
 check "the tree's VERSION has a single reader, box_version() (#103)" 0 "" \
   one_version_reader
 
+# ---------------------------------------------------------------------------
+# The import event (#131) — DRIVEN, on both halves, like the mint stamp above.
+#
+# An imported box keeps the artifact's mint stamp verbatim: the mint time, the
+# box version, the image and the origin belong to the originating host and
+# survive the trip on purpose (#129). What was missing is any record that the
+# trip HAPPENED — and the obvious fix, 'origin=import', is the wrong one: it
+# would overwrite whether the thing was a mint or a clone before it was
+# exported, and leave 'origin.from' naming a lineage nothing explains. So the
+# import takes its own keys, and the assertions that matter most here are the
+# ABSENCE ones: every key the artifact carried must come out the far side
+# untouched.
+#
+# The write half needs its own shim, because cmd_import reads 'incus config
+# show <target>' as the name-collision guard and must see the name FREE — the
+# opposite answer from the one the mint shim gives.
+ISHIM="$(mktemp -d)"; IWORK="$(mktemp -d)"
+cat > "$ISHIM/incus" <<'SHIM'
+#!/usr/bin/env bash
+# Fake incus for the import drive. FAKE_CFG answers 'config get' with a file
+# of "<key> <value>" lines — it stands in for the config that rode inside the
+# artifact and that 'incus import' has just restored.
+printf 'incus %s\n' "$*" | tr '\n' ' ' >> "$FAKE_INCUS_LOG"
+printf '\n' >> "$FAKE_INCUS_LOG"
+case "$*" in
+  # Nothing exists under that name: the collision guard passes. The same call
+  # enumerates volatile hwaddrs later, where an empty answer is also correct.
+  "config show "*) exit 1 ;;
+  "config get "*)
+    [ -n "${FAKE_CFG:-}" ] || exit 0
+    key="$*"; key="${key##* }"
+    awk -v k="$key" '$1 == k { $1 = ""; sub(/^ /, ""); print }' "$FAKE_CFG" ;;
+  *"--columns P") printf '"box-net"\n' ;;   # already on the contract, no re-home
+esac
+exit 0
+SHIM
+chmod +x "$ISHIM/incus"
+
+# A real tarball, because cmd_import reads the instance name out of the
+# artifact with tar before incus is ever called — a stub cannot fake that.
+ARTIFACT="$IWORK/work-20260718T120000Z.tar.gz"
+mkdir -p "$IWORK/backup" && printf 'name: work\n' > "$IWORK/backup/index.yaml"
+tar -czf "$ARTIFACT" -C "$IWORK" backup/index.yaml
+
+importbox() {  # importbox <logfile> <cfg-file|""> — the real box, shimmed
+  local log="$1" cfg="$2"
+  : > "$log"
+  env FAKE_INCUS_LOG="$log" FAKE_CFG="$cfg" PATH="$ISHIM:$PATH" \
+    "$BOX" import "$ARTIFACT" </dev/null >"$log.out" 2>&1
+  local rc=$?
+  cat "$log.out"
+  return "$rc"
+}
+# One matcher per surface, so an absence assertion is a plain non-zero exit.
+# 'config set' is the ONLY call that can write a key, so grepping it is what
+# separates "box stamped this" from "the artifact carried it".
+import_set() { grep -F 'config set' "$1" | grep -qE "$2"; }
+
+# --- the first trip ---------------------------------------------------------
+# The artifact of a box that was MINTED elsewhere and never imported before.
+MINTED_ART="$IWORK/minted.cfg"
+cat > "$MINTED_ART" <<'CFG'
+user.box 1
+user.box.schema 1
+user.box.created 2026-06-01T10:00:00Z
+user.box.version 0.7.0
+user.box.template claude
+user.box.user claude
+user.box.origin mint
+CFG
+ILOG="$IWORK/import.log"
+check "import: a shimmed 'box import' runs to completion (#131)" 0 "imported work" \
+  importbox "$ILOG" "$MINTED_ART"
+check "import: records WHEN the box landed here, UTC ISO 8601 (#131)" 0 "" \
+  import_set "$ILOG" 'user\.box\.imported\.last=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z'
+check "import: records WHICH box version performed the import (#131)" 0 "" \
+  import_set "$ILOG" "user\\.box\\.imported\\.last\\.by=$(cat "$ROOT/VERSION")"
+check "import: pins the FIRST trip as its own key (birth pair, rig#61) (#131)" 0 "" \
+  import_set "$ILOG" 'user\.box\.imported=[0-9]{4}-'
+check "import: ...with the box version that made it (#131)" 0 "" \
+  import_set "$ILOG" "user\\.box\\.imported\\.by=$(cat "$ROOT/VERSION")"
+check "import: counts the trip — the first one is 1 (#131)" 0 "" \
+  import_set "$ILOG" 'user\.box\.imported\.count=1'
+
+# --- the absence assertions: this is the whole point of the issue -----------
+# 'origin=import' is the road not taken. 'origin' says how the instance came
+# into BEING — mint or clone — and the import is a third, orthogonal fact.
+check "import: does NOT overwrite origin — an import is not a coming-into-being (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.origin='
+check "import: does NOT restamp the mint time — it is the origin host's (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.created='
+check "import: does NOT restamp the box version that MINTED it (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.version='
+check "import: does NOT restamp the template — lineage rides in the artifact (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.template='
+check "import: does NOT restamp the image the artifact was built on (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.image'
+check "import: does NOT restamp the rig that converged it (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.rig\.'
+# Adding a key is not a breaking change (#103's schema contract), so the schema
+# does not move — and is not written here at all: stamping schema=1 onto a
+# legacy artifact would claim a mint stamp shape it does not have.
+check "import: does NOT touch user.box.schema — adding a key is not breaking (#131)" 1 "" \
+  import_set "$ILOG" 'user\.box\.schema'
+# Before the start, like the clone re-stamp: an imported box is never
+# observable without the record of how it got here. Fail-closed — a missing
+# line makes the arithmetic fail, not pass.
+import_stamp_precedes_start() {
+  local set start
+  set="$(grep -n 'config set .* user.box.imported.last=' "$1" | head -1 | cut -d: -f1)"
+  start="$(grep -n '^incus start ' "$1" | head -1 | cut -d: -f1)"
+  [ -n "$set" ] && [ -n "$start" ] && [ "$set" -lt "$start" ]
+}
+check "import: the import stamp precedes the start (#131)" 0 "" \
+  import_stamp_precedes_start "$ILOG"
+
+# --- a CLONE that was exported and re-imported ------------------------------
+# The case that makes 'origin=import' indefensible: it would come back
+# claiming to be an import, with nothing left saying it was ever a clone and
+# an origin.from pointing at a lineage no key explains.
+CLONE_ART="$IWORK/clone-artifact.cfg"
+{ grep -v '^user.box.origin ' "$MINTED_ART"
+  echo 'user.box.origin clone'
+  echo 'user.box.origin.from work/authed'; } > "$CLONE_ART"
+CLOG="$IWORK/clone-import.log"
+check "import: an exported CLONE imports cleanly (#131)" 0 "imported work" \
+  importbox "$CLOG" "$CLONE_ART"
+check "import: ...and is still a clone afterwards — origin untouched (#131)" 1 "" \
+  import_set "$CLOG" 'user\.box\.origin='
+check "import: ...and still names the box it was cloned from (#131)" 1 "" \
+  import_set "$CLOG" 'user\.box\.origin\.from'
+check "import: ...while still recording that the trip happened (#131)" 0 "" \
+  import_set "$CLOG" 'user\.box\.imported\.last='
+
+# --- the second trip: first-wins, last-wins, and a count --------------------
+# The artifact of a box that has already been imported twice. Last-wins alone
+# would erase the evidence of the first trip, which is the same mistake
+# 'origin=import' makes one level up.
+TWICE="$IWORK/twice.cfg"
+{ cat "$MINTED_ART"
+  echo 'user.box.imported 2026-06-15T08:00:00Z'
+  echo 'user.box.imported.by 0.7.0'
+  echo 'user.box.imported.last 2026-07-01T09:00:00Z'
+  echo 'user.box.imported.last.by 0.8.0'
+  echo 'user.box.imported.count 2'; } > "$TWICE"
+RLOG="$IWORK/reimport.log"
+check "re-import: an already-imported artifact imports again (#131)" 0 "imported work" \
+  importbox "$RLOG" "$TWICE"
+check "re-import: the FIRST trip is pinned, never rewritten (#131)" 1 "" \
+  import_set "$RLOG" 'user\.box\.imported=[0-9]'
+check "re-import: ...nor is the version that made it (#131)" 1 "" \
+  import_set "$RLOG" 'user\.box\.imported\.by='
+check "re-import: the LATEST trip IS refreshed (#131)" 0 "" \
+  import_set "$RLOG" 'user\.box\.imported\.last=[0-9]{4}-'
+check "re-import: ...by this box version (#131)" 0 "" \
+  import_set "$RLOG" "user\\.box\\.imported\\.last\\.by=$(cat "$ROOT/VERSION")"
+check "re-import: the count advances 2 → 3 (#131)" 0 "" \
+  import_set "$RLOG" 'user\.box\.imported\.count=3'
+# A count that is not an integer (hand-edited config, a foreign key) must not
+# fail an import that has already happened — arithmetic under 'set -e' would.
+BADN="$IWORK/badcount.cfg"
+{ cat "$MINTED_ART"; echo 'user.box.imported.count not-a-number'; } > "$BADN"
+BLOG="$IWORK/badcount.log"
+check "re-import: a non-integer count does not fail the import (#131)" 0 "imported work" \
+  importbox "$BLOG" "$BADN"
+check "re-import: ...it restarts the count rather than inventing a total (#131)" 0 "" \
+  import_set "$BLOG" 'user\.box\.imported\.count=1'
+# A leading zero is the hole the non-integer fixture CANNOT catch: '08' passes
+# an -eq guard (test parses decimal) and then dies in arithmetic, which reads
+# it as octal. That abort would land after the physical 'incus import' and
+# before the stamp, the placement fix and the start — the exact window the
+# degrade-never-die contract exists to protect. A zero-padded count is not
+# exotic either: it is what any external tool that formats numbers writes.
+ZEROPAD="$IWORK/zeropad.cfg"
+{ cat "$MINTED_ART"; echo 'user.box.imported.count 08'; } > "$ZEROPAD"
+ZLOG="$IWORK/zeropad.log"
+check "re-import: a zero-padded count does not fail the import (#131)" 0 "imported work" \
+  importbox "$ZLOG" "$ZEROPAD"
+# Counted as decimal 8, not degraded to 0 and not read as octal: '08' is a
+# real previous total, so the honest next value is 9.
+check "re-import: ...and counts it as decimal, so 08 advances to 9 (#131)" 0 "" \
+  import_set "$ZLOG" 'user\.box\.imported\.count=9'
+
+# --- a legacy artifact with no stamp at all ---------------------------------
+# A pre-stamp box export, or a hand-rolled 'incus export' of an unmanaged VM.
+# It must import cleanly, get the boundary tag, get the import record — and NOT
+# acquire a fabricated mint, which is what 'not recorded' exists to say.
+LLOG="$IWORK/legacy-import.log"
+check "import: a legacy artifact with NO stamp imports cleanly (#131)" 0 "imported work" \
+  importbox "$LLOG" /dev/null
+check "import: ...it still gets the boundary tag (importing is minting) (#131)" 0 "" \
+  grep -qF 'config set work user.box=1' "$LLOG"
+check "import: ...and the import record (#131)" 0 "" \
+  import_set "$LLOG" 'user\.box\.imported\.last='
+check "import: ...but NO invented mint time (#131)" 1 "" \
+  import_set "$LLOG" 'user\.box\.created='
+check "import: ...and no invented mint version either (#131)" 1 "" \
+  import_set "$LLOG" 'user\.box\.version='
+
+# --- the read half: 'box info' must not let the mint be misread -------------
+# The whole hazard: MINTED carries a time that is deliberately NOT this host's,
+# and a reader who meets it alone will take it for one. The IMPORTED line sits
+# directly under it and states the only thing box actually knows — the
+# ORDERING. It does not claim another host: a box can be exported and
+# re-imported onto the SAME host (#66's upgrade advice), and nothing records
+# which host minted it.
+IMPCFG="$MWORK/imported.cfg"
+{ cat "$STAMPED"
+  echo 'user.box.imported 2026-07-20T09:14:03Z'
+  echo 'user.box.imported.by 0.8.1'
+  echo 'user.box.imported.last 2026-07-20T09:14:03Z'
+  echo 'user.box.imported.last.by 0.8.1'
+  echo 'user.box.imported.count 1'; } > "$IMPCFG"
+check "info: surfaces when the box arrived, and by which box (#131)" \
+  0 "IMPORTED   2026-07-20T09:14:03Z by box 0.8.1" infobox "$IMPCFG"
+check "info: ...and says the mint above is NOT this arrival (#131)" \
+  0 "the mint above predates it" infobox "$IMPCFG"
+check "info: ...while the artifact's mint time still reads unchanged (#131)" \
+  0 "MINTED     2026-07-19T14:22:07Z by box 0.8.0" infobox "$IMPCFG"
+# It must not invent a location for the mint — box has no record of one.
+check "info: ...and never claims the mint happened on another host (#131)" 1 "" \
+  info_has "$IMPCFG" 'another host|elsewhere|remote host'
+# A single trip prints ONE line: both pairs hold the same values and a
+# 'first was...' continuation would be noise.
+check "info: a single import prints no redundant 'first was' line (#131)" 1 "" \
+  info_has "$IMPCFG" 'the first was'
+
+# A box that made the trip more than once shows both ends and the count.
+IMPCFG2="$MWORK/imported-twice.cfg"
+{ cat "$STAMPED"
+  echo 'user.box.imported 2026-06-15T08:00:00Z'
+  echo 'user.box.imported.by 0.7.0'
+  echo 'user.box.imported.last 2026-07-20T09:14:03Z'
+  echo 'user.box.imported.last.by 0.8.1'
+  echo 'user.box.imported.count 3'; } > "$IMPCFG2"
+check "info: a repeat traveller shows the latest trip (#131)" \
+  0 "IMPORTED   2026-07-20T09:14:03Z by box 0.8.1" infobox "$IMPCFG2"
+check "info: ...and the first one, with the count (#131)" \
+  0 "import 3 — the first was 2026-06-15T08:00:00Z by box 0.7.0" infobox "$IMPCFG2"
+
+# An imported CLONE reads as a clone that also travelled — the two facts sit
+# side by side, neither having eaten the other.
+IMPCLONE="$MWORK/imported-clone.cfg"
+# mode.asked is dropped, not merely unasserted: since #129 the clone path
+# clears it (nobody asked THIS box anything), so a fixture built from the mint
+# shape that kept the key would describe a box the clone path cannot produce.
+# No assertion here reads it — which is exactly why it would rot unnoticed.
+{ grep -v '^user.box.origin ' "$IMPCFG" | grep -v '^user.box.mode.asked '
+  echo 'user.box.origin clone'
+  echo 'user.box.origin.from work/authed'; } > "$IMPCLONE"
+check "info: an imported clone is still a clone (#131)" \
+  0 "ORIGIN     clone of work/authed" infobox "$IMPCLONE"
+check "info: ...and still says it was imported (#131)" 0 "IMPORTED" infobox "$IMPCLONE"
+
+# A box that was never imported says nothing at all — no empty IMPORTED line,
+# the same rule every other key in the block follows.
+check "info: a never-imported box prints no IMPORTED line (#131)" 1 "" \
+  info_has "$STAMPED" '^IMPORTED'
+# And a legacy box with no stamp whatsoever still reads as 'not recorded'.
+check "info: a stampless box still says the mint was not recorded (#131)" \
+  0 "predates the mint stamp" infobox "$LEGACY"
+check "info: ...and prints no IMPORTED line for a key it does not have (#131)" 1 "" \
+  info_has "$LEGACY" '^IMPORTED'
+
+check "help import: names the import record it writes (#131)" 0 "import EVENT" \
+  "$BOX" help import
+check "help import: says the mint stamp is NOT rewritten (#131)" 0 "does not overwrite" \
+  "$BOX" help import
+
+rm -rf "$ISHIM" "$IWORK"
+
 rm -rf "$MSHIM" "$MWORK"
 
 # The rehearsal itself stays runnable: syntax-checked here, run on real hosts.
