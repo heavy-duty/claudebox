@@ -1708,8 +1708,14 @@ cmd_import() {
   # config, a foreign user.box.imported.count) must never fail an import that
   # has already happened — arithmetic on it under 'set -e' would. Same side the
   # schema check in box_provenance() falls on: degrade, never die.
-  [ -n "$prev_n" ] && [ "$prev_n" -eq "$prev_n" ] 2>/dev/null || prev_n=0
-  n=$((prev_n + 1)); now="$(mint_time)"
+  # Two holes, and they have to close together. `[ 08 -eq 08 ]` PASSES — test
+  # parses decimal — and then `$((08 + 1))` aborts with "value too great for
+  # base", because arithmetic reads a leading zero as octal. That abort lands
+  # after the physical 'incus import' and before the stamp, the placement fix
+  # and the start: precisely the window this guard exists to protect. So the
+  # digits-only case closes sign and garbage, and 10# forces base ten.
+  case "$prev_n" in ''|*[!0-9]*) prev_n=0 ;; esac
+  n=$((10#$prev_n + 1)); now="$(mint_time)"
   local istamp=(
     user.box.imported.last="$now"
     user.box.imported.last.by="$(box_version)"

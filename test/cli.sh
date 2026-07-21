@@ -1558,6 +1558,21 @@ check "re-import: a non-integer count does not fail the import (#131)" 0 "import
   importbox "$BLOG" "$BADN"
 check "re-import: ...it restarts the count rather than inventing a total (#131)" 0 "" \
   import_set "$BLOG" 'user\.box\.imported\.count=1'
+# A leading zero is the hole the non-integer fixture CANNOT catch: '08' passes
+# an -eq guard (test parses decimal) and then dies in arithmetic, which reads
+# it as octal. That abort would land after the physical 'incus import' and
+# before the stamp, the placement fix and the start — the exact window the
+# degrade-never-die contract exists to protect. A zero-padded count is not
+# exotic either: it is what any external tool that formats numbers writes.
+ZEROPAD="$IWORK/zeropad.cfg"
+{ cat "$MINTED_ART"; echo 'user.box.imported.count 08'; } > "$ZEROPAD"
+ZLOG="$IWORK/zeropad.log"
+check "re-import: a zero-padded count does not fail the import (#131)" 0 "imported work" \
+  importbox "$ZLOG" "$ZEROPAD"
+# Counted as decimal 8, not degraded to 0 and not read as octal: '08' is a
+# real previous total, so the honest next value is 9.
+check "re-import: ...and counts it as decimal, so 08 advances to 9 (#131)" 0 "" \
+  import_set "$ZLOG" 'user\.box\.imported\.count=9'
 
 # --- a legacy artifact with no stamp at all ---------------------------------
 # A pre-stamp box export, or a hand-rolled 'incus export' of an unmanaged VM.
@@ -1619,7 +1634,11 @@ check "info: ...and the first one, with the count (#131)" \
 # An imported CLONE reads as a clone that also travelled — the two facts sit
 # side by side, neither having eaten the other.
 IMPCLONE="$MWORK/imported-clone.cfg"
-{ grep -v '^user.box.origin ' "$IMPCFG"
+# mode.asked is dropped, not merely unasserted: since #129 the clone path
+# clears it (nobody asked THIS box anything), so a fixture built from the mint
+# shape that kept the key would describe a box the clone path cannot produce.
+# No assertion here reads it — which is exactly why it would rot unnoticed.
+{ grep -v '^user.box.origin ' "$IMPCFG" | grep -v '^user.box.mode.asked '
   echo 'user.box.origin clone'
   echo 'user.box.origin.from work/authed'; } > "$IMPCLONE"
 check "info: an imported clone is still a clone (#131)" \
