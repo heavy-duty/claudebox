@@ -5,6 +5,8 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+## 0.9.0 — 2026-07-21
+
 ### Added
 
 - `box import` stamps the trip, leaving the artifact's own mint stamp intact
