@@ -88,6 +88,23 @@ jobs:
       # the fallback it resolves to the pushed branch, whose merge base with
       # HEAD is HEAD or its parent: containment passes vacuously, exactly as the
       # old `if` intended, while uniqueness now runs on every push.
+      # ...and a RELEASE tree has a drill record. Its own step for the same
+      # reason as the two above — when it goes red the log names the invariant
+      # that broke — and a third invariant again: armed is about the shape of
+      # the changelog, monotonic about the diff, this one about whether the
+      # ritual CONTRIBUTING.md hangs on the release PR actually happened.
+      #
+      # NOT pull-request-only, and for the same reasoning the monotonic guard
+      # was un-gated in #143: the release does not finish at the PR. The merge
+      # that publishes it is a PUSH to main carrying the same bare VERSION,
+      # and it is release.yml's trigger — so a check that only ever ran on the
+      # PR would leave the tree that actually ships unasserted, and any bare
+      # VERSION reaching main by another route (a direct push, a backfill,
+      # the manual tag path) unasserted forever. On a -dev tree, which is
+      # every ordinary push and PR, the script no-ops green by design, so
+      # running it everywhere costs nothing and closes the route.
+      - name: a release tree has a drill record
+        run: bash .github/scripts/drill-recorded.sh
       - name: no shipped changelog heading was deleted or duplicated
         env:
           CHANGELOG_MONOTONIC_STRICT: '1'
