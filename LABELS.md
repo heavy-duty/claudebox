@@ -36,7 +36,7 @@ PR carries as many as apply.
 | `blocker:conflict` | `#B60205` | GitHub says `CONFLICTING` — the agent owes a **rebase** | it merges cleanly |
 | `blocker:ci-red` | `#B60205` | a check failed — the agent owes a **fix**, which a rebase will not provide | checks are green |
 | `blocker:unrequested` | `#E99695` | this head has no verdict from somebody — never reviewed, or staled by a push — and **nobody was asked** for one | reviews are requested |
-| `blocker:drill-pending` | `#B60205` | a `release` PR whose version has no drill record in [drill/RUNS.md](drill/RUNS.md) — the ceremony is **correct but unevidenced** | the drill is run and recorded (or a waiver is recorded) under `## Release drill — X.Y.Z` |
+| `blocker:drill-pending` | `#B60205` | a `release` PR whose version has no drill record at [`drills/X.Y.Z.md`](drills/README.md) — the ceremony is **correct but unevidenced** | the drill is run and recorded (or a waiver is recorded) at `drills/X.Y.Z.md` |
 
 `blocker:drill-pending` is the one blocker that says the diff is *fine*. The
 version is stamped, the changelog is right, CI's other guards are green — what
