@@ -343,6 +343,17 @@ T="$(dtree drill-empty 0.9.0 '## Release drill — 0.9.0 — 2026-07-21' '' '' '
 check "drill-recorded: a bare VERSION whose record is present but EMPTY fails" \
   1 "no drill record" drilled "$T"
 
+# ...and WHITESPACE is not evidence either. The first cut extracted with
+# `sed '/./,$!d'`, where `.` matches a space — so a heading followed by one
+# tab passed the guard while the failure text promised "at least one non-blank
+# line". An evidence-free release for the price of an invisible character, on
+# the one check whose entire job is to demand evidence. All three reviewers on
+# #149 found it independently, which is the level of scrutiny it deserved and
+# not a level it should ever need again.
+T="$(dtree drill-blank 0.9.0 '## Release drill — 0.9.0 — 2026-07-21' '   ' '	' '' '## Run history' '' '- older prose')"
+check "drill-recorded: a record body of only spaces and tabs fails (#149)" \
+  1 "no drill record" drilled "$T"
+
 # --- the version is matched WHOLE, both directions -------------------------
 # release-notes.sh's trap, in a new file: a substring match would let an rc
 # drill stand in for the release it was a candidate for, which is the one

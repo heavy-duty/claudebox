@@ -79,14 +79,25 @@ esac
 # The em dash is passed IN as a variable rather than written into the awk
 # program, because '\x' escapes in an awk string are a gawk extension and CI
 # runs on ubuntu-latest, where awk is mawk.
+#
+# `grab && NF` is the non-blank rule, and it is load-bearing rather than
+# tidiness. NF is 0 on a line that is empty OR contains only whitespace, so
+# `record` ends up non-empty exactly when a line with actual content exists.
+# The first cut of this piped through `sed '/./,$!d'` instead, which drops
+# leading blank lines but keeps a line of spaces — `.` matches a space. A
+# heading followed by nothing but a tab therefore satisfied the guard and
+# shipped an evidence-free release, while the failure text below promised "at
+# least one non-blank line". The implementation was looser than its own
+# contract, which on a gate is the whole ballgame: the bypass costs one
+# invisible character. Caught by all three reviewers on #149, independently.
 record="$(awk -v ver="$ver" -v dash="—" '
   /^## / {
     grab = ($2 == "Release" && $3 == "drill" && $4 == dash && $5 == ver \
             && (NF == 5 || $6 == dash))
     next
   }
-  grab { print }
-' "$runs" | sed '/./,$!d')"
+  grab && NF { print }
+' "$runs")"
 
 if [ -z "$record" ]; then
   cat >&2 <<EOF
