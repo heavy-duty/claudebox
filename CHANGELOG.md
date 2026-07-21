@@ -291,6 +291,9 @@ which records not just what changed but what each drill run proved.
 
 ### Fixed
 
+- `test/release.sh` is green on the release ceremony's own tree: its monotonic
+  fixtures read the repo's real `VERSION` instead of their own
+
 - **`changelog-monotonic.sh` no longer lets a duplicate heading through on the
   paths where it cannot see the base** (#143) — the uniqueness half is a
   property of HEAD alone, but it sat downstream of the base-ref, merge-base and

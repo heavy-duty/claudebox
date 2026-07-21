@@ -301,14 +301,24 @@ check "changelog-monotonic: runnable bash" 0 "" bash -n "$MONO"
 
 # grepo <name> <base-changelog-lines...> — a git repo whose `main` carries the
 # given changelog, left checked out on a branch `pr` off it. Prints the dir.
+#
+# It carries its own VERSION, like tree() above, so the checks that run
+# changelog-armed.sh against these fixtures read a version that belongs to the
+# FIXTURE. Reaching for the repo's real VERSION instead makes those checks pass
+# or fail on what box happens to be versioned at today: bare (the release
+# ceremony's own tree) sends changelog-armed.sh down its bare branch, where it
+# demands a section for THAT version in a fixture changelog that has never
+# heard of it. `-dev` here because every one of these fixtures tops out at
+# '## Unreleased', which is what a development tree is required to carry.
 grepo() {
   local d="$WORK/$1"; shift
   mkdir -p "$d"
   git -C "$d" init -q -b main
   git -C "$d" config user.email test@example.invalid
   git -C "$d" config user.name test
+  printf '%s\n' '0.8.1-dev' > "$d/VERSION"
   { echo "# Changelog"; echo; printf '%s\n' "$@"; } > "$d/CHANGELOG.md"
-  git -C "$d" add CHANGELOG.md
+  git -C "$d" add CHANGELOG.md VERSION
   git -C "$d" commit -qm base
   git -C "$d" checkout -q -b pr
   echo "$d"
@@ -333,7 +343,7 @@ check "monotonic: ...and why nothing else says so (git merges it cleanly)" 1 "gi
 # Pinned here so a future 'just widen changelog-armed.sh' cannot quietly
 # delete the reason this script exists.
 check "monotonic: ...on a tree changelog-armed.sh calls FINE (the #122 gap)" 0 "agrees" \
-  bash "$ARMED" "$G/CHANGELOG.md" "$ROOT/VERSION"
+  bash "$ARMED" "$G/CHANGELOG.md" "$G/VERSION"
 
 # --- the #118 incident as it ACTUALLY happened: a DUPLICATED heading -------
 # The deletion case above is the near-miss. What the bad rebase really produced
@@ -354,7 +364,7 @@ check "monotonic: ...on a tree where NOTHING was deleted (containment is blind)"
   bash -c 'cd "$1" && bash "$2" main 2>&1 | grep -q "DELETES release heading"' _ "$G" "$MONO"
 # And, as with the deletion case, the other guard calls this tree fine.
 check "monotonic: ...on a tree changelog-armed.sh calls FINE" 0 "agrees" \
-  bash "$ARMED" "$G/CHANGELOG.md" "$ROOT/VERSION"
+  bash "$ARMED" "$G/CHANGELOG.md" "$G/VERSION"
 
 # --- the release ceremony's stamp: an ADD, never a removal -----------------
 # '## Unreleased' -> '## 0.8.1 — DATE' adds 0.8.1 and removes no X.Y.Z
