@@ -296,6 +296,21 @@ there is no flag for a network or a security key, on purpose.
 BOX_LAUNCH_TIMEOUT=<seconds> (default 600) bounds the 'incus launch' call —
 a launch that overruns it fails loudly instead of hanging forever (#93).
 
+Every fresh mint marks a snapshot called 'pristine' (#104) at the one moment
+it is true: after cloud-init, before rig converges anything. That is the
+guest as pristine Debian plus box's thin seed, and it is what
+
+  box restore <box> pristine
+
+rolls back to — undoing the tenant role and everything done since, without
+paying a re-mint. It is an UNDO, not a backup: 'box rm' deletes a box and
+every snapshot it has, so 'box export' remains the only state that outlives
+the box. A --from clone takes no 'pristine' of its own — it has no pristine
+moment; it inherits the source's snapshots (copying a box) or starts with
+none (copying a snapshot). On a 'dir'-backend host, where a snapshot is a
+full copy rather than a CoW mark, the mint skips it and says so.
+BOX_SNAPSHOT_PRISTINE=0 skips it anywhere.
+
   box new --name scratch                     # blank, the default
   box new --name work --template claude-box
   box new --name lean --template claude-box --cpu 2 --memory 3GiB
@@ -377,6 +392,13 @@ label defaults to manual-<epoch>; 'box info <box>' shows the labels you
 have.
 
   box snapshot work authed
+
+One label is taken for you: every fresh mint marks 'pristine' after
+cloud-init and before rig's tenant role runs (#104) — see 'box help restore'.
+
+Snapshots do not outlive their box: 'box rm' deletes a box and every
+snapshot it has. They are an undo, not a backup — 'box export' is the
+durable path.
 EOF
 ;;
     restore) cat <<'EOF'
@@ -385,6 +407,22 @@ that snapshot is lost. 'box info <box>' lists the labels.
 
   box restore work authed
   box restore work authed --force
+  box restore work pristine
+
+'pristine' is the one label box takes for you (#104): every fresh mint marks
+it after cloud-init and before rig converges the tenant role, so it is the
+guest as pristine Debian plus box's thin seed. Restoring it is the answer to
+"I broke this box" for every tenant role — everything 'rig bootstrap
+<tenant>' does is box-local and file-shaped, so a filesystem rollback undoes
+all of it, without a ~10-minute re-mint.
+
+What it does NOT undo is anything that left the box: a tailnet join, a
+GitHub runner registration, a pushed commit. Those are off-box records a
+filesystem rollback cannot reach (heavy-duty/rig#62). And 'pristine' is not
+a backup — it dies with the box on 'box rm'; 'box export' is what survives.
+
+A box minted with --from has no 'pristine' of its own unless it inherited
+one from its source, because a clone has no pristine moment to capture.
 
 Destructive, so it asks first — naming the snapshot it is rolling back to,
 because the whole risk is picking the wrong label. --force (-f) skips the
@@ -1052,6 +1090,77 @@ cmd_templates() {
 # thing on every host that reads it back.
 mint_time() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# Which storage driver is under this box? The placement contract answers it:
+# every box launches with --profile box-net, and that profile hardcodes the
+# root disk's pool (profiles/box-net.yaml), so the pool is not a guess — it is
+# read back from the profile that actually placed the instance, and only falls
+# back to the name setup-host.sh creates. Two probes for the driver because
+# the tiers see storage differently: 'incus storage show' is the admin read
+# (the same line setup-host.sh:297 prints), 'incus storage list --format csv'
+# is the one a restricted user's incus-user proxy is likelier to answer.
+# Prints the driver, or nothing when neither probe answers.
+storage_driver() {
+  local pool driver
+  pool="$(incus profile device get box-net root pool 2>/dev/null || true)"
+  [ -n "$pool" ] || pool=default
+  # '|| true' on all three probes, not just the first. A refusal here is an
+  # ANSWER ("this tier cannot read the pool"), never an error — this function
+  # must never be the thing that kills a mint. Today the two pipelines are
+  # safe only by accident: command substitution strips errexit, so a failing
+  # 'incus storage show' under pipefail falls through to the fallback instead
+  # of aborting. Add 'shopt -s inherit_errexit' to this file — exactly the
+  # robustness tweak #107 describes sailing through review — and that accident
+  # reverses into a fatal abort mid-mint, inside the function whose contract
+  # is NEVER fatal. Make the three probes read alike and depend on nothing.
+  driver="$(incus storage show "$pool" 2>/dev/null | awk '/^driver:/ {print $2; exit}' || true)"
+  [ -n "$driver" ] || driver="$(incus storage list --format csv 2>/dev/null \
+    | awk -F, -v p="$pool" '$1 == p {print $2; exit}' || true)"
+  printf '%s' "$driver"
+}
+
+# Take the 'pristine' snapshot, or say loudly why not. Default ON: the value
+# of this mark only exists if it is already there on the bad day, and nobody
+# takes it by hand at the one moment it is true. The escape hatch is the
+# BOX_LAUNCH_TIMEOUT shape — an environment knob, not another flag on 'new'.
+snapshot_pristine() {
+  local instance="$1" name="$2" driver
+  if [ "${BOX_SNAPSHOT_PRISTINE:-1}" = 0 ]; then
+    echo "box: skipping the 'pristine' snapshot (BOX_SNAPSHOT_PRISTINE=0)."
+    return 0
+  fi
+  driver="$(storage_driver)"
+  # On btrfs (the deliberate default, host/setup-host.sh:261-298) this costs
+  # kilobytes until the guest diverges. On the documented 'dir' fallback
+  # (:294) there is no CoW at all: the snapshot is a full copy of the root,
+  # several GB and minutes, on EVERY mint. Skip it there — but loudly, and
+  # naming the by-hand command, because a silent skip teaches an operator to
+  # expect a mark that will not be there.
+  if [ "$driver" = dir ]; then
+    echo "box: NOT taking the 'pristine' snapshot — this host's storage pool is the 'dir'" >&2
+    echo "box: driver, which has no copy-on-write, so the mark would be a full multi-GB copy" >&2
+    echo "box: of the root disk on every mint rather than the near-free btrfs one." >&2
+    echo "box: take it by hand if you want it here:  box snapshot $name pristine" >&2
+    echo "box: or fix the host (btrfs is what 'box setup-host' installs by default)." >&2
+    return 0
+  fi
+  # Neither probe answered — an unusual host, or a tier that cannot read the
+  # pool. Proceed, and say what was assumed. The two mistakes are not
+  # symmetric: a snapshot taken on a 'dir' host wastes disk the operator can
+  # see in 'box info' and delete, while a snapshot NOT taken is the pristine
+  # moment gone for good, which is the whole thing this exists to prevent.
+  [ -n "$driver" ] || echo "box: could not read the storage driver — taking 'pristine' anyway," \
+    "assuming copy-on-write (BOX_SNAPSHOT_PRISTINE=0 to skip)." >&2
+  echo "box: marking 'pristine' — the guest after cloud-init, before rig converges anything."
+  if ! incus snapshot create "$instance" pristine </dev/null; then
+    # An undo is not the mint's product: a mint that worked must not be
+    # failed by a checkpoint that didn't.
+    echo "box: WARNING — could not take the 'pristine' snapshot (incus said why above)." >&2
+    echo "box: the box is fine; it just has no pristine mark. The mint continues." >&2
+    return 0
+  fi
+  echo "box: roll back to it any time with:  box restore $name pristine"
+}
+
 cmd_new() {
   [ -n "$name" ] || usage_error "usage: $(synopsis_of new)"
   require_stack
@@ -1108,6 +1217,33 @@ cmd_new() {
     wait_agent "$instance"
     reset_identity "$instance"
     echo "box: cloned $srcref — isolation and auth state carry over from the source."
+    # A clone gets NO 'pristine' of its own (#104). It skips cloud-init and
+    # the rig hook entirely, so the pristine MOMENT never happens here —
+    # anything box marked at clone time would be "whatever the source was",
+    # converged and worked-in, wearing a label that promises pristine Debian.
+    # That is worse than no mark at all, so the mint-path snapshot lives
+    # strictly in the fresh-mint branch below and never runs here.
+    #
+    # What a clone gets instead is INHERITANCE, and it is already correct:
+    # 'incus copy <box>' carries the source's snapshots, so a source that has
+    # a 'pristine' hands the clone a real one — the true pristine state of
+    # the disk this clone descends from. Copying a SNAPSHOT ('--from box/snap')
+    # carries no snapshot list, so that clone starts with none. Both are
+    # honest; neither is invented. Say which one this is rather than leaving
+    # the operator to run 'box info' to find out.
+    # Capture first, THEN read (#124's class). Piping a multi-line incus
+    # writer straight into an early-exit reader lets grep close the pipe on
+    # the first match, SIGPIPE incus, and hand pipefail a 141 — which here
+    # would read as "no pristine" and narrate the WRONG inheritance shape on a
+    # clone that actually has one. Un-racy today at this writer's size, but
+    # the assignment costs nothing and does not depend on that staying true.
+    local snaps; snaps="$(incus snapshot list "$instance" --format csv 2>/dev/null || true)"
+    if printf '%s\n' "$snaps" | grep -q '^pristine,'; then
+      echo "box: it inherited the source's snapshots, 'pristine' among them (box restore $name pristine)."
+    else
+      echo "box: no 'pristine' mark here — a clone has no pristine moment to capture, and box"
+      echo "box: will not label the source's state as one. 'box info $name' lists what it did inherit."
+    fi
   else
     local t="${template:-blank}" m extra=()
     load_template "$t"
@@ -1287,6 +1423,19 @@ cmd_new() {
       echo "  not serving, a VPN resolver the box inherits). Diagnose it:  box doctor" >&2
       die "cloud-init failed — the box is incomplete, so refusing to hand it over"
     fi
+    # The pristine mark (#104, child of rig#62). RIGHT HERE — cloud-init has
+    # finished and rig has not started — the guest is pristine Debian plus
+    # box's seed, and nothing else. That state exists for a few seconds on
+    # every mint and has never been captured; rig#62's "back to pristine
+    # Debian" is exactly this state, so take it while it is true.
+    #
+    # Unconditional within a fresh mint, not gated on T_BOOTSTRAP_ROLE: a
+    # blank box has no rig hook but it does have the same pristine moment,
+    # and 'box restore <box> pristine' should mean one thing on every box.
+    #
+    # NEVER fatal. This is an undo, not the mint's product — a mint that
+    # worked must not be failed by a checkpoint that didn't.
+    snapshot_pristine "$instance" "$name"
     # The tenant convergence (#81): the seed above is thin — the user, tmux,
     # rig — and what the box BECOMES is rig's job. A template that names a
     # bootstrap role gets it auto-run here, as root inside the guest, because

@@ -43,6 +43,18 @@ snapshots, not a secrets store:
 
 Log in once → snapshot → spin up authed boxes from it.
 
+One checkpoint box takes itself: **`pristine`**, marked on every fresh mint
+after cloud-init and before the `rig bootstrap` hook (#104, child of
+heavy-duty/rig#62). That instant — pristine Debian plus box's thin seed, rig
+installed but not yet run — is the state "back to pristine Debian" names, it
+lasts a few seconds, and nobody is standing there to snapshot it. `box
+restore <n> pristine` undoes a tenant role wholesale, because everything the
+creds-free roles do is box-local and file-shaped. A `--from` clone takes no
+`pristine`: it never has the moment, so it inherits its source's snapshots or
+has none, and box refuses to label a worked-in state as pristine. On a `dir`
+pool the mark would be a full copy rather than a CoW one, so the mint skips
+it loudly.
+
 Snapshots are in-box state: `box rm` deletes a box *and* its snapshots, and a
 clone still lives on the same host. The off-host mechanism is `box export` /
 `box import` (#70) — one portable backup tarball, snapshots included by
