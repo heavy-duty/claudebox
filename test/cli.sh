@@ -1137,7 +1137,7 @@ restamp_has() { grep -F 'config set' "$1" | grep -qE "$2"; }
 # --- the write half: a fresh mint ------------------------------------------
 MLOG="$MWORK/mint.log"
 check "mint: a shimmed 'box new' runs to completion" 0 "ready" \
-  mintbox "$MLOG" new --name w1 --template claude --container
+  mintbox "$MLOG" new --name w1 --template claude-box --container
 # Each key on its own check: a single grep for the whole block would go green
 # on a partial stamp, and "which fact was dropped" is the useful failure.
 check "mint: stamps the schema — the stamp's SHAPE, not the box version (#103)" \
@@ -1153,7 +1153,7 @@ check "mint: stamps the mode it minted as (#103)" \
 check "mint: stamps the mode that was ASKED, not only the outcome (#103)" \
   0 "user.box.mode.asked=container" launchline "$MLOG"
 check "mint: stamps the rig role box will auto-run (#103)" \
-  0 "user.box.role=claude" launchline "$MLOG"
+  0 "user.box.role=claude-box" launchline "$MLOG"
 check "mint: stamps which rig converged it — repo (#103)" \
   0 "user.box.rig.repo=heavy-duty/rig" launchline "$MLOG"
 check "mint: stamps which rig converged it — ref (#103)" \
@@ -1168,7 +1168,7 @@ check "mint: stamps the mint time as UTC ISO 8601 (#103)" 0 "" \
 check "mint: the pre-existing boundary tag still rides the same line" \
   0 "user.box=1" launchline "$MLOG"
 check "mint: the pre-existing template stamp is untouched" \
-  0 "user.box.template=claude" launchline "$MLOG"
+  0 "user.box.template=claude-box" launchline "$MLOG"
 check "mint: the pre-existing user stamp is untouched" \
   0 "user.box.user=claude" launchline "$MLOG"
 # Deliberately NOT stamped. limits.* already hold cpu/memory and a duplicate
@@ -1217,7 +1217,7 @@ check "mint: ...and no role either — blank names none (#103)" 1 "" \
 # override, so the two are compared on a value neither can have hardcoded.
 RIGLOG="$MWORK/rig.log"
 export RIG_REPO=someone/rig RIG_REF=probe-ref
-mintbox "$RIGLOG" new --name w5 --template claude --container >/dev/null 2>&1
+mintbox "$RIGLOG" new --name w5 --template claude-box --container >/dev/null 2>&1
 unset RIG_REPO RIG_REF
 check "mint: the rig pin override reaches the STAMP (#103)" 0 "" \
   launch_has "$RIGLOG" 'user\.box\.rig\.repo=someone/rig'
