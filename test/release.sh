@@ -279,6 +279,134 @@ check "CONTRIBUTING: ...and names the guard that enforces it" 0 "" \
   grep -qF 'changelog-armed.sh' "$ROOT/CONTRIBUTING.md"
 
 # ---------------------------------------------------------------------------
+# drill-recorded.sh — a RELEASE tree has a drill record in drill/RUNS.md.
+#
+# The gap this closes is not a drift or a race; it is a rule that was only
+# ever a sentence. CONTRIBUTING.md has said since #96 that the release PR is
+# where the full real-hardware drill hangs — and #95, #114 and #148 all
+# shipped without one, because nothing but a reviewer's memory stood on it.
+#
+# Both states are constructed as real trees, same discipline as the armed
+# block above, and for a sharper reason here: the -dev pass is not a
+# convenience, it is what keeps the guard installable. A version of this rule
+# that fired on every tree would be red on every ordinary PR in the repo and
+# would be switched off inside a day.
+#
+# Every fixture carries its OWN VERSION and its OWN RUNS.md. Reaching for
+# $ROOT/VERSION instead is exactly the coupling #146 had to fix: the suite
+# then passes or fails on whichever state the repo happens to be in, so it
+# goes red on the ceremony tree — the one tree where the release suite most
+# needs to be trustworthy.
+# ---------------------------------------------------------------------------
+DRILLED="$ROOT/.github/scripts/drill-recorded.sh"
+check "drill-recorded: runnable bash" 0 "" bash -n "$DRILLED"
+check "drill-recorded: executable" 0 "" test -x "$DRILLED"
+
+# dtree <dir> <version> <runs-body...> — a two-file tree, self-contained
+dtree() {
+  local d="$WORK/$1" v="$2"; shift 2
+  mkdir -p "$d"
+  printf '%s\n' "$v" > "$d/VERSION"
+  { echo "# Drill run log"; echo; printf '%s\n' "$@"; } > "$d/RUNS.md"
+  echo "$d"
+}
+drilled() { bash "$DRILLED" "$1/RUNS.md" "$1/VERSION"; }
+
+# --- the -dev steady state: nothing to assert ------------------------------
+# No record at all, and that must PASS. This is the case that makes the guard
+# survivable on an ordinary PR.
+T="$(dtree drill-dev 0.8.1-dev 'No drill sections in here at all.')"
+check "drill-recorded: a -dev tree with NO record at all passes" 0 "nothing to assert" drilled "$T"
+check "drill-recorded: ...and says why it declined to judge" 0 "development tree" drilled "$T"
+
+# --- the ceremony tree: a record is required and must carry prose ----------
+T="$(dtree drill-ok 0.9.0 \
+  '## Release drill — 0.9.0 — 2026-07-21' '' '- 47/47 on real hardware' '' \
+  '## Run history' '' '- older prose')"
+check "drill-recorded: a bare VERSION with a matching non-empty record passes" \
+  0 "has a drill record" drilled "$T"
+# The date tail is optional; the heading without it is still a record.
+T="$(dtree drill-nodate 0.9.0 '## Release drill — 0.9.0' '' '- ran it, 47/47')"
+check "drill-recorded: ...and the ' — DATE' tail is optional" 0 "has a drill record" drilled "$T"
+
+T="$(dtree drill-none 0.9.0 '## Run history' '' '- prose about earlier runs')"
+check "drill-recorded: a bare VERSION with NO record fails" 1 "no drill record" drilled "$T"
+check "drill-recorded: ...and the failure names the version" 1 "VERSION is '0.9.0'" drilled "$T"
+check "drill-recorded: ...and names the unblock — run the drill and record it" \
+  1 "RUN THE DRILL" drilled "$T"
+check "drill-recorded: ...and offers the recorded maintainer waiver as the other way out" \
+  1 "WAIVED" drilled "$T"
+
+# A heading with nothing under it is the same failure as no heading: the
+# ceremony wrote the shape and never wrote the evidence.
+T="$(dtree drill-empty 0.9.0 '## Release drill — 0.9.0 — 2026-07-21' '' '' '## Run history' '' '- older prose')"
+check "drill-recorded: a bare VERSION whose record is present but EMPTY fails" \
+  1 "no drill record" drilled "$T"
+
+# --- the version is matched WHOLE, both directions -------------------------
+# release-notes.sh's trap, in a new file: a substring match would let an rc
+# drill stand in for the release it was a candidate for, which is the one
+# thing a release-candidate drill by definition did not measure.
+T="$(dtree drill-rc-only 0.9.0 '## Release drill — 0.9.0-rc1 — 2026-07-20' '' '- the rc drill')"
+check "drill-recorded: a 0.9.0-rc1 record does NOT satisfy 0.9.0" 1 "no drill record" drilled "$T"
+T="$(dtree drill-rel-only 0.9.0-rc1 '## Release drill — 0.9.0 — 2026-07-21' '' '- the release drill')"
+check "drill-recorded: ...and a 0.9.0 record does NOT satisfy 0.9.0-rc1" 1 "no drill record" drilled "$T"
+# ...and with both present, each resolves to its own section and neither
+# borrows the other's prose.
+T="$(dtree drill-both 0.9.0 \
+  '## Release drill — 0.9.0-rc1 — 2026-07-20' '' '- the rc drill' '' \
+  '## Release drill — 0.9.0 — 2026-07-21' '' '- the release drill')"
+check "drill-recorded: with both present, the release resolves to its own" \
+  0 "has a drill record" drilled "$T"
+# The sharp version of the same claim: the rc section is full, the release's
+# own section is EMPTY. If emptiness were judged over anything but this
+# version's own lines, this tree would pass on the rc's prose.
+T="$(dtree drill-borrow 0.9.0 \
+  '## Release drill — 0.9.0-rc1 — 2026-07-20' '' '- the rc drill' '' \
+  '## Release drill — 0.9.0 — 2026-07-21' '')"
+check "drill-recorded: ...and an empty release section cannot borrow the rc's prose" \
+  1 "no drill record" drilled "$T"
+
+# --- degenerate trees refuse rather than pass by accident ------------------
+check "drill-recorded: a missing VERSION refuses by path" 1 "no such file" \
+  bash "$DRILLED" "$WORK/drill-ok/RUNS.md" "$WORK/nope-version"
+mkdir -p "$WORK/drill-empty-ver"; : > "$WORK/drill-empty-ver/VERSION"
+check "drill-recorded: an empty VERSION refuses" 1 "is empty" \
+  bash "$DRILLED" "$WORK/drill-ok/RUNS.md" "$WORK/drill-empty-ver/VERSION"
+# The runs file is only needed once the tree is a release — a -dev tree must
+# not be refused for a file it has no business reading.
+check "drill-recorded: a release tree with a missing runs file refuses by path" \
+  1 "no such file" bash "$DRILLED" "$WORK/nope-runs.md" "$WORK/drill-ok/VERSION"
+check "drill-recorded: ...but a -dev tree does not even look for it" 0 "nothing to assert" \
+  bash "$DRILLED" "$WORK/nope-runs.md" "$WORK/drill-dev/VERSION"
+
+# --- and the tree under test ----------------------------------------------
+check "drill-recorded: THIS tree passes its own guard" 0 "" \
+  bash "$DRILLED" "$ROOT/drill/RUNS.md" "$ROOT/VERSION"
+
+# The guard is only a guard if CI runs it, and only a rule if the document
+# that used to carry the rule now points at it.
+check "ci.yml: runs the drill-recorded guard" 0 "" \
+  grep -qF 'drill-recorded.sh' "$ROOT/.github/workflows/ci.yml"
+check "CONTRIBUTING: names the guard that enforces the drill" 0 "" \
+  grep -qF 'drill-recorded.sh' "$ROOT/CONTRIBUTING.md"
+check "CONTRIBUTING: documents the drill record's heading format" 0 "" \
+  grep -qF '## Release drill — X.Y.Z — DATE' "$ROOT/CONTRIBUTING.md"
+check "CONTRIBUTING: the drill is ONE run over the whole stack, not a queue" 0 "" \
+  grep -qF 'ONE orchestrated run' "$ROOT/CONTRIBUTING.md"
+# The load-bearing correction: box and rig are mutually recursive, so a
+# "release A before you can drill B" rule is not merely bureaucratic, it is
+# unsatisfiable in principle. Pinning the mechanism that dissolves it —
+# mint-time candidate refs — because that is the claim a future editor is
+# most likely to "simplify" back into a linear order.
+check "CONTRIBUTING: ...drilling candidate refs, not released artifacts" 0 "" \
+  grep -qF 'candidate refs, not released artifacts' "$ROOT/CONTRIBUTING.md"
+check "CONTRIBUTING: ...and the RIG_REF gap is stated as outstanding (#81)" 0 "" \
+  grep -qF 'RIG_REF' "$ROOT/CONTRIBUTING.md"
+check "LABELS: documents blocker:drill-pending" 0 "" \
+  grep -qF 'blocker:drill-pending' "$ROOT/LABELS.md"
+
+# ---------------------------------------------------------------------------
 # changelog-monotonic.sh (#122) — no SHIPPED release heading may be DELETED.
 #
 # The complement of the guard above, and the reason it is a separate script:

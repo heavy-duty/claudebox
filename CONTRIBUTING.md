@@ -156,10 +156,78 @@ A release is a PR, and merging it ships it
    stamp passes it by construction — rewriting `## Unreleased` into
    `## X.Y.Z — DATE` adds a heading and removes none.
 
-   This PR is where the release ritual hangs:
-   the full drill on real hardware, recorded in
-   [drill/RUNS.md](drill/RUNS.md) — CI proves the tier's semantics on every
-   PR, a release still proves the boundary.
+   **The drill gates the release, and CI enforces it.** The release PR's
+   flow is: draft → ready → bot round → **drill** → `state:needs-human` →
+   maintainer merge (which *is* the release). CI proves the tier's semantics
+   on every PR; the drill is what proves the VM trust boundary, and it wants
+   real hardware and the better part of an hour, so it runs on the release
+   PR's branch and nowhere else.
+
+   Record it in [drill/RUNS.md](drill/RUNS.md) under its own heading:
+
+   ```markdown
+   ## Release drill — X.Y.Z — DATE
+   ```
+
+   ...with the run under it — what it measured, what it found, what it cost.
+   [.github/scripts/drill-recorded.sh](.github/scripts/drill-recorded.sh)
+   asserts exactly that on every tree with a bare `VERSION`, which is every
+   `release` PR and the merge that publishes it; a `-dev` tree passes with
+   nothing to assert. It is **no longer a thing a reviewer has to remember**.
+
+   It became CI's job because remembering did not work. The sentence this
+   paragraph replaces described a step **no release had ever performed** —
+   `drill/RUNS.md` carried no `## Release drill` section at all — and #95,
+   #114 and #148 all shipped through the gap as a `VERSION` bump plus a
+   `CHANGELOG.md` stamp. The one time it was caught was the one time somebody
+   happened to look, which is not a gate.
+
+   **The drill is ONE orchestrated run over the whole stack**, not three
+   drills in a queue. box and rig are **mutually recursive**, so there is no
+   linear order to put them in: rig sits *below* box as the host-builder
+   (`rig bootstrap --host yes` installs box and runs `setup-host`) and
+   *above* it as the guest-converger (a `box new` seed's cloud-init curls
+   rig's installer and runs `rig bootstrap <tenant>-box`). box's own source
+   says as much — the seeds "invert the rig→box install edge (rig#28: rig
+   installs box on hosts; now box guests install rig)". The run goes:
+
+   1. `rig bootstrap --host yes` on a bare Debian host — installs box, runs
+      `setup-host`
+   2. `box new` mints a creds-free seed
+   3. the seed converges itself via `rig bootstrap <tenant>-box`
+   4. cast on top
+
+   It drills **candidate refs, not released artifacts.** `RIG_REPO` and
+   `RIG_REF` are mint-time environment variables (defaults
+   `heavy-duty/rig` and `main`, `bin/box`), so a run pins the exact commits
+   under test. That dissolves the chicken-and-egg: **no repo has to be
+   released before another can be drilled.** And drilling the candidate *is*
+   drilling the release — a release PR's diff is `VERSION` plus
+   `CHANGELOG.md` and nothing else, so no executable byte differs between
+   the tree that was drilled and the tree that ships.
+
+   One run emits **one shared run ID**. Each repo records its own legs under
+   its own `## Release drill — X.Y.Z — DATE`, citing that run ID and the
+   other two repos' commit SHAs, so the three records reconcile into a single
+   run afterwards. The guard reads only this repo's file — it asserts box's
+   record exists, never the other two.
+
+   **A known gap, and box is where it belongs.** A *released* box still
+   defaults `RIG_REF` to `main`, so what a user mints a week after a drill is
+   not the combination that was drilled — the guest converges against
+   whatever rig's main has become since. Pinning `RIG_REF` to a released rig
+   tag in the templates is the outstanding step from
+   [#81](https://github.com/heavy-duty/box/issues/81) (rig#32 step 5), and it
+   is what would make a drilled combination reproducible for users. This PR
+   does not fix it; box's source already says the two directions "track main
+   unpinned today, said honestly ... until a release flow exists".
+
+   A maintainer **waiver** is possible, and it is still written down. The
+   guard requires a *record*, not a passing result, so a release that must
+   ship without a full drill puts the section under the same heading and says
+   plainly that the drill was waived and why. Skipping then costs a
+   deliberate, reviewable line in the diff — which is precisely what the
+   three silent skips above did not.
 2. **The maintainer's merge IS the release.**
    [release.yml](.github/workflows/release.yml) fires on the merged,
    `release`-labeled PR and asserts before creating anything: `VERSION` at

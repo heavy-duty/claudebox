@@ -36,6 +36,22 @@ PR carries as many as apply.
 | `blocker:conflict` | `#B60205` | GitHub says `CONFLICTING` — the agent owes a **rebase** | it merges cleanly |
 | `blocker:ci-red` | `#B60205` | a check failed — the agent owes a **fix**, which a rebase will not provide | checks are green |
 | `blocker:unrequested` | `#E99695` | this head has no verdict from somebody — never reviewed, or staled by a push — and **nobody was asked** for one | reviews are requested |
+| `blocker:drill-pending` | `#B60205` | a `release` PR whose version has no drill record in [drill/RUNS.md](drill/RUNS.md) — the ceremony is **correct but unevidenced** | the drill is run and recorded (or a waiver is recorded) under `## Release drill — X.Y.Z` |
+
+`blocker:drill-pending` is the one blocker that says the diff is *fine*. The
+version is stamped, the changelog is right, CI's other guards are green — what
+is missing is the evidence that the release was proven on real hardware, which
+[.github/scripts/drill-recorded.sh](.github/scripts/drill-recorded.sh) refuses
+to let a release ship without (CONTRIBUTING.md, "Releases"). Naming it
+separately from `blocker:ci-red` matters because the two owe different work: a
+red check is a fix in the branch, a pending drill is an hour on a real host.
+
+It must be **created by a maintainer account** — the bot account gets a `403`
+creating labels, so the labels workflow's bootstrap dispatch cannot mint it.
+Until it exists in the repo, `blocked` stands in: it is the closest true thing
+(the PR is waiting on something outside itself) and, usefully, the staleness
+sweep already skips it, so a release parked overnight on a drill does not
+collect a `stale`.
 
 One rule joins the axes: **`state:needs-human` requires zero blockers.** Any
 blocker means the work is the agent's, whatever the review round says.

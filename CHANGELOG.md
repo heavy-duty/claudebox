@@ -17,6 +17,7 @@ which records not just what changed but what each drill run proved.
 - Every fresh mint marks a `pristine` snapshot, before rig converges anything
   (#104, heavy-duty/rig#62)
 - A mint that converges a tenant role marks a `bootstrapped` snapshot (#130)
+- CI refuses a release PR with no drill record in `drill/RUNS.md`
 
 ### Changed
 
