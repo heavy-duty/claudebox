@@ -3,7 +3,7 @@
 **Headless, trust-less, throwaway dev VMs.** One command mints a fresh,
 network-isolated Incus box from a **template**; the coding-agent templates
 hand you a CLI agent on Debian 13 — `claude-box` (Claude Code), `codex-box`
-(OpenAI Codex), `grok-box` (xAI Grok) — **box mints, [rig](https://github.com/heavy-duty/rig)
+(OpenAI Codex), `grok-box` (xAI Grok), `kimi-box` (Moonshot Kimi) — **box mints, [rig](https://github.com/heavy-duty/rig)
 converges**: the template is a thin seed, and the agent tooling lands via a
 creds-free `rig bootstrap` role auto-run at mint
 ([#81](https://github.com/heavy-duty/box/issues/81)). The box is the product
@@ -222,7 +222,7 @@ box shell work                              # enter as the template's user
 ```
 
 Pick whichever coding-agent template you like — `claude-box`, `codex-box`,
-`grok-box` — or `blank` for none. Inside the box, authenticate as needed. The
+`grok-box`, `kimi-box` — or `blank` for none. Inside the box, authenticate as needed. The
 `claude-box` template looks like this; the others follow the same shape with
 their own login step:
 
@@ -245,6 +245,7 @@ another is just another directory. What ships today:
 | `claude-box`  | Claude Code, creds-free — where this project started               |
 | `codex-box`   | OpenAI Codex CLI, creds-free                                       |
 | `grok-box`    | xAI Grok CLI, creds-free                                           |
+| `kimi-box`    | Moonshot Kimi CLI, creds-free                                      |
 | `staging-box` | Server-class: docker + sshd hardening via rig; VM-only, autostarts |
 
 **Templates are thin seeds; rig does the becoming**
@@ -256,7 +257,7 @@ pin tokens below). The seed is deliberately small — the tenant user, tmux,
 and [rig](https://github.com/heavy-duty/rig) preinstalled, nothing that
 joins a tailnet or admits credentials — and after cloud-init settles, box
 auto-runs the template's **creds-free** tenant role inside the guest
-(`rig bootstrap claude-box` / `codex-box` / `grok-box` / `staging-box`,
+(`rig bootstrap claude-box` / `codex-box` / `grok-box` / `kimi-box` / `staging-box`,
 [rig#31](https://github.com/heavy-duty/rig/issues/31); the roles carry a
 family suffix — `-box` for box tenants, `-server` for fleet machines — and a
 template is named for the role it converges,

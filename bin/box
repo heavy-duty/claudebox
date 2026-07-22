@@ -265,7 +265,7 @@ one of its snapshots — login state, git creds and clones carry over,
 isolation is preserved, and the clone knows its template's user without
 being told.
 
-A tenant template (claude-box, codex-box, grok-box, staging-box) is a THIN seed — the user,
+A tenant template (claude-box, codex-box, grok-box, kimi-box, staging-box) is a THIN seed — the user,
 tmux, rig (#81) — and after cloud-init box auto-runs the creds-free tenant
 role inside it ('rig bootstrap <role>', rig#31): that role installs the
 agent CLI / server posture and the agent-context file. rig is preinstalled

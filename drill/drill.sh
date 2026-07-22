@@ -492,10 +492,10 @@ fi
 
 # --- templates: the mint surface is itself a surface to test ----------------
 tpl_missing=""
-for t in blank claude-box codex-box grok-box; do
+for t in blank claude-box codex-box grok-box kimi-box; do
   box templates 2>/dev/null | grep -q "^  $t" || tpl_missing="$tpl_missing $t"
 done
-[ -z "$tpl_missing" ] && ok "templates: lists blank, claude-box, codex-box, grok-box" \
+[ -z "$tpl_missing" ] && ok "templates: lists blank, claude-box, codex-box, grok-box, kimi-box" \
                       || no "templates listing is missing:$tpl_missing"
 box new --name tpl --template nosuch 2>&1 | grep -q 'no such template' \
   && ok "unknown template refused, points at 'box templates'" || no "an unknown template was not refused"

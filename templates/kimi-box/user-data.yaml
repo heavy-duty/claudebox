@@ -1,0 +1,33 @@
+#cloud-config
+# A thin, creds-free seed (#81): the tenant user, tmux (#65), and rig —
+# nothing that joins a tailnet or admits credentials, no agent CLI, no
+# docker, no context-file heredoc. Everything this box becomes comes from
+# 'rig bootstrap kimi-box' (heavy-duty/rig#31), which box auto-runs after
+# mint; the agent-context file — including the #80 guard (never run
+# 'box setup-host' or the drill inside a box) — is rendered by that role,
+# once, instead of being copy-pasted per template.
+users:
+  - name: kimi
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+package_update: true
+# tmux: 'box tmux' runs 'tmux new-session' INSIDE the box (#65).
+# curl + ca-certificates: the rig installer below rides them, and a bare
+# cloud image is not guaranteed to ship either.
+packages:
+  - tmux
+  - curl
+  - ca-certificates
+runcmd:
+  # Preinstall rig so the box can converge — and re-converge — via
+  # 'rig bootstrap kimi-box'. @RIG_REPO@/@RIG_REF@ are the pin point (#81):
+  # box substitutes them at mint from the RIG_REPO/RIG_REF environment
+  # (default heavy-duty/rig @ main — unpinned, tracking main, the same
+  # honest edge as rig's own unpinned box install, until rig#32 ships a
+  # release flow). The pin covers both the installer fetched AND the tree
+  # it installs, so a branch under review is testable end to end.
+  # HOME=/root: cloud-init runs runcmd as root but with NO $HOME in the
+  # environment, and the rig installer (set -u) reads $HOME for its DEST —
+  # measured live: the mint died with "HOME: unbound variable" without it.
+  - curl -fsSL https://raw.githubusercontent.com/@RIG_REPO@/@RIG_REF@/install.sh | HOME=/root RIG_REPO="@RIG_REPO@" RIG_REF="@RIG_REF@" bash
