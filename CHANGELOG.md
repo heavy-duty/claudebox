@@ -5,6 +5,10 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Added
+
+- `kimi-box` template — the Moonshot Kimi CLI agent seed (#158; rig#109's tenant)
+
 ## 0.9.0 — 2026-07-21
 
 ### Added

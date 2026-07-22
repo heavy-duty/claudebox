@@ -1,8 +1,8 @@
 # box design
 
 `box` is a CLI that mints and manages **trust-less, network-isolated VMs
-with a coding agent installed** (`claude-box`, `codex-box`, `grok-box`, or
-`blank` for none). It is infrastructure, not a project provisioner.
+with a coding agent installed** (`claude-box`, `codex-box`, `grok-box`,
+`kimi-box`, or `blank` for none). It is infrastructure, not a project provisioner.
 
 See issue #3 for the full reframe and rationale. This doc captures the durable
 design decisions.
@@ -94,7 +94,7 @@ A template is a **thin, creds-free seed** — base image, the tenant user,
 tmux, and [rig](https://github.com/heavy-duty/rig) preinstalled — and what
 the box *becomes* lives in rig's bootstrap roles (rig#31): box auto-runs the
 template's creds-free tenant role after cloud-init (`rig bootstrap claude-box`
-/ `codex-box` / `grok-box` / `staging-box` — the roles carry a family suffix,
+/ `codex-box` / `grok-box` / `kimi-box` / `staging-box` — the roles carry a family suffix,
 `-box` for box tenants and `-server` for fleet machines, and the templates are
 named for the roles they converge, rig#76), which installs the agent CLI or
 server posture. The split is deliberate: cloud-init is a first-boot one-shot —
