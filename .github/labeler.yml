@@ -1,4 +1,4 @@
-# path → scope:* map for actions/labeler — the PR half of LABELS.md's scope
+# path → scope:* map for actions/labeler — the PR half of .ceremony/LABELS.md's scope
 # story (issues are hand-scoped at triage; paths only exist on PRs). Additive
 # only: sync-labels stays off in labels.yml, so a hand-applied scope survives.
 "scope:cli":

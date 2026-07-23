@@ -32,9 +32,9 @@ jobs:
         # `.github/` — and the whole release path (changelog-armed.sh, which
         # gates every PR, release-notes.sh, labels-reconcile.sh) went unlinted
         # while the comment above told the next author it was covered.
-        # Measured on this tree: dotglob adds exactly those three and nothing
-        # else — a checkout's `.git` carries no `*.sh` (its hooks ship as
-        # `*.sample`), so `**/*.sh` does not wander into it.
+        # Measured when this invariant was introduced: dotglob added exactly
+        # those three and nothing else — a checkout's `.git` carries no `*.sh`
+        # (its hooks ship as `*.sample`), so `**/*.sh` does not wander into it.
         #
         # The sweep below is the CLASS check, same shape as the eof_guard_sweep
         # in test/cli.sh (#112): the one-time fix is `dotglob`, but what keeps
