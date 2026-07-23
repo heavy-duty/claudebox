@@ -32,9 +32,9 @@ jobs:
         # `.github/` — and the whole release path (changelog-armed.sh, which
         # gates every PR, release-notes.sh, labels-reconcile.sh) went unlinted
         # while the comment above told the next author it was covered.
-        # Measured on this tree: dotglob adds exactly those three and nothing
-        # else — a checkout's `.git` carries no `*.sh` (its hooks ship as
-        # `*.sample`), so `**/*.sh` does not wander into it.
+        # Measured when this invariant was introduced: dotglob added exactly
+        # those three and nothing else — a checkout's `.git` carries no `*.sh`
+        # (its hooks ship as `*.sample`), so `**/*.sh` does not wander into it.
         #
         # The sweep below is the CLASS check, same shape as the eof_guard_sweep
         # in test/cli.sh (#112): the one-time fix is `dotglob`, but what keeps
@@ -58,8 +58,6 @@ jobs:
           shellcheck -x "${files[@]}"
       - name: cli tests
         run: bash test/cli.sh
-      - name: labels state-machine tests
-        run: bash test/labels-reconcile.sh
       - name: release-flow tests
         run: bash test/release.sh
       # The changelog is ARMED for the next entry (#108). Its own step rather
@@ -67,7 +65,7 @@ jobs:
       # tree, not about the release machinery, so when it goes red the log
       # says which check found the drift without anyone reading a suite.
       - name: changelog is armed for the next entry
-        run: bash .github/scripts/changelog-armed.sh
+        uses: heavy-duty/ceremony/actions/changelog-armed@0.1.0
       # ...and no SHIPPED release heading was deleted or DUPLICATED (#122, #143).
       # Its own step for the same reason as the one above — when it goes red the
       # log names the invariant that broke — but a DIFFERENT invariant: armed is
@@ -104,11 +102,11 @@ jobs:
       # every ordinary push and PR, the script no-ops green by design, so
       # running it everywhere costs nothing and closes the route.
       - name: a release tree has a drill record
-        run: bash .github/scripts/drill-recorded.sh
+        uses: heavy-duty/ceremony/actions/drill-recorded@0.1.0
       - name: no shipped changelog heading was deleted or duplicated
-        env:
-          CHANGELOG_MONOTONIC_STRICT: '1'
-        run: bash .github/scripts/changelog-monotonic.sh "origin/${{ github.base_ref || github.ref_name }}"
+        uses: heavy-duty/ceremony/actions/changelog-monotonic@0.1.0
+      - name: vendored ceremony doctrine matches the pin
+        uses: heavy-duty/ceremony/actions/docs-sync@0.1.0
 
   # The multi-user rehearsal, on a REAL incus — a GitHub runner is root on a
   # disposable VM, which is exactly the substrate the rehearsal needs. It runs
