@@ -13,6 +13,10 @@ which records not just what changed but what each drill run proved.
 
 - `kimi-box` template — the Moonshot Kimi CLI agent seed (#158; rig#109's tenant)
 
+## 0.9.1 — guard demo
+
+- This temporary section makes the bare-version changelog shape valid.
+
 ## 0.9.0 — 2026-07-21
 
 ### Added
