@@ -1,78 +1,15 @@
 name: labels
-# The automation LABELS.md promises. Two halves:
-#   scope     — path-derived scope:* labels on PRs (actions/labeler)
-#   reconcile — the state:* machine + the stale sweep (.github/scripts/labels-reconcile.sh)
-#
-# pull_request_target, not pull_request: every PR here arrives from a fork,
-# where pull_request (and pull_request_review) run with a READ-ONLY token and
-# cannot label anything. _target is safe in this workflow because no PR code
-# is ever checked out or executed — labeler reads changed paths via the API,
-# and reconcile checks out the BASE branch only. Keep it that way.
-#
-# There is no pull_request_review_target, so a review landing cannot wake this
-# workflow directly — and the */15 cron is advisory: GitHub deprioritises short
-# intervals hard enough that a quiet repo goes hours between ticks. So the
-# handoff wakes the sweep itself: the author sets state:needs-human when handing
-# the PR to the maintainer (CONTRIBUTING step 6), and `labeled` fires this
-# workflow, which confirms or corrects that optimistic write within seconds. The
-# cron stays as the last resort, for the round an agent forgets to hand off.
-#
-# This cannot loop: the reconciler's own label writes use GITHUB_TOKEN, and
-# GitHub does not create workflow runs from GITHUB_TOKEN-triggered events. Agent
-# writes use a PAT and therefore do trigger — exactly the asymmetry wanted.
 on:
-  schedule:
-    - cron: "*/15 * * * *"
-  workflow_dispatch: # also bootstraps missing labels — run once on a fresh repo
+  schedule: [{cron: "*/15 * * * *"}] # advisory; the handoff label is the real wake
+  workflow_dispatch:                 # bootstraps missing labels on a fresh repo
   pull_request_target:
-    types:
-      [
-        opened,
-        reopened,
-        ready_for_review,
-        converted_to_draft,
-        synchronize,
-        labeled,
-        unlabeled,
-      ]
-
+    types: [opened, reopened, ready_for_review, converted_to_draft, synchronize, labeled, unlabeled]
+  issues:
+    types: [opened, labeled, unlabeled, assigned, unassigned, closed]
 permissions:
   contents: read
   issues: write
   pull-requests: write
-
 jobs:
-  scope:
-    # Not on labeled/unlabeled: those events change no paths, so labeler has
-    # nothing new to derive — and label churn is precisely what they are.
-    if: >-
-      github.event_name == 'pull_request_target' &&
-      github.event.action != 'labeled' &&
-      github.event.action != 'unlabeled'
-    runs-on: ubuntu-latest
-    concurrency:
-      group: labels-scope-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    steps:
-      - uses: actions/labeler@v5
-        with:
-          # additive only — a hand-applied scope must survive the machine
-          sync-labels: false
-
-  reconcile:
-    runs-on: ubuntu-latest
-    # ONE shared group: every reconcile sweeps every open PR, so cron and
-    # PR-event runs must serialize or two sweeps race the same PR's labels
-    # and both pass the request-the-human-once guard. GitHub keeps at most
-    # one queued run per group (older queued runs are superseded), which
-    # coalesces bursts instead of piling them up.
-    concurrency:
-      group: labels-reconcile
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v4 # base branch only — never the PR's code
-      - name: reconcile state + stale
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: bash .github/scripts/labels-reconcile.sh
+  labels:
+    uses: heavy-duty/ceremony/.github/workflows/labels.yml@0.1.0
