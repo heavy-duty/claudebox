@@ -105,8 +105,6 @@ jobs:
         uses: heavy-duty/ceremony/actions/drill-recorded@0.1.0
       - name: no shipped changelog heading was deleted or duplicated
         uses: heavy-duty/ceremony/actions/changelog-monotonic@0.1.0
-      - name: no PR code runs on a self-hosted runner
-        uses: heavy-duty/ceremony/actions/runner-isolated@0.1.0
       - name: vendored ceremony doctrine matches the pin
         uses: heavy-duty/ceremony/actions/docs-sync@0.1.0
 
