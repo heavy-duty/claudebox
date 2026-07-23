@@ -3,7 +3,7 @@
 History before 0.5.0 lives in git and in [drill/RUNS.md](drill/RUNS.md),
 which records not just what changed but what each drill run proved.
 
-## Unreleased
+## Guard demo
 
 ### Changed
 
