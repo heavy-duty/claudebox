@@ -5,6 +5,10 @@ which records not just what changed but what each drill run proved.
 
 ## Unreleased
 
+### Changed
+
+- Release and repository governance now use the shared ceremony pinned at `0.1.0` (heavy-duty/ceremony#14)
+
 ### Added
 
 - `kimi-box` template — the Moonshot Kimi CLI agent seed (#158; rig#109's tenant)
